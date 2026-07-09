@@ -1,5 +1,5 @@
 # =============================================================================
-#  BillFlow By EllowLabs  –  Professional Edition v2.5
+#  BillFlow By EllowLabs  –  Professional Edition v2.8
 #  Complete rewrite with enhanced UI/UX, performance, and code quality.
 # =============================================================================
 import tkinter as tk
@@ -22,14 +22,7 @@ from pathlib import Path
 from typing import Dict, Any, List, Optional, Tuple, Type
 import shutil
 from enum import Enum
-
-# --- Windows printing support ---
-try:
-    if sys.platform == "win32":
-        import win32api
-        import win32print
-except ImportError:
-    win32api = win32print = None
+from contextlib import closing
 
 # --- PyMuPDF ---
 try:
@@ -51,25 +44,52 @@ from reportlab.lib.fonts import addMapping
 
 
 # =============================================================================
-#  CONSTANTS
+#  CONSTANTS & PATHS
 # =============================================================================
-BASE_DIR      = Path(__file__).resolve().parent
-DB_NAME       = BASE_DIR / "invoices.db"
-CONFIG_FILE   = BASE_DIR / "config.json"
-LOG_FILE      = BASE_DIR / "invoice_log.txt"
-ASSETS_DIR    = BASE_DIR / "assets"
-INVOICES_DIR  = BASE_DIR / "invoices"
+def _resource_root() -> Path:
+    """Return the read-only root containing resources bundled by PyInstaller."""
+    if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+        return Path(sys._MEIPASS)
+    return Path(__file__).resolve().parent
 
-for _dir in [ASSETS_DIR, INVOICES_DIR]:
-    _dir.mkdir(exist_ok=True)
+RESOURCE_DIR        = _resource_root()
+RESOURCE_ASSETS_DIR = RESOURCE_DIR / "assets"
+FONTS_DIR           = RESOURCE_DIR / "fonts"
+
+# Mutable application state mapped to Windows ProgramData
+PROGRAM_DATA_DIR = Path(os.environ.get("PROGRAMDATA", r"C:\ProgramData"))
+DATA_DIR         = PROGRAM_DATA_DIR / "EllowLabs" / "BillFlow"
+ASSETS_DIR       = DATA_DIR / "assets"
+INVOICES_DIR     = DATA_DIR / "invoices"
+LOGS_DIR         = DATA_DIR / "logs"
+DB_NAME          = DATA_DIR / "invoices.db"
+CONFIG_FILE      = DATA_DIR / "config.json"
+LOG_FILE         = LOGS_DIR / "BillFlow.log"
+
+def _initialize_environment():
+    """Create mutable directories and copy default assets on first launch."""
+    for _dir in (DATA_DIR, ASSETS_DIR, INVOICES_DIR, LOGS_DIR):
+        _dir.mkdir(parents=True, exist_ok=True)
+    
+    # Copy default assets from the EXE to ProgramData if they don't exist
+    if RESOURCE_ASSETS_DIR.exists():
+        for asset in RESOURCE_ASSETS_DIR.iterdir():
+            if asset.is_file():
+                dest = ASSETS_DIR / asset.name
+                if not dest.exists():
+                    try:
+                        shutil.copy2(asset, dest)
+                    except Exception as e:
+                        print(f"Failed to copy asset {asset.name}: {e}")
+
+_initialize_environment()
 
 FONT_FAMILY          = "Segoe UI"
-APP_NAME          = "BillFlow by EllowLabs"
-APP_VERSION       = "v2.5"
-APP_BUILD_VERSION = "2.5.0"
-APP_RELEASE_DATE  = "22 June 2026"
-
-APP_TAGLINE = "Invoices That Work for You"
+APP_NAME             = "BillFlow by EllowLabs"
+APP_VERSION          = "v2.8"
+APP_BUILD_VERSION    = "2.8.0"
+APP_RELEASE_DATE     = "06 July 2026"
+APP_TAGLINE          = "Invoices That Work for You"
 
 APP_ATTRIBUTION = (
     "Designed and Developed by Sarwan Yadav\n"
@@ -79,10 +99,11 @@ APP_ATTRIBUTION = (
 DB_DATE_FORMAT       = "%Y-%m-%d"
 DISPLAY_DATE_FORMAT  = "%d %b %Y"
 PAYMENT_MODES        = ['Cash', 'UPI', 'Bank Transfer', 'Card', 'Cheque']
-APP_LOGO_PNG         = ASSETS_DIR / "app_logo.png"
-APP_LOGO_ICO         = ASSETS_DIR / "app_logo.ico"
 
-# Treeview row badge colours per status
+# For UI, read directly from the EXE MEIPASS for speed and reliability
+APP_LOGO_PNG         = RESOURCE_ASSETS_DIR / "app_logo.png"
+APP_LOGO_ICO         = RESOURCE_ASSETS_DIR / "app_logo.ico"
+
 STATUS_BADGE = {
     "PAID":          {"foreground": "#ffffff", "background": "#059669"},
     "DUE":           {"foreground": "#ffffff", "background": "#DC2626"},
@@ -90,13 +111,11 @@ STATUS_BADGE = {
     "COMPLIMENTARY": {"foreground": "#ffffff", "background": "#2563EB"},
 }
 
-
 class InvoiceStatus(Enum):
     PAID          = "Paid"
     DUE           = "Due"
     PARTIAL       = "Partial"
     COMPLIMENTARY = "Complimentary"
-
 
 # =============================================================================
 #  LOGGING
@@ -111,15 +130,13 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-
 # =============================================================================
 #  FONTS
 # =============================================================================
 def register_fonts() -> str:
     try:
-        fonts_dir = BASE_DIR / "fonts"
-        reg  = fonts_dir / "NotoSans-Regular.ttf"
-        bold = fonts_dir / "NotoSans-Bold.ttf"
+        reg  = FONTS_DIR / "NotoSans-Regular.ttf"
+        bold = FONTS_DIR / "NotoSans-Bold.ttf"
         if reg.exists() and bold.exists():
             pdfmetrics.registerFont(TTFont("NotoSans",      reg))
             pdfmetrics.registerFont(TTFont("NotoSans-Bold", bold))
@@ -130,9 +147,7 @@ def register_fonts() -> str:
         logger.warning(f"Could not register custom fonts: {exc}")
     return "Helvetica"
 
-
 PDF_FONT = register_fonts()
-
 
 # =============================================================================
 #  CONFIGURATION
@@ -143,11 +158,10 @@ def get_default_config() -> Dict[str, Any]:
         "user_details":    {"name": "Your Name/Company",      "contact_info": "email@example.com\n+91 XXXXX XXXXX"},
         "company_details": {"name": APP_NAME, "description": APP_TAGLINE, "gstin": "22AAAAA0000A1Z5"},
         "payment_details": {"upi_id": "yourupi@bank",         "payment_terms": "Due upon receipt"},
-        "asset_paths":     {"logo": "assets/logo.png",        "signature": "assets/sign.png", "upi_qr_code": "assets/upi_qr.png"},
+        "asset_paths":     {"logo": "assets/app_logo.png",    "signature": "assets/sign.png", "upi_qr_code": "assets/upi_qr.png"},
         "pdf_settings":    {"footer_message": "Thank you for your business!"},
         "currency_symbol": "₹",
     }
-
 
 def load_config() -> Dict[str, Any]:
     if not CONFIG_FILE.exists():
@@ -160,11 +174,9 @@ def load_config() -> Dict[str, Any]:
     except Exception:
         return get_default_config()
 
-
 def _save_config_raw(data: Dict[str, Any]):
     with open(CONFIG_FILE, "w", encoding="utf-8") as fh:
         json.dump(data, fh, indent=4)
-
 
 def save_config(data: Dict[str, Any]):
     _save_config_raw(data)
@@ -172,10 +184,8 @@ def save_config(data: Dict[str, Any]):
     CONFIG          = data
     CURRENCY_SYMBOL = data.get("currency_symbol", "₹")
 
-
 CONFIG          = load_config()
 CURRENCY_SYMBOL = CONFIG.get("currency_symbol", "₹")
-
 
 # =============================================================================
 #  HELPERS
@@ -188,7 +198,6 @@ def parse_date(date_str: Optional[str], in_fmt: str, out_fmt: str) -> str:
     except (ValueError, TypeError):
         return date_str
 
-
 def load_app_logo_image(master: tk.Misc) -> Optional[tk.PhotoImage]:
     if APP_LOGO_PNG.exists():
         try:
@@ -197,10 +206,18 @@ def load_app_logo_image(master: tk.Misc) -> Optional[tk.PhotoImage]:
             logger.warning(f"Could not load app logo image: {exc}")
     return None
 
+def configure_windows_app_identity() -> None:
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+            "EllowLabs.BillFlow.1.0"
+        )
+    except Exception as exc:
+        logger.warning("Could not set Windows application identity: %s", exc)
 
 class ToolTip:
-    """Lightweight hover tooltip."""
-
     def __init__(self, widget: tk.Widget, text: str, delay: int = 500):
         self.widget = widget
         self.text   = text
@@ -233,55 +250,104 @@ class ToolTip:
                  borderwidth=1, padx=7, pady=4, font=(FONT_FAMILY, 9),
                  justify="left", wraplength=280).pack()
 
-
 # =============================================================================
 #  DATABASE
 # =============================================================================
 class DatabaseManager:
-
     def __init__(self, db_path: Path):
         self.db_path = db_path
         self._init_db()
 
-    # ------------------------------------------------------------------  connection
     def _conn(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
         return conn
 
-    # ------------------------------------------------------------------  init
     def _init_db(self):
-        with self._conn() as c:
-            c.execute("""
-                CREATE TABLE IF NOT EXISTS invoices (
-                    invoice_number        TEXT PRIMARY KEY,
-                    bill_to               TEXT NOT NULL,
-                    client_contact        TEXT,
-                    client_gstin          TEXT,
-                    your_name             TEXT NOT NULL,
-                    your_contact          TEXT,
-                    items                 TEXT NOT NULL,
-                    amount_paid           REAL    DEFAULT 0,
-                    tax_rate              REAL    DEFAULT 0,
-                    invoice_date          TEXT,
-                    payment_date          TEXT,
-                    status                TEXT    DEFAULT "Due",
-                    payment_terms         TEXT,
-                    payment_mode          TEXT,
-                    show_qr_code          INTEGER DEFAULT 1,
-                    is_complimentary      INTEGER DEFAULT 0,
-                    is_gst_invoice        INTEGER DEFAULT 1,
-                    global_discount_value REAL    DEFAULT 0,
-                    global_discount_type  TEXT    DEFAULT 'amount'
-                )
-            """)
-            existing = {r["name"] for r in c.execute("PRAGMA table_info(invoices)").fetchall()}
-            for col, ctype in {"advance_amount": "REAL DEFAULT 0", "advance_date": "TEXT"}.items():
-                if col not in existing:
-                    c.execute(f"ALTER TABLE invoices ADD COLUMN {col} {ctype}")
-            c.commit()
+        with closing(self._conn()) as c:
+            with c:
+                # Core invoices table
+                c.execute("""
+                    CREATE TABLE IF NOT EXISTS invoices (
+                        invoice_number        TEXT PRIMARY KEY,
+                        bill_to               TEXT NOT NULL,
+                        client_contact        TEXT,
+                        client_gstin          TEXT,
+                        your_name             TEXT NOT NULL,
+                        your_contact          TEXT,
+                        items                 TEXT NOT NULL,
+                        amount_paid           REAL    DEFAULT 0,
+                        tax_rate              REAL    DEFAULT 0,
+                        invoice_date          TEXT,
+                        payment_date          TEXT,
+                        status                TEXT    DEFAULT "Due",
+                        payment_terms         TEXT,
+                        payment_mode          TEXT,
+                        show_qr_code          INTEGER DEFAULT 1,
+                        is_complimentary      INTEGER DEFAULT 0,
+                        is_gst_invoice        INTEGER DEFAULT 1,
+                        global_discount_value REAL    DEFAULT 0,
+                        global_discount_type  TEXT    DEFAULT 'amount'
+                    )
+                """)
+                
+                # Client Address Book table
+                c.execute("""
+                    CREATE TABLE IF NOT EXISTS clients (
+                        name TEXT PRIMARY KEY,
+                        contact TEXT,
+                        gstin TEXT
+                    )
+                """)
+                
+                # Product & Service Catalog table
+                c.execute("""
+                    CREATE TABLE IF NOT EXISTS catalog (
+                        title TEXT PRIMARY KEY,
+                        description TEXT,
+                        amount REAL
+                    )
+                """)
+                
+                existing = {r["name"] for r in c.execute("PRAGMA table_info(invoices)").fetchall()}
+                for col, ctype in {
+                    "advance_amount": "REAL DEFAULT 0", 
+                    "advance_date": "TEXT",
+                    "gst_type": "TEXT DEFAULT 'CGST/SGST'"
+                }.items():
+                    if col not in existing:
+                        c.execute(f"ALTER TABLE invoices ADD COLUMN {col} {ctype}")
 
-    # ------------------------------------------------------------------  queries
+    def get_all_clients(self) -> List[Dict]:
+        with closing(self._conn()) as c:
+            return [dict(r) for r in c.execute("SELECT * FROM clients ORDER BY name").fetchall()]
+
+    def save_client(self, name: str, contact: str, gstin: str):
+        if not name: return
+        with closing(self._conn()) as c:
+            with c:
+                c.execute("""
+                    INSERT INTO clients (name, contact, gstin) 
+                    VALUES (?, ?, ?) 
+                    ON CONFLICT(name) DO UPDATE SET 
+                    contact=excluded.contact, gstin=excluded.gstin
+                """, (name, contact, gstin))
+
+    def get_all_catalog_items(self) -> List[Dict]:
+        with closing(self._conn()) as c:
+            return [dict(r) for r in c.execute("SELECT * FROM catalog ORDER BY title").fetchall()]
+
+    def save_catalog_item(self, title: str, description: str, amount: float):
+        if not title: return
+        with closing(self._conn()) as c:
+            with c:
+                c.execute("""
+                    INSERT INTO catalog (title, description, amount) 
+                    VALUES (?, ?, ?) 
+                    ON CONFLICT(title) DO UPDATE SET 
+                    description=excluded.description, amount=excluded.amount
+                """, (title, description, amount))
+
     def get_all_invoices(self, search_query: str = "", status_filter: str = "All") -> List[sqlite3.Row]:
         clauses, params = [], []
         if search_query:
@@ -292,54 +358,55 @@ class DatabaseManager:
             clauses.append("UPPER(status) = ?")
             params.append(status_filter.upper())
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
-        with self._conn() as c:
+        
+        with closing(self._conn()) as c:
             return c.execute(
                 f"SELECT * FROM invoices {where} ORDER BY invoice_date DESC, invoice_number DESC",
                 params,
             ).fetchall()
 
     def get_invoice_by_id(self, inv_id: str) -> Optional[sqlite3.Row]:
-        with self._conn() as c:
+        with closing(self._conn()) as c:
             return c.execute("SELECT * FROM invoices WHERE invoice_number=?", (inv_id,)).fetchone()
 
     def save_invoice(self, data: Dict[str, Any], is_update: bool,
                      original_id: Optional[str] = None) -> Tuple[bool, Optional[str]]:
         try:
-            with self._conn() as c:
-                if is_update:
-                    nid = data["invoice_number"]
-                    if nid != original_id and c.execute(
-                        "SELECT 1 FROM invoices WHERE invoice_number=?", (nid,)
-                    ).fetchone():
-                        return False, f"Invoice number '{nid}' already exists."
-                    qd = {**data, "original_id": original_id}
-                    c.execute(
-                        f"UPDATE invoices SET {', '.join(f'{k}=:{k}' for k in data)} WHERE invoice_number=:original_id",
-                        qd,
-                    )
-                else:
-                    if c.execute(
-                        "SELECT 1 FROM invoices WHERE invoice_number=?", (data["invoice_number"],)
-                    ).fetchone():
-                        return False, f"Invoice number '{data['invoice_number']}' already exists."
-                    c.execute(
-                        f"INSERT INTO invoices ({', '.join(data)}) VALUES (:{', :'.join(data)})",
-                        data,
-                    )
-                c.commit()
+            with closing(self._conn()) as c:
+                with c:
+                    if is_update:
+                        nid = data["invoice_number"]
+                        if nid != original_id and c.execute(
+                            "SELECT 1 FROM invoices WHERE invoice_number=?", (nid,)
+                        ).fetchone():
+                            return False, f"Invoice number '{nid}' already exists."
+                        qd = {**data, "original_id": original_id}
+                        c.execute(
+                            f"UPDATE invoices SET {', '.join(f'{k}=:{k}' for k in data)} WHERE invoice_number=:original_id",
+                            qd,
+                        )
+                    else:
+                        if c.execute(
+                            "SELECT 1 FROM invoices WHERE invoice_number=?", (data["invoice_number"],)
+                        ).fetchone():
+                            return False, f"Invoice number '{data['invoice_number']}' already exists."
+                        c.execute(
+                            f"INSERT INTO invoices ({', '.join(data)}) VALUES (:{', :'.join(data)})",
+                            data,
+                        )
             return True, None
         except sqlite3.Error as exc:
             return False, str(exc)
 
     def delete_invoice(self, inv_id: str) -> bool:
-        with self._conn() as c:
-            c.execute("DELETE FROM invoices WHERE invoice_number=?", (inv_id,))
-            c.commit()
+        with closing(self._conn()) as c:
+            with c:
+                c.execute("DELETE FROM invoices WHERE invoice_number=?", (inv_id,))
         return True
 
     def get_next_invoice_number(self) -> str:
-        with self._conn() as c:
-            last = c.execute("SELECT invoice_number FROM invoices ORDER BY rowid DESC LIMIT 1").fetchone()
+        with closing(self._conn()) as c:
+            last = c.execute("SELECT invoice_number FROM invoices ORDER BY invoice_date DESC, invoice_number DESC LIMIT 1").fetchone()
         if not last:
             return "INV-001"
         parts = last["invoice_number"].rsplit("-", 1)
@@ -360,9 +427,7 @@ class DatabaseManager:
         except Exception as exc:
             return False, str(exc)
 
-    # ------------------------------------------------------------------  stats (single-pass)
     def get_dashboard_stats(self) -> Dict[str, Any]:
-        """Compute all dashboard stats in one DB fetch + one data pass."""
         total_billed = total_paid = 0.0
         count = {"total": 0, "paid": 0, "due": 0, "partial": 0}
         for inv in self.get_all_invoices():
@@ -392,7 +457,6 @@ class DatabaseManager:
             **count,
         }
 
-    # ------------------------------------------------------------------  static calc
     @staticmethod
     def calculate_totals(items: List[Dict], tax_rate: float,
                          global_disc_val: float = 0.0,
@@ -410,22 +474,51 @@ class DatabaseManager:
             "cgst": cgst, "sgst": sgst, "grand_total": taxable + cgst + sgst,
         }
 
-
 # =============================================================================
-#  PDF GENERATOR  (logic preserved; layout cleaned up)
+#  PDF GENERATOR
 # =============================================================================
 class PDFGenerator:
-
     def __init__(self, data: Dict[str, Any], config: Dict[str, Any]):
         self.data     = data
         self.config   = config
-        self.filename = INVOICES_DIR / f"Invoice-{data.get('invoice_number', 'NA')}.pdf"
+        
+        # --- Smart File Naming to bypass Windows file locks ---
+        base_filename = f"Invoice-{data.get('invoice_number', 'NA')}"
+        self.filename = INVOICES_DIR / f"{base_filename}.pdf"
+        
+        counter = 1
+        while self.filename.exists():
+            try:
+                # Test if we can write to the existing file without altering it yet
+                with open(self.filename, 'a'): 
+                    pass
+                break  # If successful, no PermissionError is thrown; we are clear to overwrite.
+            except PermissionError:
+                # If Windows says the file is locked, append a counter and try the new name.
+                self.filename = INVOICES_DIR / f"{base_filename} ({counter}).pdf"
+                counter += 1
+        # ------------------------------------------------------
+        
         self.is_gst   = bool(data.get("is_gst_invoice", 1))
         self.styles   = self._setup_styles()
-
+        
     def _asset(self, key: str) -> Optional[Path]:
-        p = self.config.get("asset_paths", {}).get(key)
-        if p and (path := BASE_DIR / p).exists():
+        configured = self.config.get("asset_paths", {}).get(key)
+        if not configured:
+            return None
+
+        path = Path(configured)
+        if not path.is_absolute():
+            path = DATA_DIR / path
+
+        try:
+            path = path.resolve()
+            path.relative_to(DATA_DIR.resolve())
+        except (OSError, ValueError):
+            logger.warning("Ignoring asset outside BillFlow's ProgramData folder: %s", path)
+            return None
+
+        if path.is_file():
             return path
         return None
 
@@ -433,7 +526,7 @@ class PDFGenerator:
         ss   = getSampleStyleSheet()
         base = PDF_FONT
         bold = f"{base}-Bold" if base != "Helvetica" else "Helvetica-Bold"
-        ss.add(ParagraphStyle("NC",          fontName=base, fontSize=9,  parent=ss["Normal"],    leading=11))
+        ss.add(ParagraphStyle("NC",          fontName=base, fontSize=9,  parent=ss["Normal"],   leading=11))
         ss.add(ParagraphStyle("Right",       parent=ss["NC"], alignment=TA_RIGHT))
         ss.add(ParagraphStyle("Center",      parent=ss["NC"], alignment=TA_CENTER))
         ss.add(ParagraphStyle("YourContact", parent=ss["NC"], alignment=TA_RIGHT, leading=11))
@@ -444,7 +537,6 @@ class PDFGenerator:
         ss.add(ParagraphStyle("InvoiceTitle",fontName=bold,   fontSize=18, alignment=TA_RIGHT, textColor=colors.HexColor("#111827")))
         return ss
 
-    # --  page elements  -------------------------------------------------------
     def _build_header(self) -> Table:
         comp  = self.config.get("company_details", {})
         left  = [Paragraph(comp.get("name", "Your Company"), self.styles["CompanyName"])]
@@ -509,7 +601,7 @@ class PDFGenerator:
                 cg = f"<br/>GSTIN: {cgstin}"
             if ygstin := self.config.get("company_details", {}).get("gstin"):
                 yg = f"<br/>GSTIN: {ygstin}"
-        your_c   = (self.data.get("your_contact")   or "").replace("\n", "<br/>")
+        your_c   = (self.data.get("your_contact")  or "").replace("\n", "<br/>")
         client_c = (self.data.get("client_contact") or "").replace("\n", "<br/>")
         your_p   = Paragraph(f"<font color='#6B7280'>FROM:</font><br/><b>{self.data.get('your_name') or ''}</b><br/>{your_c}{yg}",     self.styles["YourContact"])
         bill_p   = Paragraph(f"<font color='#6B7280'>BILL TO:</font><br/><b>{self.data.get('bill_to') or ''}</b><br/>{client_c}{cg}", self.styles["BillTo"])
@@ -567,7 +659,7 @@ class PDFGenerator:
         g_disc     = float(self.data.get("global_discount_value") or 0)
         totals     = DatabaseManager.calculate_totals(items_list, tax_rate, g_disc, self.data.get("global_discount_type") or "amount")
         advance    = float(self.data.get("advance_amount") or 0)
-        amt_paid   = float(self.data.get("amount_paid")   or 0)
+        amt_paid   = float(self.data.get("amount_paid")    or 0)
         balance    = totals["grand_total"] - advance - amt_paid
 
         rows = [[Paragraph("Subtotal", self.styles["Right"]),
@@ -575,15 +667,24 @@ class PDFGenerator:
         if totals["total_discount"] > 0:
             rows.append([Paragraph("Discount", self.styles["Right"]),
                          Paragraph(f"- {CURRENCY_SYMBOL}{totals['total_discount']:,.2f}", self.styles["Right"])])
+        
+        # --- IGST vs CGST/SGST PDF Rendering Logic ---
         if self.is_gst and tax_rate > 0:
-            rows += [
-                [Paragraph("Taxable Amount", self.styles["Right"]),
-                 Paragraph(f"{CURRENCY_SYMBOL}{totals['taxable']:,.2f}", self.styles["Right"])],
-                [Paragraph(f"CGST ({tax_rate/2}%)", self.styles["Right"]),
-                 Paragraph(f"{CURRENCY_SYMBOL}{totals['cgst']:,.2f}", self.styles["Right"])],
-                [Paragraph(f"SGST ({tax_rate/2}%)", self.styles["Right"]),
-                 Paragraph(f"{CURRENCY_SYMBOL}{totals['sgst']:,.2f}", self.styles["Right"])],
-            ]
+            rows.append([Paragraph("Taxable Amount", self.styles["Right"]),
+                         Paragraph(f"{CURRENCY_SYMBOL}{totals['taxable']:,.2f}", self.styles["Right"])])
+            
+            if self.data.get("gst_type") == "IGST":
+                rows.append([Paragraph(f"IGST ({tax_rate}%)", self.styles["Right"]),
+                             Paragraph(f"{CURRENCY_SYMBOL}{totals['cgst']*2:,.2f}", self.styles["Right"])])
+            else:
+                rows += [
+                    [Paragraph(f"CGST ({tax_rate/2}%)", self.styles["Right"]),
+                     Paragraph(f"{CURRENCY_SYMBOL}{totals['cgst']:,.2f}", self.styles["Right"])],
+                    [Paragraph(f"SGST ({tax_rate/2}%)", self.styles["Right"]),
+                     Paragraph(f"{CURRENCY_SYMBOL}{totals['sgst']:,.2f}", self.styles["Right"])],
+                ]
+        # ---------------------------------------------
+        
         rows.append([Paragraph("<b>Invoice Total</b>", self.styles["Right"]),
                      Paragraph(f"<b>{CURRENCY_SYMBOL}{totals['grand_total']:,.2f}</b>", self.styles["Right"])])
         if advance > 0:
@@ -644,7 +745,6 @@ class PDFGenerator:
 #  SETTINGS DIALOG
 # =============================================================================
 class SettingsDialog(tk.Toplevel):
-
     def __init__(self, parent, callback):
         super().__init__(parent)
         self.callback  = callback
@@ -659,7 +759,6 @@ class SettingsDialog(tk.Toplevel):
         self._load()
         self.focus_force()
 
-    # --  builder helpers  -----------------------------------------------------
     def _section(self, parent, title: str):
         ttk.Label(parent, text=title, font=(FONT_FAMILY, 11, "bold")).pack(anchor="w", pady=(0, 8))
 
@@ -692,7 +791,6 @@ class SettingsDialog(tk.Toplevel):
             except Exception as exc:
                 Messagebox.show_error("Error", f"Could not save file: {exc}")
 
-    # --  layout  --------------------------------------------------------------
     def _build(self):
         main = ttk.Frame(self, padding=20)
         main.pack(fill="both", expand=True)
@@ -700,7 +798,6 @@ class SettingsDialog(tk.Toplevel):
         nb = ttk.Notebook(main)
         nb.pack(fill="both", expand=True, pady=(0, 16))
 
-        # Tab 1 – General
         t1 = ttk.Frame(nb, padding=16)
         nb.add(t1, text="  General  ")
         self._section(t1, "Interface")
@@ -719,7 +816,6 @@ class SettingsDialog(tk.Toplevel):
         self.contact_text = tk.Text(t1, height=4, relief="flat", highlightthickness=1, wrap="word")
         self.contact_text.pack(fill="x")
 
-        # Tab 2 – Payment & PDF
         t2 = ttk.Frame(nb, padding=16)
         nb.add(t2, text="  Payment & PDF  ")
         self._section(t2, "Payment Settings")
@@ -731,17 +827,20 @@ class SettingsDialog(tk.Toplevel):
         self.footer_text = tk.Text(t2, height=3, relief="flat", highlightthickness=1, wrap="word")
         self.footer_text.pack(fill="x")
 
-        # Tab 3 – Assets
         t3 = ttk.Frame(nb, padding=16)
         nb.add(t3, text="  Images & Assets  ")
         self._section(t3, "Upload Assets (PNG / JPG)")
-        ttk.Label(t3, text="Files are copied into the 'assets' folder and embedded in PDFs.",
-                  font=(FONT_FAMILY, 9), bootstyle="secondary").pack(anchor="w", pady=(0, 12))
-        self.logo_var = tk.StringVar(); self._file_picker(t3, "Company Logo:",         self.logo_var, "logo.png")
+        ttk.Label(
+            t3,
+            text=f"Files are copied to {ASSETS_DIR} and embedded in PDFs.",
+            font=(FONT_FAMILY, 9),
+            bootstyle="secondary",
+            wraplength=540,
+        ).pack(anchor="w", pady=(0, 12))
+        self.logo_var = tk.StringVar(); self._file_picker(t3, "Company Logo:",         self.logo_var, "app_logo.png")
         self.sig_var  = tk.StringVar(); self._file_picker(t3, "Authorized Signature:", self.sig_var,  "sign.png")
         self.qr_var   = tk.StringVar(); self._file_picker(t3, "UPI QR Code:",          self.qr_var,   "upi_qr.png")
 
-        # Button row
         btn_row = ttk.Frame(main)
         btn_row.pack(fill="x")
         ttk.Button(btn_row, text="Cancel",             bootstyle="secondary", command=self.destroy).pack(side="right", padx=(8, 0))
@@ -790,121 +889,43 @@ class SettingsDialog(tk.Toplevel):
         self.callback()
         self.destroy()
 
-
 # =============================================================================
 #  ABOUT DIALOG
 # =============================================================================
-
 class AboutDialog(tk.Toplevel):
-
     def __init__(self, parent):
         super().__init__(parent)
-
         self.title(f"About {APP_NAME}")
         self.geometry("400x400")
         self.resizable(False, False)
-
         self.transient(parent)
         self.grab_set()
-
         self._build()
-
         self.focus_force()
         self.bind("<Escape>", lambda e: self.destroy())
 
     def _build(self):
         style = ttk.Style()
         colors = style.colors
-
         self.configure(bg=colors.bg)
-
         container = ttk.Frame(self, padding=15)
         container.pack(fill="both", expand=True)
 
-        # =====================================================
-        # HEADER
-        # =====================================================
-
-        hero = ttk.Frame(
-            container,
-            padding=15,
-            bootstyle="primary"
-        )
+        hero = ttk.Frame(container, padding=15, bootstyle="primary")
         hero.pack(fill="x")
+        ttk.Label(hero, text=APP_NAME, font=(FONT_FAMILY, 18, "bold"), bootstyle="inverse-primary", anchor="center", justify="center").pack(fill="x")
+        ttk.Label(hero, text=APP_TAGLINE, font=(FONT_FAMILY, 9), bootstyle="inverse-primary", anchor="center", justify="center").pack(fill="x", pady=(4, 0))
 
-        ttk.Label(
-            hero,
-            text=APP_NAME,
-            font=(FONT_FAMILY, 18, "bold"),
-            bootstyle="inverse-primary",
-            anchor="center",
-            justify="center"
-        ).pack(fill="x")
-
-        ttk.Label(
-            hero,
-            text=APP_TAGLINE,
-            font=(FONT_FAMILY, 9),
-            bootstyle="inverse-primary",
-            anchor="center",
-            justify="center"
-        ).pack(fill="x", pady=(4, 0))
-
-        # =====================================================
-        # VERSION
-        # =====================================================
-
-        ttk.Label(
-            container,
-            text=APP_VERSION,
-            font=(FONT_FAMILY, 28, "bold"),
-            bootstyle="info"
-        ).pack(pady=(20, 5))
-
-        ttk.Label(
-            container,
-            text=f"Released on {APP_RELEASE_DATE}",
-            font=(FONT_FAMILY, 9),
-            bootstyle="secondary"
-        ).pack()
-
+        ttk.Label(container, text=APP_VERSION, font=(FONT_FAMILY, 28, "bold"), bootstyle="info").pack(pady=(20, 5))
+        ttk.Label(container, text=f"Released on {APP_RELEASE_DATE}", font=(FONT_FAMILY, 9), bootstyle="secondary").pack()
         ttk.Separator(container).pack(fill="x", pady=15)
 
-        # =====================================================
-        # ATTRIBUTION
-        # =====================================================
-
         lines = APP_ATTRIBUTION.split("\n")
-
-        ttk.Label(
-            container,
-            text=lines[0],
-            font=(FONT_FAMILY, 11, "bold"),
-            anchor="center",
-            justify="center"
-        ).pack(fill="x")
-
+        ttk.Label(container, text=lines[0], font=(FONT_FAMILY, 11, "bold"), anchor="center", justify="center").pack(fill="x")
         for line in lines[1:]:
-            ttk.Label(
-                container,
-                text=line,
-                font=(FONT_FAMILY, 9),
-                bootstyle="secondary",
-                anchor="center",
-                justify="center"
-            ).pack(fill="x", pady=1)
+            ttk.Label(container, text=line, font=(FONT_FAMILY, 9), bootstyle="secondary", anchor="center", justify="center").pack(fill="x", pady=1)
 
-        # =====================================================
-        # CLOSE BUTTON
-        # =====================================================
-
-        ttk.Button(
-            container,
-            text="Close",
-            width=14,
-            bootstyle="primary",
-            command=self.destroy
-        ).pack(side="bottom", pady=(20, 0))
+        ttk.Button(container, text="Close", width=14, bootstyle="primary", command=self.destroy).pack(side="bottom", pady=(20, 0))
 
 # =============================================================================
 #  PDF VIEWER
@@ -963,12 +984,9 @@ class PDFViewer(tk.Toplevel):
         ttk.Separator(tb, orient="vertical").pack(side="right", fill="y", padx=10)
         self.zoom_lbl = ttk.Label(tb, text="100%", font=(FONT_FAMILY, 9), width=6, anchor="center")
         self.zoom_lbl.pack(side="right")
-        ttk.Button(tb, text="⊕", command=lambda: self._zoom(+0.15), width=3,
-                   bootstyle="secondary-outline").pack(side="right", padx=2)
-        ttk.Button(tb, text="⊖", command=lambda: self._zoom(-0.15), width=3,
-                   bootstyle="secondary-outline").pack(side="right", padx=2)
-        ttk.Button(tb, text="Fit",command=self._reset_zoom,        width=4,
-                   bootstyle="secondary-outline").pack(side="right", padx=2)
+        ttk.Button(tb, text="⊕", command=lambda: self._zoom(+0.15), width=3, bootstyle="secondary-outline").pack(side="right", padx=2)
+        ttk.Button(tb, text="⊖", command=lambda: self._zoom(-0.15), width=3, bootstyle="secondary-outline").pack(side="right", padx=2)
+        ttk.Button(tb, text="Fit",command=self._reset_zoom,        width=4, bootstyle="secondary-outline").pack(side="right", padx=2)
 
         ttk.Separator(self, bootstyle="secondary").pack(fill="x")
         self.canvas = tk.Canvas(self, bg="#555555", highlightthickness=0)
@@ -1000,27 +1018,177 @@ class PDFViewer(tk.Toplevel):
         self.zoom_lbl.config(text=f"{int(self.zoom * 100)}%")
 
     def _next(self):
-        if self.page_idx < self.total - 1: self.page_idx += 1; self._render()
+        if self.page_idx < self.total - 1:
+            self.page_idx += 1
+            self._render()
+
     def _prev(self):
-        if self.page_idx > 0:             self.page_idx -= 1; self._render()
+        if self.page_idx > 0:
+            self.page_idx -= 1
+            self._render()
+
     def _zoom(self, delta: float):
-        self.zoom = max(self.MIN_ZOOM, min(self.MAX_ZOOM, self.zoom + delta)); self._render()
+        self.zoom = max(self.MIN_ZOOM, min(self.MAX_ZOOM, self.zoom + delta))
+        self._render()
+
     def _reset_zoom(self):
-        self.zoom = 1.0; self._render()
+        self.zoom = 1.0
+        self._render()
 
     def _print(self):
-        try:
-            if sys.platform == "win32":
-                try:
-                    os.startfile(self.pdf_path, "print")
-                except OSError:
-                    Messagebox.show_warning("Manual Print Required",
-                        "A PDF reader is not set as default.\n"
-                        "The file will open — press Ctrl+P to print.", parent=self)
-                    os.startfile(self.pdf_path)
-            else:
+        if sys.platform != "win32":
+            try:
                 subprocess.run(["lp", str(self.pdf_path)], check=True)
+            except Exception as exc:
+                from ttkbootstrap.dialogs import Messagebox
+                Messagebox.show_error("Print Error", str(exc), parent=self)
+            return
+
+        try:
+            from PyQt5.QtWidgets import QApplication
+            from PyQt5.QtPrintSupport import QPrinterInfo
+            
+            # QApplication must exist before we can query the hardware for printers
+            app = QApplication.instance()
+            if app is None:
+                app = QApplication(sys.argv)
+                
+            printers = QPrinterInfo.availablePrinterNames()
+            default_printer = QPrinterInfo.defaultPrinterName()
+            
+        except ImportError:
+            # Fallback to standard Windows print if PyQt5 is missing
+            try:
+                os.startfile(self.pdf_path, "print")
+            except OSError:
+                from ttkbootstrap.dialogs import Messagebox
+                Messagebox.show_warning("Manual Print Required",
+                    "A PDF reader is not set as default.\n"
+                    "The file will open — press Ctrl+P to print.", parent=self)
+                os.startfile(self.pdf_path)
+            return
+
+        # --- Create Custom Tkinter/ttkbootstrap Printer Dialog ---
+        dialog = tk.Toplevel(self)
+        dialog.title("Select Printer")
+        dialog.geometry("400x260")  
+        dialog.resizable(False, False)
+        dialog.transient(self)
+        dialog.grab_set()
+
+        ttk.Label(dialog, text="🖨️ Choose a printer destination:", font=("Segoe UI", 10, "bold")).pack(pady=(15, 5), padx=20, anchor="w")
+        
+        combo = ttk.Combobox(dialog, values=printers, state="readonly", font=("Segoe UI", 9))
+        combo.pack(fill="x", padx=20, pady=5)
+        
+        if printers:
+            if default_printer in printers:
+                combo.set(default_printer)
+            else:
+                combo.set(printers[0])
+        else:
+            combo.set("No printers detected")
+            combo.config(state="disabled")
+
+        # --- Button Commands ---
+        def on_print():
+            if not printers:
+                return
+            selected_printer = combo.get()
+            dialog.destroy()
+            self._print_with_pyqt5(printer_name=selected_printer)
+
+        def on_system_dialog():
+            dialog.destroy()
+            # Trigger the standard PyQt5 / Windows Print Dialog
+            self._print_with_pyqt5(show_dialog=True)
+
+        def on_manual_open():
+            dialog.destroy()
+            # Opens the PDF in your default viewer (Edge, Chrome, Acrobat, etc.)
+            os.startfile(self.pdf_path)
+
+        # --- Main Print & Cancel Buttons ---
+        btn_frame = ttk.Frame(dialog)
+        btn_frame.pack(fill="x", padx=20, pady=10)
+        
+        ttk.Button(btn_frame, text="Cancel", bootstyle="secondary-outline", command=dialog.destroy).pack(side="right", padx=(10, 0))
+        
+        print_btn = ttk.Button(btn_frame, text="Print Document", bootstyle="success", command=on_print)
+        print_btn.pack(side="right")
+        if not printers:
+            print_btn.config(state="disabled")
+            
+        ttk.Separator(dialog, bootstyle="secondary").pack(fill="x", padx=20, pady=5)
+        
+        # --- Alternative Options Frame ---
+        alt_frame = ttk.Frame(dialog)
+        alt_frame.pack(fill="x", padx=20, pady=5)
+        
+        ttk.Button(alt_frame, text="⚙️ Use System Print Dialog", bootstyle="info-outline", command=on_system_dialog).pack(fill="x", pady=2)
+        ttk.Button(alt_frame, text="🌐 Open PDF Manually (Browser/Viewer)", bootstyle="primary-outline", command=on_manual_open).pack(fill="x", pady=2)
+
+    def _print_with_pyqt5(self, printer_name=None, show_dialog=False):
+        """Handles both headless printing and system dialog printing using the PyQt5 engine"""
+        from PyQt5.QtWidgets import QApplication
+        from PyQt5.QtPrintSupport import QPrinter, QPrintDialog
+        from PyQt5.QtGui import QImage, QPixmap, QPainter
+        from PyQt5.QtCore import Qt
+
+        try:
+            app = QApplication.instance()
+            if app is None:
+                app = QApplication(sys.argv)
+
+            printer = QPrinter(QPrinter.HighResolution)
+            
+            if show_dialog:
+                # Open the system's native print dialog
+                print_dlg = QPrintDialog(printer)
+                if print_dlg.exec_() != QPrintDialog.Accepted:
+                    return # User clicked Cancel
+            else:
+                # Initialize printer with the user's specific selection quietly
+                printer.setPrinterName(printer_name)
+            
+            painter = QPainter(printer)
+            doc = fitz.open(self.pdf_path)
+            
+            # Loop through and print all pages in the PDF
+            for page_index in range(len(doc)):
+                if page_index > 0:
+                    printer.newPage()
+                    
+                page = doc.load_page(page_index)
+                
+                # Render PDF page to QPixmap
+                pix = page.get_pixmap(matrix=fitz.Matrix(3, 3))
+                fmt = QImage.Format_RGBA8888 if pix.alpha else QImage.Format_RGB888
+                qimage = QImage(pix.samples, pix.width, pix.height, pix.stride, fmt)
+                pixmap = QPixmap.fromImage(qimage)
+                
+                # Scale to fit the page keeping aspect ratio
+                rect = painter.viewport()
+                size = pixmap.size()
+                size.scale(rect.size(), Qt.KeepAspectRatio)
+                
+                x_offset = int((rect.width() - size.width()) / 2)
+                y_offset = int((rect.height() - size.height()) / 2)
+                
+                painter.setViewport(x_offset, y_offset, size.width(), size.height())
+                painter.setWindow(pixmap.rect())
+                painter.drawPixmap(0, 0, pixmap)
+                
+            painter.end()
+            doc.close()
+            
+            # Show a success message only if it was a headless print
+            if not show_dialog:
+                from ttkbootstrap.dialogs import Messagebox
+                Messagebox.show_info("Success", f"Document sent to {printer_name}!", parent=self)
+            
         except Exception as exc:
+            from ttkbootstrap.dialogs import Messagebox
             Messagebox.show_error("Print Error", str(exc), parent=self)
 
     def _save_copy(self):
@@ -1035,8 +1203,8 @@ class PDFViewer(tk.Toplevel):
                 Messagebox.show_error("Save Error", str(exc))
 
     def _close(self):
-        self.doc.close(); self.destroy()
-
+        self.doc.close()
+        self.destroy()
 
 # =============================================================================
 #  DASHBOARD
@@ -1064,7 +1232,6 @@ class DashboardFrame(ttk.Frame):
         self._filter_btns: Dict[str, ttk.Button] = {}
         self._build()
 
-    # --  layout  --------------------------------------------------------------
     def _build(self):
         outer = ttk.Frame(self, padding=(24, 16, 24, 14))
         outer.pack(fill="both", expand=True)
@@ -1079,22 +1246,15 @@ class DashboardFrame(ttk.Frame):
         row.pack(fill="x", pady=(0, 18))
         left = ttk.Frame(row)
         left.pack(side="left")
-        ttk.Label(left, text=APP_NAME,
-                  font=(FONT_FAMILY, 24, "bold")).pack(anchor="w")
-        ttk.Label(left, text=APP_TAGLINE,
-                  font=(FONT_FAMILY, 10), bootstyle="secondary").pack(anchor="w")
-        ttk.Label(left, text="Dashboard",
-                  font=(FONT_FAMILY, 10, "bold"), bootstyle="secondary").pack(anchor="w", pady=(2, 0))
+        ttk.Label(left, text=APP_NAME, font=(FONT_FAMILY, 24, "bold")).pack(anchor="w")
+        ttk.Label(left, text=APP_TAGLINE, font=(FONT_FAMILY, 10), bootstyle="secondary").pack(anchor="w")
+        ttk.Label(left, text="Dashboard", font=(FONT_FAMILY, 10, "bold"), bootstyle="secondary").pack(anchor="w", pady=(2, 0))
 
         right = ttk.Frame(row); right.pack(side="right")
-        ttk.Button(right, text="⚙  Settings", bootstyle="secondary-outline",
-                   command=self._open_settings).pack(side="left", padx=4)
-        ttk.Button(right, text="ℹ  About", bootstyle="info-outline",
-               command=self._open_about).pack(side="left", padx=4)
-        ttk.Button(right, text="📊  Export CSV", bootstyle="info-outline",
-                   command=self._export_csv).pack(side="left", padx=4)
-        ttk.Button(right, text="＋  New Invoice", bootstyle="primary",
-                   command=lambda: self.controller.show_frame(InvoiceFormFrame)).pack(side="left", padx=(4, 0))
+        ttk.Button(right, text="⚙  Settings", bootstyle="secondary-outline", command=self._open_settings).pack(side="left", padx=4)
+        ttk.Button(right, text="ℹ  About", bootstyle="info-outline", command=self._open_about).pack(side="left", padx=4)
+        ttk.Button(right, text="📊  Export CSV", bootstyle="info-outline", command=self._export_csv).pack(side="left", padx=4)
+        ttk.Button(right, text="＋  New Invoice", bootstyle="primary", command=lambda: self.controller.show_frame(InvoiceFormFrame)).pack(side="left", padx=(4, 0))
 
     def _stat_cards(self, parent):
         row = ttk.Frame(parent)
@@ -1109,10 +1269,8 @@ class DashboardFrame(ttk.Frame):
     def _card(self, parent, title: str, value: str, style: str, col: int) -> ttk.Label:
         card = ttk.Frame(parent, padding=(18, 14), bootstyle=style)
         card.grid(row=0, column=col, sticky="ew", padx=6)
-        ttk.Label(card, text=title, font=(FONT_FAMILY, 10),
-                  bootstyle=f"inverse-{style}").pack(anchor="w")
-        lbl = ttk.Label(card, text=value, font=(FONT_FAMILY, 20, "bold"),
-                        bootstyle=f"inverse-{style}")
+        ttk.Label(card, text=title, font=(FONT_FAMILY, 10), bootstyle=f"inverse-{style}").pack(anchor="w")
+        lbl = ttk.Label(card, text=value, font=(FONT_FAMILY, 20, "bold"), bootstyle=f"inverse-{style}")
         lbl.pack(anchor="w", pady=(4, 0))
         return lbl
 
@@ -1120,11 +1278,9 @@ class DashboardFrame(ttk.Frame):
         row = ttk.Frame(parent)
         row.pack(fill="x", pady=(0, 8))
 
-        # Status filter pills
         filter_group = ttk.Frame(row)
         filter_group.pack(side="left")
-        ttk.Label(filter_group, text="Filter:", font=(FONT_FAMILY, 9),
-                  bootstyle="secondary").pack(side="left", padx=(0, 8))
+        ttk.Label(filter_group, text="Filter:", font=(FONT_FAMILY, 9), bootstyle="secondary").pack(side="left", padx=(0, 8))
         for status in self.STATUS_FILTERS:
             btn = ttk.Button(
                 filter_group, text=status, width=13,
@@ -1134,7 +1290,6 @@ class DashboardFrame(ttk.Frame):
             btn.pack(side="left", padx=2)
             self._filter_btns[status] = btn
 
-        # Search
         srch = ttk.Frame(row)
         srch.pack(side="right")
         ttk.Label(srch, text="🔍", font=(FONT_FAMILY, 12)).pack(side="left", padx=(0, 4))
@@ -1143,8 +1298,7 @@ class DashboardFrame(ttk.Frame):
         entry = ttk.Entry(srch, textvariable=self.search_var, width=28)
         entry.pack(side="left")
         ToolTip(entry, "Search by invoice number or client name")
-        ttk.Button(srch, text="✕", width=3, bootstyle="secondary-outline",
-                   command=lambda: self.search_var.set("")).pack(side="left", padx=(4, 0))
+        ttk.Button(srch, text="✕", width=3, bootstyle="secondary-outline", command=lambda: self.search_var.set("")).pack(side="left", padx=(4, 0))
 
     def _set_filter(self, status: str):
         self._status_filter = status
@@ -1165,13 +1319,11 @@ class DashboardFrame(ttk.Frame):
                                  show="headings", bootstyle="primary",
                                  selectmode="browse", height=18)
         for cid, text, width, anchor in self.COL_DEFS:
-            self.tree.heading(cid, text=text, anchor=anchor,
-                              command=lambda c=cid: self._sort_by(c))
+            self.tree.heading(cid, text=text, anchor=anchor, command=lambda c=cid: self._sort_by(c))
             self.tree.column(cid, width=width, anchor=anchor, minwidth=60)
 
         for tag, colors_map in STATUS_BADGE.items():
-            self.tree.tag_configure(tag, foreground=colors_map["foreground"],
-                                    background=colors_map["background"])
+            self.tree.tag_configure(tag, foreground=colors_map["foreground"], background=colors_map["background"])
 
         sb = ttk.Scrollbar(wrap, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=sb.set)
@@ -1183,7 +1335,6 @@ class DashboardFrame(ttk.Frame):
         self.tree.bind("<Button-3>",          self._show_ctx_menu)
         self.tree.bind("<Delete>",            lambda _: self._act_delete())
 
-        # Context menu
         self._ctx = tk.Menu(self, tearoff=0)
         self._ctx.add_command(label="📄  View PDF",   command=self._act_view_pdf)
         self._ctx.add_command(label="✏️  Edit",       command=self._act_edit)
@@ -1206,20 +1357,18 @@ class DashboardFrame(ttk.Frame):
         row = ttk.Frame(parent)
         row.pack(fill="x", pady=(10, 0))
 
-        self.hint_lbl = ttk.Label(row, text="Select an invoice to take action",
-                                  bootstyle="secondary", font=(FONT_FAMILY, 9))
+        self.hint_lbl = ttk.Label(row, text="Select an invoice to take action", bootstyle="secondary", font=(FONT_FAMILY, 9))
         self.hint_lbl.pack(side="left")
 
         self.del_btn  = ttk.Button(row, text="🗑  Delete",    bootstyle="danger-outline",   state="disabled", command=self._act_delete)
         self.del_btn.pack(side="right", padx=4)
         self.dup_btn  = ttk.Button(row, text="📋  Duplicate",  bootstyle="secondary-outline", state="disabled", command=self._act_duplicate)
         self.dup_btn.pack(side="right", padx=4)
-        self.edit_btn = ttk.Button(row, text="✏  Edit",      bootstyle="secondary",          state="disabled", command=self._act_edit)
+        self.edit_btn = ttk.Button(row, text="✏  Edit",      bootstyle="secondary",         state="disabled", command=self._act_edit)
         self.edit_btn.pack(side="right", padx=4)
-        self.pdf_btn  = ttk.Button(row, text="📄  View PDF",  bootstyle="primary",            state="disabled", command=self._act_view_pdf)
+        self.pdf_btn  = ttk.Button(row, text="📄  View PDF",  bootstyle="primary",           state="disabled", command=self._act_view_pdf)
         self.pdf_btn.pack(side="right", padx=4)
 
-    # --  lifecycle  -----------------------------------------------------------
     def on_show(self, _=None):
         self._populate()
         self._update_stats()
@@ -1238,7 +1387,6 @@ class DashboardFrame(ttk.Frame):
         sel = self.tree.selection()
         return self.tree.item(sel[0], "values")[0] if sel else None
 
-    # --  data  ----------------------------------------------------------------
     def _populate(self):
         self.tree.delete(*self.tree.get_children())
         rows = self.db_manager.get_all_invoices(
@@ -1263,7 +1411,6 @@ class DashboardFrame(ttk.Frame):
             values     = (row["invoice_number"], row["bill_to"], date_val, status_val, total_txt)
             entries.append((values, status_val))
 
-        # Sort client-side
         si = col_idx.get(self._sort_col, 2)
         def _key(e):
             v = e[0][si]
@@ -1284,7 +1431,6 @@ class DashboardFrame(ttk.Frame):
         self.s_due.config(text=f"{CURRENCY_SYMBOL}{s['balance_due']:,.2f}")
         self.s_count.config(text=str(s["total"]))
 
-    # --  actions  -------------------------------------------------------------
     def _act_view_pdf(self):
         if inv_id := self._selected_id():
             self.controller.show_progress(True)
@@ -1326,9 +1472,7 @@ class DashboardFrame(ttk.Frame):
             self._ctx.post(event.x_root, event.y_root)
 
     def _export_csv(self):
-        if path := filedialog.asksaveasfilename(defaultextension=".csv",
-                                                filetypes=[("CSV Files", "*.csv")],
-                                                title="Export Invoices"):
+        if path := filedialog.asksaveasfilename(defaultextension=".csv", filetypes=[("CSV Files", "*.csv")], title="Export Invoices"):
             ok, msg = self.db_manager.export_to_csv(path)
             Messagebox.show_info("Exported", f"Saved to:\n{path}") if ok else Messagebox.show_error("Failed", msg)
 
@@ -1354,17 +1498,19 @@ class DashboardFrame(ttk.Frame):
 #  INVOICE FORM
 # =============================================================================
 class InvoiceFormFrame(ttk.Frame):
-
     def __init__(self, parent, controller):
         super().__init__(parent)
         self.controller = controller
         self.db_manager = controller.db_manager
         self.item_widgets: List[Dict] = []
+        self.clients: List[Dict] = []
+        self.catalog_items: List[Dict] = []
         self.is_editing = False
         self.current_id: Optional[str] = None
 
         self.show_qr_var  = tk.IntVar(value=1)
         self.is_gst_var   = tk.BooleanVar(value=True)
+        self.gst_type_var = tk.StringVar(value="CGST/SGST")
         self.is_no_charge = tk.BooleanVar(value=False)
         self.is_no_charge.trace_add("write", self._toggle_no_charge)
 
@@ -1373,19 +1519,15 @@ class InvoiceFormFrame(ttk.Frame):
         self.bind_all("<Control-n>", lambda _: self.add_item())
         self.bind_all("<Escape>",    lambda _: self.controller.show_frame(DashboardFrame))
 
-    # --  master layout  -------------------------------------------------------
     def _build(self):
         scroll = ScrolledFrame(self, padding=(28, 14, 44, 14), autohide=True)
         scroll.pack(fill="both", expand=True)
 
-        # Page header
         hdr = ttk.Frame(scroll); hdr.pack(fill="x", pady=(0, 18))
         self.form_title = ttk.Label(hdr, text="New Invoice", font=(FONT_FAMILY, 26, "bold"))
         self.form_title.pack(side="left", anchor="w")
-        ttk.Label(hdr, text="Ctrl+S  save  •  Esc  back  •  Ctrl+N  add item",
-                  font=(FONT_FAMILY, 9), bootstyle="secondary").pack(side="right", anchor="se", pady=(12, 0))
+        ttk.Label(hdr, text="Ctrl+S  save  •  Esc  back  •  Ctrl+N  add item", font=(FONT_FAMILY, 9), bootstyle="secondary").pack(side="right", anchor="se", pady=(12, 0))
 
-        # 2-column body
         body = ttk.Frame(scroll); body.pack(fill="x", expand=True)
         body.columnconfigure((0, 1), weight=1, uniform="col")
         left  = ttk.Frame(body); left.grid(row=0, column=0, sticky="nsew", padx=(0, 12))
@@ -1399,16 +1541,12 @@ class InvoiceFormFrame(ttk.Frame):
         self._sec_items(scroll)
         self._sec_totals(scroll)
 
-        # Action buttons
         act = ttk.Frame(scroll); act.pack(fill="x", pady=(22, 4))
-        ttk.Button(act, text="← Back", bootstyle="secondary-outline",
-                   command=lambda: self.controller.show_frame(DashboardFrame)).pack(side="left")
-        self.save_btn = ttk.Button(act, text="💾  Save Invoice",
-                                   bootstyle="success", command=self.save_invoice)
+        ttk.Button(act, text="← Back", bootstyle="secondary-outline", command=lambda: self.controller.show_frame(DashboardFrame)).pack(side="left")
+        self.save_btn = ttk.Button(act, text="💾  Save Invoice", bootstyle="success", command=self.save_invoice)
         self.save_btn.pack(side="right")
         ToolTip(self.save_btn, "Save invoice  (Ctrl+S)")
 
-    # --  section helpers  -----------------------------------------------------
     def _lf(self, parent, title: str) -> ttk.Labelframe:
         lf = ttk.Labelframe(parent, text=f"  {title}  ", padding=(16, 12))
         lf.pack(fill="x", pady=(0, 14))
@@ -1428,17 +1566,29 @@ class InvoiceFormFrame(ttk.Frame):
         w = DateEntry(parent, dateformat=DISPLAY_DATE_FORMAT, bootstyle="primary")
         w.pack(fill="x"); return w
 
-    def _field_combo(self, parent, label: str, values: list) -> ttk.Combobox:
+    def _field_combo(self, parent, label: str, values: list, readonly: bool = True) -> ttk.Combobox:
         ttk.Label(parent, text=label, font=(FONT_FAMILY, 9)).pack(anchor="w", pady=(6, 2))
-        w = ttk.Combobox(parent, values=values, state="readonly"); w.pack(fill="x"); return w
+        w = ttk.Combobox(parent, values=values, state="readonly" if readonly else "normal")
+        w.pack(fill="x"); return w
 
-    # --  sections  ------------------------------------------------------------
     def _sec_billing(self, parent):
         s = self._lf(parent, "Bill To")
-        self.bill_to_entry       = self._field_entry(s, "Client Name / Company *")
+        self.bill_to_entry       = self._field_combo(s, "Client Name / Company *", [], readonly=False)
         self.client_gstin_entry  = self._field_entry(s, "Client GSTIN (Optional)")
         self.client_contact_text = self._field_text(s,  "Client Contact Info")
-        ToolTip(self.bill_to_entry, "Required — the client or company you're billing")
+        ToolTip(self.bill_to_entry, "Type a new name or select an existing client from your Address Book.")
+        
+        self.bill_to_entry.bind("<<ComboboxSelected>>", self._on_client_select)
+
+    def _on_client_select(self, event=None):
+        name = self.bill_to_entry.get()
+        for c in self.clients:
+            if c["name"] == name:
+                self.client_contact_text.delete("1.0", "end")
+                self.client_contact_text.insert("1.0", c["contact"])
+                self.client_gstin_entry.delete(0, "end")
+                self.client_gstin_entry.insert(0, c["gstin"])
+                break
 
     def _sec_from(self, parent):
         s = self._lf(parent, "From (Your Details)")
@@ -1454,13 +1604,11 @@ class InvoiceFormFrame(ttk.Frame):
     def _sec_payment(self, parent):
         s = self._lf(parent, "Tax & Payment")
 
-        # Discount row (value + type side-by-side)
         ttk.Label(s, text="Global Discount:", font=(FONT_FAMILY, 9)).pack(anchor="w", pady=(6, 2))
         disc_row = ttk.Frame(s); disc_row.pack(fill="x")
         self.global_discount_entry = ttk.Entry(disc_row)
         self.global_discount_entry.pack(side="left", fill="x", expand=True, padx=(0, 6))
-        self.global_discount_type_combo = ttk.Combobox(disc_row, values=[CURRENCY_SYMBOL, "%"],
-                                                       state="readonly", width=5)
+        self.global_discount_type_combo = ttk.Combobox(disc_row, values=[CURRENCY_SYMBOL, "%"], state="readonly", width=5)
         self.global_discount_type_combo.pack(side="left")
         self.global_discount_type_combo.set(CURRENCY_SYMBOL)
 
@@ -1471,74 +1619,69 @@ class InvoiceFormFrame(ttk.Frame):
         self.payment_date_entry   = self._field_date(s,  "Date of Payment")
         self.payment_mode_combo   = self._field_combo(s, "Payment Mode", PAYMENT_MODES)
 
-        # Defaults
         self.global_discount_entry.insert(0, "0")
         self.advance_amount_entry.insert(0,  "0")
         self.amount_paid_entry.insert(0,     "0")
         self.tax_rate_entry.insert(0,        "18.0")
 
-        # Toggle switches
         tgl = ttk.Frame(s); tgl.pack(fill="x", pady=(14, 2))
-        self.is_gst_chk = ttk.Checkbutton(tgl, text="GST Invoice",
-                                           variable=self.is_gst_var, bootstyle="round-toggle",
-                                           command=self._toggle_gst)
+        self.is_gst_chk = ttk.Checkbutton(tgl, text="GST Invoice", variable=self.is_gst_var, bootstyle="round-toggle", command=self._toggle_gst)
         self.is_gst_chk.grid(row=0, column=0, sticky="w", pady=3)
-        self.show_qr_chk = ttk.Checkbutton(tgl, text="Include QR Code in PDF",
-                                            variable=self.show_qr_var, bootstyle="round-toggle")
-        self.show_qr_chk.grid(row=1, column=0, sticky="w", pady=3)
-        ttk.Checkbutton(tgl, text="Mark as 'No Charge' / Complimentary",
-                        variable=self.is_no_charge, bootstyle="round-toggle").grid(row=2, column=0, sticky="w", pady=3)
+        
+        # --- IGST / CGST Radio Buttons ---
+        gst_type_frame = ttk.Frame(tgl)
+        gst_type_frame.grid(row=1, column=0, sticky="w", pady=3)
+        ttk.Radiobutton(gst_type_frame, text="Intra-state (CGST/SGST)", variable=self.gst_type_var, value="CGST/SGST", command=self._update_totals).pack(side="left", padx=(0, 10))
+        ttk.Radiobutton(gst_type_frame, text="Inter-state (IGST)", variable=self.gst_type_var, value="IGST", command=self._update_totals).pack(side="left")
+        # ---------------------------------
 
-        # Live-update bindings
-        for w in [self.tax_rate_entry, self.amount_paid_entry,
-                  self.global_discount_entry, self.advance_amount_entry]:
+        self.show_qr_chk = ttk.Checkbutton(tgl, text="Include QR Code in PDF", variable=self.show_qr_var, bootstyle="round-toggle")
+        self.show_qr_chk.grid(row=2, column=0, sticky="w", pady=3)
+        ttk.Checkbutton(tgl, text="Mark as 'No Charge' / Complimentary", variable=self.is_no_charge, bootstyle="round-toggle").grid(row=3, column=0, sticky="w", pady=3)
+
+        for w in [self.tax_rate_entry, self.amount_paid_entry, self.global_discount_entry, self.advance_amount_entry]:
             w.bind("<KeyRelease>", self._update_totals)
         self.global_discount_type_combo.bind("<<ComboboxSelected>>", self._update_totals)
 
     def _sec_items(self, parent):
         lf = ttk.Labelframe(parent, text="  Items  ", padding=(16, 12))
         lf.pack(fill="x", expand=True, pady=(0, 8))
-        # Header row
         hdr = ttk.Frame(lf); hdr.pack(fill="x", pady=(0, 6))
         for i, (txt, w) in enumerate([("Item / Title", 3), ("Description", 5), ("Amount", 2), ("Discount", 2), ("", 0)]):
             hdr.columnconfigure(i, weight=w)
-            ttk.Label(hdr, text=txt, font=(FONT_FAMILY, 9, "bold"),
-                      bootstyle="secondary").grid(row=0, column=i, sticky="w", padx=2)
+            ttk.Label(hdr, text=txt, font=(FONT_FAMILY, 9, "bold"), bootstyle="secondary").grid(row=0, column=i, sticky="w", padx=2)
         self.items_container = ScrolledFrame(lf, autohide=True, height=230)
         self.items_container.pack(fill="x", expand=True, pady=4)
-        ttk.Button(lf, text="＋  Add Item  (Ctrl+N)", command=self.add_item,
-                   bootstyle="success-outline").pack(pady=(8, 0), anchor="w")
+        ttk.Button(lf, text="＋  Add Item  (Ctrl+N)", command=self.add_item, bootstyle="success-outline").pack(pady=(8, 0), anchor="w")
 
     def _sec_totals(self, parent):
         outer = ttk.Frame(parent); outer.pack(fill="x", pady=(0, 8))
-        ttk.Frame(outer).pack(side="left", expand=True, fill="x")  # spacer
+        ttk.Frame(outer).pack(side="left", expand=True, fill="x")
 
         totals_lf = ttk.Labelframe(outer, text="  Summary  ", padding=(18, 12))
         totals_lf.pack(side="right")
 
         row_idx = [0]
-        def add_row(label: str, attr: str, bold: bool = False, style: str = "default"):
+        def add_row(label: str, attr: str, bold: bool = False, style: str = "default", title_attr: str = None):
             r = row_idx[0]; row_idx[0] += 1
-            ttk.Label(totals_lf, text=label,
-                      font=(FONT_FAMILY, 10, "bold" if bold else "normal"),
-                      anchor="e", width=20).grid(row=r, column=0, sticky="e", padx=(0, 10), pady=2)
-            lbl = ttk.Label(totals_lf, text=f"{CURRENCY_SYMBOL}0.00",
-                            font=(FONT_FAMILY, 10, "bold" if bold else "normal"),
-                            bootstyle=style, anchor="e", width=18)
+            lbl_title = ttk.Label(totals_lf, text=label, font=(FONT_FAMILY, 10, "bold" if bold else "normal"), anchor="e", width=20)
+            lbl_title.grid(row=r, column=0, sticky="e", padx=(0, 10), pady=2)
+            lbl = ttk.Label(totals_lf, text=f"{CURRENCY_SYMBOL}0.00", font=(FONT_FAMILY, 10, "bold" if bold else "normal"), bootstyle=style, anchor="e", width=18)
             lbl.grid(row=r, column=1, sticky="e", pady=2)
             setattr(self, attr, lbl)
+            if title_attr:
+                setattr(self, title_attr, lbl_title)
 
         add_row("Subtotal:",       "subtotal_label")
         add_row("Total Discount:", "discount_label",  style="danger")
         add_row("Taxable Amount:", "taxable_label")
-        add_row("CGST:",           "cgst_label",      style="secondary")
-        add_row("SGST:",           "sgst_label",      style="secondary")
+        add_row("CGST:",           "cgst_label",      style="secondary", title_attr="cgst_label_title")
+        add_row("SGST:",           "sgst_label",      style="secondary", title_attr="sgst_label_title")
         ttk.Separator(totals_lf).grid(row=row_idx[0], column=0, columnspan=2, sticky="ew", pady=6)
         row_idx[0] += 1
         add_row("Grand Total:",    "total_label",     bold=True)
         add_row("Balance Due:",    "balance_label",   bold=True, style="danger")
 
-    # --  item rows  -----------------------------------------------------------
     def add_item(self, event=None, item: Optional[Dict] = None):
         fr = ttk.Frame(self.items_container)
         fr.pack(fill="x", pady=(0, 4), padx=2)
@@ -1553,24 +1696,38 @@ class InvoiceFormFrame(ttk.Frame):
 
         for i, key in enumerate(defaults):
             var = tk.StringVar(value=str(item_data.get(key, defaults[key])))
-            ent = ttk.Entry(fr, textvariable=var)
+            
+            # Integrate Product & Service Catalog dropdown
+            if key == "title":
+                ent = ttk.Combobox(fr, textvariable=var, values=[c['title'] for c in self.catalog_items], state="normal")
+                ent.bind("<<ComboboxSelected>>", lambda e, r=record: self._on_catalog_select(r))
+            else:
+                ent = ttk.Entry(fr, textvariable=var)
+                
             ent.grid(row=0, column=i, sticky="ew", padx=(0, 6))
             record[key]         = ent
             record["vars"][key] = var
             if key in ("amount", "discount"):
                 var.trace_add("write", self._update_totals)
 
-        ttk.Button(fr, text="✕", width=3, bootstyle="danger-outline",
-                   command=lambda f=fr: self._remove_item(f)).grid(row=0, column=4, sticky="e")
+        ttk.Button(fr, text="✕", width=3, bootstyle="danger-outline", command=lambda f=fr: self._remove_item(f)).grid(row=0, column=4, sticky="e")
         self.item_widgets.append(record)
         self._update_totals()
+
+    def _on_catalog_select(self, record: Dict):
+        title = record["vars"]["title"].get()
+        for c in self.catalog_items:
+            if c["title"] == title:
+                record["vars"]["description"].set(c["description"])
+                record["vars"]["amount"].set(str(c["amount"]))
+                self._update_totals()
+                break
 
     def _remove_item(self, fr: ttk.Frame):
         self.item_widgets = [w for w in self.item_widgets if w["frame"] is not fr]
         fr.destroy()
         self._update_totals()
 
-    # --  toggles  -------------------------------------------------------------
     def _toggle_gst(self, *_):
         if self.is_no_charge.get(): return
         st = "normal" if self.is_gst_var.get() else "disabled"
@@ -1622,13 +1779,29 @@ class InvoiceFormFrame(ttk.Frame):
         self.subtotal_label.config(text=f"{CURRENCY_SYMBOL}{t['subtotal']:,.2f}")
         self.discount_label.config(text=f"- {CURRENCY_SYMBOL}{t['total_discount']:,.2f}")
         self.taxable_label.config(text=f"{CURRENCY_SYMBOL}{t['taxable']:,.2f}" if self.is_gst_var.get() else "N/A")
-        self.cgst_label.config(text=f"{CURRENCY_SYMBOL}{t['cgst']:,.2f} ({tax/2}%)" if self.is_gst_var.get() else "N/A")
-        self.sgst_label.config(text=f"{CURRENCY_SYMBOL}{t['sgst']:,.2f} ({tax/2}%)" if self.is_gst_var.get() else "N/A")
         self.total_label.config(text=f"{CURRENCY_SYMBOL}{t['grand_total']:,.2f}")
         self.balance_label.config(text=f"{CURRENCY_SYMBOL}{t['grand_total'] - adv - paid:,.2f}")
+        
+        # Dynamic label updates based on IGST vs CGST/SGST selection
+        if self.gst_type_var.get() == "IGST":
+            self.cgst_label_title.config(text=f"IGST ({tax}%):" if self.is_gst_var.get() else "IGST:")
+            self.cgst_label.config(text=f"{CURRENCY_SYMBOL}{t['cgst']*2:,.2f}" if self.is_gst_var.get() else "N/A")
+            self.sgst_label_title.config(text="")
+            self.sgst_label.config(text="")
+        else:
+            self.cgst_label_title.config(text=f"CGST ({tax/2}%):" if self.is_gst_var.get() else "CGST:")
+            self.cgst_label.config(text=f"{CURRENCY_SYMBOL}{t['cgst']:,.2f}" if self.is_gst_var.get() else "N/A")
+            self.sgst_label_title.config(text=f"SGST ({tax/2}%):" if self.is_gst_var.get() else "SGST:")
+            self.sgst_label.config(text=f"{CURRENCY_SYMBOL}{t['sgst']:,.2f}" if self.is_gst_var.get() else "N/A")
 
-    # --  form lifecycle  ------------------------------------------------------
+    def _load_data(self):
+        self.clients = self.db_manager.get_all_clients()
+        self.bill_to_entry['values'] = [c['name'] for c in self.clients]
+        
+        self.catalog_items = self.db_manager.get_all_catalog_items()
+
     def on_show(self, invoice_id: Optional[str] = None):
+        self._load_data()
         if invoice_id: self._load_for_edit(invoice_id)
         else:          self._reset_new()
 
@@ -1641,10 +1814,11 @@ class InvoiceFormFrame(ttk.Frame):
         self.save_btn.config(text="💾  Save Invoice")
 
     def _reset(self, defaults: bool = True):
-        for w in [self.invoice_number_entry, self.bill_to_entry, self.client_gstin_entry,
+        for w in [self.invoice_number_entry, self.client_gstin_entry,
                   self.your_name_entry, self.amount_paid_entry, self.advance_amount_entry,
                   self.payment_terms_entry, self.tax_rate_entry, self.global_discount_entry]:
             w.delete(0, "end")
+        self.bill_to_entry.set("")
         for w in [self.client_contact_text, self.your_contact_text]:
             w.delete("1.0", "end")
         for de in [self.invoice_date_entry, self.payment_date_entry, self.advance_date_entry]:
@@ -1665,6 +1839,7 @@ class InvoiceFormFrame(ttk.Frame):
             self.amount_paid_entry.insert(0,     "0")
             self.show_qr_var.set(1)
             self.is_gst_var.set(True)
+            self.gst_type_var.set("CGST/SGST")
             self.is_no_charge.set(False)
             self._toggle_no_charge()
             self.add_item()
@@ -1679,7 +1854,7 @@ class InvoiceFormFrame(ttk.Frame):
         d = dict(row)
 
         self.invoice_number_entry.insert(0,    d.get("invoice_number") or "")
-        self.bill_to_entry.insert(0,            d.get("bill_to")       or "")
+        self.bill_to_entry.set(                 d.get("bill_to")       or "")
         self.client_gstin_entry.insert(0,       d.get("client_gstin")  or "")
         self.client_contact_text.insert("1.0",  d.get("client_contact")or "")
         self.your_name_entry.insert(0,          d.get("your_name")     or "")
@@ -1701,6 +1876,7 @@ class InvoiceFormFrame(ttk.Frame):
         self.global_discount_type_combo.set(        d.get("global_discount_type") or CURRENCY_SYMBOL)
         self.show_qr_var.set(                       d.get("show_qr_code", 1))
         self.is_gst_var.set(                    bool(d.get("is_gst_invoice", 1)))
+        self.gst_type_var.set(                      d.get("gst_type") or "CGST/SGST")
         self.is_no_charge.set(                  bool(d.get("is_complimentary", 0)))
 
         try:    items_list = json.loads(d.get("items") or "[]")
@@ -1711,9 +1887,7 @@ class InvoiceFormFrame(ttk.Frame):
         self.save_btn.config(text="✔  Update Invoice")
         self._toggle_no_charge()
 
-    # --  save  ----------------------------------------------------------------
     def save_invoice(self):
-        # ---- Validate items
         items = []
         for w in self.item_widgets:
             try:
@@ -1750,7 +1924,7 @@ class InvoiceFormFrame(ttk.Frame):
         else:
             advance_amt, ok = _flt(self.advance_amount_entry, "Advance Amount"); 
             if not ok: return
-            amount_paid, ok = _flt(self.amount_paid_entry,    "Amount Paid");    
+            amount_paid, ok = _flt(self.amount_paid_entry,    "Amount Paid");   
             if not ok: return
             total_paid = advance_amt + amount_paid
             if totals["grand_total"] > 0 and total_paid >= totals["grand_total"]:
@@ -1760,7 +1934,6 @@ class InvoiceFormFrame(ttk.Frame):
             else:
                 status = InvoiceStatus.DUE.value
 
-        # ---- Parse dates
         def _parse_date(entry, label: str) -> Tuple[Optional[str], bool]:
             val = entry.entry.get()
             if not val: return None, True
@@ -1782,7 +1955,6 @@ class InvoiceFormFrame(ttk.Frame):
                 pay_date, ok = _parse_date(self.payment_date_entry, "Payment Date")
                 if not ok: return
 
-        # ---- Build payload
         invoice_data = {
             "invoice_number":        self.invoice_number_entry.get().strip(),
             "bill_to":               self.bill_to_entry.get().strip(),
@@ -1803,6 +1975,7 @@ class InvoiceFormFrame(ttk.Frame):
             "show_qr_code":          0 if is_comp else self.show_qr_var.get(),
             "is_complimentary":      1 if is_comp else 0,
             "is_gst_invoice":        1 if self.is_gst_var.get() else 0,
+            "gst_type":              self.gst_type_var.get(),
             "global_discount_value": gd,
             "global_discount_type":  self.global_discount_type_combo.get(),
             "advance_amount":        advance_amt,
@@ -1812,6 +1985,22 @@ class InvoiceFormFrame(ttk.Frame):
         if not all(invoice_data.get(k) for k in ["invoice_number","bill_to","your_name"]):
             return Messagebox.show_error("Required Fields",
                                          "Invoice #, Client Name, and Your Name are required.")
+                                         
+        # Auto-save client to the Address Book
+        self.db_manager.save_client(
+            invoice_data["bill_to"],
+            invoice_data["client_contact"],
+            invoice_data["client_gstin"]
+        )
+        
+        # Auto-save items to Product & Service Catalog
+        for item in items:
+            if item["title"].strip():
+                self.db_manager.save_catalog_item(
+                    item["title"].strip(),
+                    item["description"].strip(),
+                    item["amount"]
+                )
 
         ok, err = self.db_manager.save_invoice(invoice_data, self.is_editing,
                                                original_id=self.current_id if self.is_editing else None)
@@ -1826,7 +2015,6 @@ class InvoiceFormFrame(ttk.Frame):
 #  MAIN APP WINDOW
 # =============================================================================
 class InvoiceApp(ttk.Window):
-
     def __init__(self, db_manager: DatabaseManager):
         theme = load_config().get("theme", "litera")
         super().__init__(themename=theme)
@@ -1851,11 +2039,8 @@ class InvoiceApp(ttk.Window):
         for f in self.frames.values():
             f.grid(row=0, column=0, sticky="nsew")
 
-        # Status bar
         ttk.Separator(self, bootstyle="secondary").pack(side="bottom", fill="x")
-        self.status_bar = ttk.Label(self, text="Ready",
-                                    font=(FONT_FAMILY, 9), bootstyle="secondary",
-                                    padding=(14, 4), anchor="w")
+        self.status_bar = ttk.Label(self, text="Ready", font=(FONT_FAMILY, 9), bootstyle="secondary", padding=(14, 4), anchor="w")
         self.status_bar.pack(side="bottom", fill="x")
 
         self.after(100, self._poll_queue)
@@ -1873,7 +2058,6 @@ class InvoiceApp(ttk.Window):
             except Exception as exc:
                 logger.warning(f"Could not set window icon image: {exc}")
 
-    # --  queue + progress  ----------------------------------------------------
     def _poll_queue(self):
         try:
             msg = self.task_queue.get_nowait()
@@ -1907,8 +2091,7 @@ class InvoiceApp(ttk.Window):
             pw.resizable(False, False)
             self._prog_win = pw
             ttk.Label(pw, text="Generating PDF…", padding=(30, 12)).pack()
-            pb = ttk.Progressbar(pw, bootstyle="success-striped",
-                                 mode="indeterminate", length=240)
+            pb = ttk.Progressbar(pw, bootstyle="success-striped", mode="indeterminate", length=240)
             pb.pack(padx=30, pady=(0, 22))
             pb.start(10)
             pw.transient(self); pw.grab_set(); pw.update_idletasks()
@@ -1919,12 +2102,12 @@ class InvoiceApp(ttk.Window):
             self._prog_win.destroy()
             self._prog_win = None
 
-
 # =============================================================================
 #  ENTRY POINT
 # =============================================================================
 if __name__ == "__main__":
     try:
+        configure_windows_app_identity()
         InvoiceApp(DatabaseManager(DB_NAME)).mainloop()
     except Exception as exc:
         logger.critical(f"Unhandled exception: {exc}", exc_info=True)
