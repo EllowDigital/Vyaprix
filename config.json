@@ -1,0 +1,25 @@
+{
+    "theme": "litera",
+    "user_details": {
+        "name": "Your Name/Company",
+        "contact_info": "email@example.com\n+91 XXXXX XXXXX"
+    },
+    "company_details": {
+        "name": "BillFlow by EllowLabs",
+        "description": "Invoices That Work for You",
+        "gstin": "22AAAAA0000A1Z5"
+    },
+    "payment_details": {
+        "upi_id": "yourupi@bank",
+        "payment_terms": "Due upon receipt"
+    },
+    "asset_paths": {
+        "logo": "assets/logo.png",
+        "signature": "assets/sign.png",
+        "upi_qr_code": "assets/upi_qr.png"
+    },
+    "pdf_settings": {
+        "footer_message": "Thank you for your business!"
+    },
+    "currency_symbol": "\u20b9"
+}
