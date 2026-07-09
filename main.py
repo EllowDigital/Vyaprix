@@ -66,6 +66,7 @@ FONTS_DIR           = RESOURCE_DIR / "fonts"
 PROGRAM_DATA_DIR = Path(os.environ.get("PROGRAMDATA", r"C:\ProgramData"))
 DATA_DIR         = PROGRAM_DATA_DIR / "EllowLabs" / "BillFlow"
 ASSETS_DIR       = DATA_DIR / "assets"
+DATA_FONTS_DIR   = DATA_DIR / "fonts"     
 INVOICES_DIR     = DATA_DIR / "invoices"
 BATCH_DIR        = DATA_DIR / "invoices" / "_batches"
 LOGS_DIR         = DATA_DIR / "logs"
@@ -75,7 +76,8 @@ LOG_FILE         = LOGS_DIR / "BillFlow.log"
 
 def _initialize_environment():
     """Create mutable directories and copy default assets on first launch."""
-    for _dir in (DATA_DIR, ASSETS_DIR, INVOICES_DIR, BATCH_DIR, LOGS_DIR):
+    # ADDED: DATA_FONTS_DIR to the list of folders to create
+    for _dir in (DATA_DIR, ASSETS_DIR, DATA_FONTS_DIR, INVOICES_DIR, BATCH_DIR, LOGS_DIR):
         _dir.mkdir(parents=True, exist_ok=True)
 
     # Copy default assets from the EXE to ProgramData if they don't exist
@@ -88,6 +90,17 @@ def _initialize_environment():
                         shutil.copy2(asset, dest)
                     except Exception as e:
                         print(f"Failed to copy asset {asset.name}: {e}")
+                        
+    # NEW BLOCK: Copy default fonts from the EXE to ProgramData
+    if FONTS_DIR.exists():
+        for font_file in FONTS_DIR.iterdir():
+            if font_file.is_file():
+                dest = DATA_FONTS_DIR / font_file.name
+                if not dest.exists():
+                    try:
+                        shutil.copy2(font_file, dest)
+                    except Exception as e:
+                        print(f"Failed to copy font {font_file.name}: {e}")
 
 _initialize_environment()
 
@@ -142,11 +155,14 @@ logger = logging.getLogger(__name__)
 # =============================================================================
 def register_fonts() -> str:
     try:
-        reg  = FONTS_DIR / "NotoSans-Regular.ttf"
-        bold = FONTS_DIR / "NotoSans-Bold.ttf"
+        # POINT TO THE NEW PROGRAMDATA FOLDER
+        reg  = DATA_FONTS_DIR / "NotoSans-Regular.ttf"
+        bold = DATA_FONTS_DIR / "NotoSans-Bold.ttf"
+        
         if reg.exists() and bold.exists():
-            pdfmetrics.registerFont(TTFont("NotoSans",      reg))
-            pdfmetrics.registerFont(TTFont("NotoSans-Bold", bold))
+            # Remember to keep the str() fix!
+            pdfmetrics.registerFont(TTFont("NotoSans",      str(reg)))
+            pdfmetrics.registerFont(TTFont("NotoSans-Bold", str(bold)))
             addMapping("NotoSans", 0, 0, "NotoSans")
             addMapping("NotoSans", 1, 0, "NotoSans-Bold")
             return "NotoSans"
