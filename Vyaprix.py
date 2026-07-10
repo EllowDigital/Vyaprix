@@ -1,56 +1,172 @@
 # =============================================================================
-#  BillFlow By EllowLabs  –  Professional Edition v3.0
+#  Vyaprix By EllowLabs  –  Professional Edition v3.0
 #  Complete rewrite: faster data layer, redesigned navigation, payment
 #  history, dedicated client/catalog managers, bulk actions, invoice notes.
 # =============================================================================
+
+# --- 1. Standard Library Imports ---
+import csv
+import datetime
+import io
+import json
+import logging
+import os
+import queue
+import re
+import shutil
+import sqlite3
+import subprocess
+import sys
+import threading
+import time
 import tkinter as tk
+from contextlib import closing
+from enum import Enum
+from logging.handlers import RotatingFileHandler
+from pathlib import Path
 from tkinter import filedialog
+from typing import Any, Callable, Dict, List, Optional, Tuple, Type
+from xml.sax.saxutils import escape as xml_escape
+
+# --- 2. Third-Party GUI Imports (ttkbootstrap) ---
 import ttkbootstrap as ttk
 from ttkbootstrap.dialogs import Messagebox as _TTKMessagebox
-from ttkbootstrap.widgets.scrolled import ScrolledFrame
 from ttkbootstrap.widgets import DateEntry
-import sqlite3
-import json
-import os
-import re
-import sys
-import subprocess
-import datetime
-import threading
-import queue
-import logging
-from logging.handlers import RotatingFileHandler
-from xml.sax.saxutils import escape as xml_escape
-import csv
-import time
-from pathlib import Path
-from typing import Dict, Any, List, Optional, Tuple, Type, Callable
-import shutil
-from enum import Enum
-from contextlib import closing
-import barcode
-from barcode.writer import ImageWriter
-import io
+from ttkbootstrap.widgets.scrolled import ScrolledFrame
 
+# --- 3. Third-Party Document Generation (ReportLab) ---
+from reportlab.lib import colors
+from reportlab.lib.enums import TA_CENTER, TA_RIGHT
+from reportlab.lib.fonts import addMapping
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+from reportlab.lib.units import cm
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
+from reportlab.platypus import Image, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+
+# --- 4. Optional & Critical Dependencies ---
+
+# PyMuPDF (Required for PDF viewing/manipulation)
+try:
+    import fitz
+except ImportError:
+    print("CRITICAL: PyMuPDF not installed. Run: pip install PyMuPDF")
+    sys.exit(1)
+
+# Python-Barcode (Optional)
+try:
+    import barcode
+    from barcode.writer import ImageWriter
+    BARCODE_AVAILABLE = True
+except ImportError:
+    BARCODE_AVAILABLE = False
+    print("WARNING: python-barcode not installed. Barcodes will be skipped.")
 
 # =============================================================================
-#  MESSAGEBOX COMPATIBILITY WRAPPER
+#  1. APPLICATION METADATA
 # =============================================================================
-# ttkbootstrap's real Messagebox API is `show_error(message, title=..., ...)`
-# -- message first. Every call site in this file (39 of them) was written
-# assuming stdlib tkinter.messagebox's convention instead, where TITLE comes
-# first: `Messagebox.show_error("Validation", "Client name is required.")`.
-# With the real API that swaps the dialog's title and body.
-#
-# Worse: ttkbootstrap's `okcancel()`/`yesno()` return the *label text* of
-# whichever button was clicked ("OK", "Cancel", "Yes", "No"), not a bool.
-# Every "if Messagebox.okcancel(...):" check in this app was therefore
-# always true -- both "OK" and "Cancel" are non-empty, truthy strings --
-# so clicking Cancel on a delete confirmation deleted anyway.
-#
-# Fixing this in one place (instead of touching 39 call sites full of
-# f-strings, ternaries, and keyword args) is far lower-risk. Every existing
-# call site keeps working unchanged, now with correct behavior.
+APP_NAME: str          = "Vyaprix"
+APP_VERSION: str       = "v1.2"
+APP_BUILD_VERSION: str = "1.2.2"
+APP_RELEASE_DATE: str  = "10 July 2026"
+APP_TAGLINE: str       = "Business Made Smarter."
+
+APP_ATTRIBUTION: str = (
+    "Designed & Developed by Sarwan Yadav\n"
+    "at EllowLabs\n"
+    "Published by EllowDigital\n"
+    "© 2026 EllowDigital. All Rights Reserved."
+)
+
+# =============================================================================
+#  2. SYSTEM PATHS & DIRECTORIES
+# =============================================================================
+def _resource_root() -> Path:
+    """Return the read-only root containing resources bundled by PyInstaller."""
+    if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+        return Path(sys._MEIPASS)
+    return Path(__file__).resolve().parent
+
+# Read-Only paths (inside the compiled EXE)
+RESOURCE_DIR: Path        = _resource_root()
+RESOURCE_ASSETS_DIR: Path = RESOURCE_DIR / "assets"
+FONTS_DIR: Path           = RESOURCE_DIR / "fonts"
+
+# Mutable application state mapped to Windows ProgramData
+PROGRAM_DATA_DIR: Path = Path(os.environ.get("PROGRAMDATA", r"C:\ProgramData"))
+DATA_DIR: Path         = PROGRAM_DATA_DIR / "EllowDigital" / "Vyaprix"
+
+# Writable subdirectories
+ASSETS_DIR: Path       = DATA_DIR / "assets"
+DATA_FONTS_DIR: Path   = DATA_DIR / "fonts"     
+INVOICES_DIR: Path     = DATA_DIR / "invoices"
+BATCH_DIR: Path        = INVOICES_DIR / "_batches"
+LOGS_DIR: Path         = DATA_DIR / "logs"
+
+# Core Application Files
+DB_NAME: Path          = DATA_DIR / "Vyaprix.db"
+CONFIG_FILE: Path      = DATA_DIR / "config.json"
+LOG_FILE: Path         = LOGS_DIR / "Vyaprix.log"
+
+# UI Specific Assets (Read directly from EXE for speed)
+APP_LOGO_PNG: Path     = RESOURCE_ASSETS_DIR / "app_logo.png"
+APP_LOGO_ICO: Path     = RESOURCE_ASSETS_DIR / "app_logo.ico"
+
+# =============================================================================
+#  3. ENVIRONMENT INITIALIZATION
+# =============================================================================
+def _copy_bundled_files(src_dir: Path, dest_dir: Path) -> None:
+    """Helper method to securely copy bundled files to the writable directory."""
+    if not src_dir.exists():
+        return
+        
+    for item in src_dir.iterdir():
+        if item.is_file():
+            dest = dest_dir / item.name
+            if not dest.exists():
+                try:
+                    shutil.copy2(item, dest)
+                except Exception as e:
+                    # Fallback to print since the logger is not initialized yet
+                    print(f"Failed to copy {item.name}: {e}")
+
+def _initialize_environment() -> None:
+    """Create mutable directories and copy default assets/fonts on first launch."""
+    # 1. Ensure all required writable directories exist
+    directories_to_create = (
+        DATA_DIR, ASSETS_DIR, DATA_FONTS_DIR, 
+        INVOICES_DIR, BATCH_DIR, LOGS_DIR
+    )
+    for directory in directories_to_create:
+        directory.mkdir(parents=True, exist_ok=True)
+
+    # 2. Extract defaults from EXE to Writable paths
+    _copy_bundled_files(RESOURCE_ASSETS_DIR, ASSETS_DIR)
+    _copy_bundled_files(FONTS_DIR, DATA_FONTS_DIR)
+
+# Trigger initialization immediately on module load
+_initialize_environment()
+
+# =============================================================================
+#  4. UI CONSTANTS & FORMATTING
+# =============================================================================
+FONT_FAMILY: str         = "Segoe UI"
+DB_DATE_FORMAT: str      = "%Y-%m-%d"
+DISPLAY_DATE_FORMAT: str = "%d %b %Y"
+PAYMENT_MODES: list[str] = ['Cash', 'UPI', 'Bank Transfer', 'Card', 'Cheque', 'Other']
+
+# Regex to safely sanitize invoice numbers before converting them to PDF filenames.
+# Prevents path traversal and Windows filesystem crashes.
+INVALID_FILENAME_CHARS: re.Pattern = re.compile(r'[\\/:*?"<>|]')
+
+STATUS_BADGE: dict[str, dict[str, str]] = {
+    "PAID":          {"foreground": "#10B981", "background": ""}, # Soft Green
+    "DUE":           {"foreground": "#EF4444", "background": ""}, # Soft Red
+    "PARTIAL":       {"foreground": "#F59E0B", "background": ""}, # Orange/Amber
+    "COMPLIMENTARY": {"foreground": "#3B82F6", "background": ""}, # Blue
+}
+
 class Messagebox:
     """Drop-in replacement matching how this app actually calls Messagebox:
     title first, then message -- and real booleans from confirmation dialogs."""
@@ -89,112 +205,6 @@ class Messagebox:
         result = _TTKMessagebox.yesno(message, title, *args, **kwargs)
         return result == "Yes"
 
-# --- PyMuPDF ---
-try:
-    import fitz
-except ImportError:
-    print("PyMuPDF not installed.  Run:  pip install PyMuPDF")
-    sys.exit(1)
-
-# --- ReportLab ---
-from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, Image
-from reportlab.lib.pagesizes import A4
-from reportlab.lib.units import cm
-from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.lib import colors
-from reportlab.lib.enums import TA_RIGHT, TA_CENTER
-from reportlab.pdfbase import pdfmetrics
-from reportlab.pdfbase.ttfonts import TTFont
-from reportlab.lib.fonts import addMapping
-
-
-# =============================================================================
-#  CONSTANTS & PATHS
-# =============================================================================
-def _resource_root() -> Path:
-    """Return the read-only root containing resources bundled by PyInstaller."""
-    if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
-        return Path(sys._MEIPASS)
-    return Path(__file__).resolve().parent
-
-RESOURCE_DIR        = _resource_root()
-RESOURCE_ASSETS_DIR = RESOURCE_DIR / "assets"
-FONTS_DIR           = RESOURCE_DIR / "fonts"
-
-# Mutable application state mapped to Windows ProgramData
-PROGRAM_DATA_DIR = Path(os.environ.get("PROGRAMDATA", r"C:\ProgramData"))
-DATA_DIR         = PROGRAM_DATA_DIR / "EllowLabs" / "BillFlow"
-ASSETS_DIR       = DATA_DIR / "assets"
-DATA_FONTS_DIR   = DATA_DIR / "fonts"     
-INVOICES_DIR     = DATA_DIR / "invoices"
-BATCH_DIR        = DATA_DIR / "invoices" / "_batches"
-LOGS_DIR         = DATA_DIR / "logs"
-DB_NAME          = DATA_DIR / "invoices.db"
-CONFIG_FILE      = DATA_DIR / "config.json"
-LOG_FILE         = LOGS_DIR / "BillFlow.log"
-
-def _initialize_environment():
-    """Create mutable directories and copy default assets on first launch."""
-    # ADDED: DATA_FONTS_DIR to the list of folders to create
-    for _dir in (DATA_DIR, ASSETS_DIR, DATA_FONTS_DIR, INVOICES_DIR, BATCH_DIR, LOGS_DIR):
-        _dir.mkdir(parents=True, exist_ok=True)
-
-    # Copy default assets from the EXE to ProgramData if they don't exist
-    if RESOURCE_ASSETS_DIR.exists():
-        for asset in RESOURCE_ASSETS_DIR.iterdir():
-            if asset.is_file():
-                dest = ASSETS_DIR / asset.name
-                if not dest.exists():
-                    try:
-                        shutil.copy2(asset, dest)
-                    except Exception as e:
-                        print(f"Failed to copy asset {asset.name}: {e}")
-                        
-    # NEW BLOCK: Copy default fonts from the EXE to ProgramData
-    if FONTS_DIR.exists():
-        for font_file in FONTS_DIR.iterdir():
-            if font_file.is_file():
-                dest = DATA_FONTS_DIR / font_file.name
-                if not dest.exists():
-                    try:
-                        shutil.copy2(font_file, dest)
-                    except Exception as e:
-                        print(f"Failed to copy font {font_file.name}: {e}")
-
-_initialize_environment()
-
-FONT_FAMILY          = "Segoe UI"
-APP_NAME             = "BillFlow by EllowLabs"
-APP_VERSION          = "v3.0"
-APP_BUILD_VERSION    = "3.0.0.2"
-APP_RELEASE_DATE     = "07 July 2026"
-APP_TAGLINE          = "Invoices That Work for You"
-
-APP_ATTRIBUTION = (
-    "Designed and Developed by Sarwan Yadav\n"
-    "at EllowLabs\n"
-    "© 2026 EllowLabs. All Rights Reserved."
-)
-DB_DATE_FORMAT       = "%Y-%m-%d"
-DISPLAY_DATE_FORMAT  = "%d %b %Y"
-PAYMENT_MODES        = ['Cash', 'UPI', 'Bank Transfer', 'Card', 'Cheque', 'Other']
-
-# Characters that are illegal (or dangerous) in a filename on Windows, and
-# that also happen to enable path traversal if left unchecked ("/", "\").
-# Invoice numbers become PDF filenames, so they're validated against this
-# at save time and defensively re-sanitized again in PDFGenerator.
-INVALID_FILENAME_CHARS = re.compile(r'[\\/:*?"<>|]')
-
-# For UI, read directly from the EXE MEIPASS for speed and reliability
-APP_LOGO_PNG         = RESOURCE_ASSETS_DIR / "app_logo.png"
-APP_LOGO_ICO         = RESOURCE_ASSETS_DIR / "app_logo.ico"
-
-STATUS_BADGE = {
-    "PAID":          {"foreground": "#10B981", "background": ""}, # Soft Green
-    "DUE":           {"foreground": "#EF4444", "background": ""}, # Soft Red
-    "PARTIAL":       {"foreground": "#F59E0B", "background": ""}, # Orange/Amber
-    "COMPLIMENTARY": {"foreground": "#3B82F6", "background": ""}, # Blue
-}
 
 class InvoiceStatus(Enum):
     PAID          = "Paid"
@@ -210,7 +220,7 @@ logging.basicConfig(
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
         # Rotate at 5MB, keep 5 backups -- prevents the log from growing
-        # forever on a machine that runs BillFlow for years.
+        # forever on a machine that runs Vyaprix for years.
         RotatingFileHandler(LOG_FILE, mode='a', maxBytes=5 * 1024 * 1024,
                             backupCount=5, encoding='utf-8'),
         logging.StreamHandler(),
@@ -250,7 +260,7 @@ def get_default_config() -> Dict[str, Any]:
         "company_details": {"name": APP_NAME, "description": APP_TAGLINE, "gstin": "22AAAAA0000A1Z5"},
         "payment_details": {"upi_id": "yourupi@bank",         "payment_terms": "Due upon receipt"},
         "asset_paths":     {"logo": "assets/app_logo.png",    "signature": "assets/sign.png", "upi_qr_code": "assets/upi_qr.png"},
-        "pdf_settings":    {"footer_message": "Thank you for your business!"},
+        "pdf_settings":    {"footer_message": "Generated with Vyaprix • Business Made Smarter."},
         "currency_symbol": "₹",
     }
 
@@ -330,7 +340,9 @@ def load_app_logo_image(master: tk.Misc) -> Optional[tk.PhotoImage]:
                 if w > max_width:
                     new_height = int(h * (max_width / w))
                     # Use LANCZOS for high-quality downsampling
-                    img = img.resize((max_width, new_height), Image.Resampling.LANCZOS)
+                     # Try modern Pillow, fallback to legacy Pillow
+                    resample_filter = getattr(Image, 'Resampling', Image).LANCZOS
+                    img = img.resize((max_width, new_height), resample_filter)
                 
                 return ImageTk.PhotoImage(image=img, master=master)
             
@@ -354,7 +366,7 @@ def configure_windows_app_identity() -> None:
     try:
         import ctypes
         ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
-            "EllowLabs.BillFlow.1.0"
+            "EllowLabs.Vyaprix"
         )
     except Exception as exc:
         logger.warning("Could not set Windows application identity: %s", exc)
@@ -1005,7 +1017,7 @@ class PDFGenerator:
             path = path.resolve()
             path.relative_to(DATA_DIR.resolve())
         except (OSError, ValueError):
-            logger.warning("Ignoring asset outside BillFlow's ProgramData folder: %s", path)
+            logger.warning("Ignoring asset outside Vyaprix's ProgramData folder: %s", path)
             return None
 
         if path.is_file():
@@ -1046,15 +1058,16 @@ class PDFGenerator:
         # to take down the whole PDF. If it fails for any reason, we simply
         # skip the barcode instead of aborting invoice generation.
         title_block_rows = []
-        try:
-            code128 = barcode.get('code128', str(self.data.get('invoice_number', '000')), writer=ImageWriter())
-            buffer = io.BytesIO()
-            code128.write(buffer, options={"write_text": False, "module_width": 0.2, "module_height": 5.0})
-            buffer.seek(0)
-            title_block_rows.append([Image(buffer, width=3.5*cm, height=0.8*cm)])
-        except Exception as exc:
-            logger.warning(f"Skipping barcode for invoice "
-                           f"{self.data.get('invoice_number')!r}: {exc}")
+        if BARCODE_AVAILABLE:
+            try:
+                code128 = barcode.get('code128', str(self.data.get('invoice_number') or '000'), writer=ImageWriter())
+                buffer = io.BytesIO()
+                code128.write(buffer, options={"write_text": False, "module_width": 0.2, "module_height": 5.0})
+                buffer.seek(0)
+                title_block_rows.append([Image(buffer, width=3.5*cm, height=0.8*cm)])
+            except Exception as exc:
+                logger.warning(f"Skipping barcode for invoice "
+                            f"{self.data.get('invoice_number')!r}: {exc}")
         # --------------------------
 
         # Stack the barcode ABOVE the status title (barcode omitted if it failed)
@@ -1063,7 +1076,7 @@ class PDFGenerator:
 
         if logo := self._asset("logo"):
             try:
-                img       = Image(logo, 2.0*cm, 2.0*cm, kind="proportional")
+                img = Image(str(logo), 2.0*cm, 2.0*cm, kind="proportional")
                 left_side = Table([[img, left]], colWidths=[2.5*cm, 6.5*cm],
                                   style=[("VALIGN",(0,0),(-1,-1),"MIDDLE"), ("LEFTPADDING",(0,0),(-1,-1),0)])
             except Exception:
@@ -1247,12 +1260,14 @@ class PDFGenerator:
             if qr := self._asset("upi_qr_code"):
                 upi = safe_markup(self.config.get("payment_details", {}).get("upi_id", ""))
                 detail = Paragraph(f"<b>PAYMENT DETAILS</b><br/>Scan to pay.<br/>UPI ID: {upi}", self.styles["NC"])
-                qr_cell = Table([[Image(qr, 2.2*cm, 2.2*cm, kind="proportional"), detail]],
+                qr_cell = Table([[Image(str(qr), 2.2*cm, 2.2*cm, kind="proportional"), detail]],
                                 colWidths=[2.5*cm,"100%"], style=[("VALIGN",(0,0),(-1,-1),"TOP")])
+                               
+
         if sig := self._asset("signature"):
             name = safe_markup(self.data.get("your_name"))
             sig_cell = Table(
-                [[Image(sig, 4.0*cm, 2.0*cm, kind="proportional")],
+                [[Image(str(sig), 4.0*cm, 2.0*cm, kind="proportional")],
                  [Paragraph(f"<b>{name}</b>", self.styles["Center"])]],
                 style=[("LINEABOVE",(0,1),(0,1),1,colors.black),
                        ("TOPPADDING",(0,1),(0,1),3),
@@ -1276,7 +1291,7 @@ class PDFGenerator:
             story += [Paragraph("<b>Payment History</b>", self.styles["NoteBox"]), Spacer(1, 0.15*cm),
                       history, Spacer(1, 0.3*cm)]
         # Internal notes (self.data["notes"]) are intentionally never printed
-        # on the customer-facing PDF -- they're for BillFlow's eyes only.
+        # on the customer-facing PDF -- they're for Vyaprix's eyes only.
         story += [Spacer(1, 0.3*cm), self._build_footer_section()]
         doc.build(story, onFirstPage=self.on_each_page, onLaterPages=self.on_each_page)
         return self.filename
@@ -1301,7 +1316,7 @@ class SettingsDialog(tk.Toplevel):
     def __init__(self, parent, callback):
         super().__init__(parent)
         self.callback  = callback
-        self.title("Application Settings")
+        self.title(f"{APP_NAME} Settings")
         self.geometry("640x760")
         self.minsize(580, 680)
         self.resizable(True, True)
@@ -1410,7 +1425,7 @@ class SettingsDialog(tk.Toplevel):
 
     def _backup_db(self):
         if path := filedialog.asksaveasfilename(
-            initialfile=f"BillFlow-backup-{datetime.date.today().isoformat()}.db",
+            initialfile=f"Vyaprix-backup-{datetime.date.today().isoformat()}.db",
             defaultextension=".db", filetypes=[("SQLite Database", "*.db")],
         ):
             try:
@@ -1809,8 +1824,21 @@ class ClientDialog(tk.Toplevel):
         ttk.Button(btns, text="Cancel", bootstyle="secondary", command=self.destroy).pack(side="right", padx=(8, 0))
         ttk.Button(btns, text="Save", bootstyle="success", command=self._save).pack(side="right")
         self.name_entry.focus_set()
-        self.bind("<Return>", lambda _: self._save())
+        
+        # --- THE FIX IS HERE ---
+        # Instead of calling _save() directly, we call a new handler
+        self.bind("<Return>", self._on_enter_pressed)
         self.bind("<Escape>", lambda _: self.destroy())
+
+    # --- ADD THIS NEW METHOD ---
+    def _on_enter_pressed(self, event):
+        """Handle the Enter key smartly based on what the user is doing."""
+        # If the user is inside the multi-line text box, let them make a new line!
+        if self.focus_get() == self.contact_text:
+            return 
+        
+        # Otherwise, save the form.
+        self._save()
 
     def _save(self):
         name = self.name_entry.get().strip()
@@ -1825,7 +1853,6 @@ class ClientDialog(tk.Toplevel):
             self.destroy()
         else:
             Messagebox.show_error("Could Not Save", err, parent=self)
-
 
 class CatalogItemDialog(tk.Toplevel):
     """Add or edit a single Product & Service Catalog entry."""
@@ -1887,7 +1914,6 @@ class CatalogItemDialog(tk.Toplevel):
         else:
             Messagebox.show_error("Could Not Save", err, parent=self)
 
-
 class NoteDialog(tk.Toplevel):
     """Quick popup to add/edit an invoice's internal note straight from the
     invoice list, without opening the full invoice form."""
@@ -1925,7 +1951,7 @@ class NoteDialog(tk.Toplevel):
         self.destroy()
 
 # =============================================================================
-#  DASHBOARD  /  INVOICE LIST
+#  DASHBOARD  /  INVOICE LIST (IMPROVED)
 # =============================================================================
 class DashboardFrame(ttk.Frame):
     STATUS_FILTERS = ["All", "Paid", "Due", "Partial", "Complimentary"]
@@ -1950,7 +1976,7 @@ class DashboardFrame(ttk.Frame):
         self._sort_col      = "date"
         self._sort_rev      = True
         self._filter_btns: Dict[str, ttk.Button] = {}
-        self._row_index: Dict[str, Dict] = {}   # iid -> raw row dict, for fast lookups
+        self._row_index: Dict[str, Dict] = {}   
         self._build()
         self._debounce_search = Debouncer(self, 200, self._populate)
 
@@ -1966,12 +1992,14 @@ class DashboardFrame(ttk.Frame):
     def _header(self, parent):
         row = ttk.Frame(parent)
         row.pack(fill="x", pady=(0, 18))
+        
         left = ttk.Frame(row)
         left.pack(side="left")
         ttk.Label(left, text="Dashboard", font=(FONT_FAMILY, 24, "bold")).pack(anchor="w")
         ttk.Label(left, text="Every invoice, at a glance.", font=(FONT_FAMILY, 10), bootstyle="secondary").pack(anchor="w")
 
-        right = ttk.Frame(row); right.pack(side="right")
+        right = ttk.Frame(row)
+        right.pack(side="right")
         ttk.Button(right, text="📊  Export CSV", bootstyle="info-outline", command=self._export_csv).pack(side="left", padx=4)
         ttk.Button(right, text="＋  New Invoice", bootstyle="primary", command=lambda: self.controller.show_frame(InvoiceFormFrame)).pack(side="left", padx=(4, 0))
 
@@ -1980,6 +2008,7 @@ class DashboardFrame(ttk.Frame):
         row.pack(fill="x", pady=(0, 18))
         for i in range(4):
             row.columnconfigure(i, weight=1)
+            
         self.s_billed   = self._card(row, "💰  Total Billed",   fmt_money(0), "primary",   0)
         self.s_received = self._card(row, "✅  Total Received", fmt_money(0), "success",   1)
         self.s_due      = self._card(row, "⚠️  Balance Due",    fmt_money(0), "danger",    2)
@@ -2000,6 +2029,7 @@ class DashboardFrame(ttk.Frame):
         filter_group = ttk.Frame(row)
         filter_group.pack(side="left")
         ttk.Label(filter_group, text="Filter:", font=(FONT_FAMILY, 9), bootstyle="secondary").pack(side="left", padx=(0, 8))
+        
         for status in self.STATUS_FILTERS:
             btn = ttk.Button(
                 filter_group, text=status, width=13,
@@ -2013,7 +2043,8 @@ class DashboardFrame(ttk.Frame):
         srch.pack(side="right")
         ttk.Label(srch, text="🔍", font=(FONT_FAMILY, 12)).pack(side="left", padx=(0, 4))
         self.search_var = tk.StringVar()
-        self.search_var.trace_add("write", self._on_search)
+        self.search_var.trace_add("write", lambda *_: self._debounce_search())
+        
         entry = ttk.Entry(srch, textvariable=self.search_var, width=28)
         entry.pack(side="left")
         ToolTip(entry, "Search by invoice number, client name, or note")
@@ -2025,9 +2056,6 @@ class DashboardFrame(ttk.Frame):
             btn.configure(bootstyle="primary" if s == status else "secondary-outline")
         self._populate()
 
-    def _on_search(self, *_):
-        self._debounce_search()
-
     def _table(self, parent):
         wrap = ttk.Frame(parent)
         wrap.pack(fill="both", expand=True)
@@ -2035,7 +2063,9 @@ class DashboardFrame(ttk.Frame):
         self.tree = ttk.Treeview(wrap, columns=[c[0] for c in self.COL_DEFS],
                                  show="headings", bootstyle="primary",
                                  selectmode="extended", height=16)
+                                 
         for cid, text, width, anchor in self.COL_DEFS:
+            # Set up column headers with sorting commands
             self.tree.heading(cid, text=text, anchor=anchor, command=lambda c=cid: self._sort_by(c))
             self.tree.column(cid, width=width, anchor=anchor, minwidth=40)
 
@@ -2052,6 +2082,7 @@ class DashboardFrame(ttk.Frame):
         self.tree.bind("<Button-3>",          self._show_ctx_menu)
         self.tree.bind("<Delete>",            lambda _: self._act_delete())
 
+        # Context Menus
         self._ctx_single = tk.Menu(self, tearoff=0)
         self._ctx_single.add_command(label="📄  View PDF",   command=self._act_view_pdf)
         self._ctx_single.add_command(label="✏️  Edit",       command=self._act_edit)
@@ -2067,14 +2098,21 @@ class DashboardFrame(ttk.Frame):
         self._ctx_bulk.add_command(label="🗑️  Bulk Delete",  command=self._act_delete)
 
     def _sort_by(self, col: str):
+        """Sorts the treeview by clicking a column header and handles UI arrows."""
         if self._sort_col == col:
             self._sort_rev = not self._sort_rev
         else:
-            self._sort_col = col; self._sort_rev = True
-        col_texts = {c[0]: c[1] for c in self.COL_DEFS}
-        for c, t in col_texts.items():
-            arrow = (self.SORT_DESC if self._sort_rev else self.SORT_ASC) if c == col else ""
-            self.tree.heading(c, text=t + arrow)
+            self._sort_col = col
+            self._sort_rev = False # Default to ascending when clicking a new column
+            
+        # Update column headers to show the correct arrow and clear others
+        for cid, text, _, _ in self.COL_DEFS:
+            if cid == col:
+                arrow = self.SORT_DESC if self._sort_rev else self.SORT_ASC
+                self.tree.heading(cid, text=f"{text}{arrow}")
+            else:
+                self.tree.heading(cid, text=text) 
+                
         self._populate()
 
     def _action_bar(self, parent):
@@ -2084,19 +2122,33 @@ class DashboardFrame(ttk.Frame):
         self.hint_lbl = ttk.Label(row, text="Select an invoice to take action", bootstyle="secondary", font=(FONT_FAMILY, 9))
         self.hint_lbl.pack(side="left")
 
-        # -- single-selection actions --
+        # -- Single-selection actions --
         self.del_btn  = ttk.Button(row, text="🗑  Delete",    bootstyle="danger-outline",   state="disabled", command=self._act_delete)
         self.note_btn = ttk.Button(row, text="🗒  Note",      bootstyle="secondary-outline", state="disabled", command=self._act_edit_note)
         self.dup_btn  = ttk.Button(row, text="📋  Duplicate",  bootstyle="secondary-outline", state="disabled", command=self._act_duplicate)
         self.edit_btn = ttk.Button(row, text="✏  Edit",      bootstyle="secondary",         state="disabled", command=self._act_edit)
         self.pdf_btn  = ttk.Button(row, text="📄  View PDF",  bootstyle="primary",           state="disabled", command=self._act_view_pdf)
 
-        # -- bulk-selection actions --
+        # -- Bulk-selection actions --
         self.bulk_del_btn    = ttk.Button(row, text="🗑  Bulk Delete", bootstyle="danger-outline",    command=self._act_delete)
         self.bulk_export_btn = ttk.Button(row, text="📊  Bulk Export", bootstyle="secondary-outline",  command=self._act_bulk_export)
         self.bulk_print_btn  = ttk.Button(row, text="🖨  Bulk Print",  bootstyle="primary",            command=self._act_bulk_print)
 
+        self._show_single_actions()
+
+    def _show_single_actions(self, state="disabled"):
+        """Helper to cleanly display single-selection buttons."""
+        for b in [self.bulk_print_btn, self.bulk_export_btn, self.bulk_del_btn]:
+            b.pack_forget()
         for b in [self.pdf_btn, self.edit_btn, self.dup_btn, self.note_btn, self.del_btn]:
+            b.pack(side="right", padx=4)
+            b.config(state=state)
+
+    def _show_bulk_actions(self):
+        """Helper to cleanly display bulk-selection buttons."""
+        for b in [self.pdf_btn, self.edit_btn, self.dup_btn, self.note_btn, self.del_btn]:
+            b.pack_forget()
+        for b in [self.bulk_print_btn, self.bulk_export_btn, self.bulk_del_btn]:
             b.pack(side="right", padx=4)
 
     def on_show(self, _=None):
@@ -2105,27 +2157,15 @@ class DashboardFrame(ttk.Frame):
 
     def _on_select(self, _=None):
         n = len(self.tree.selection())
-        single_btns = [self.pdf_btn, self.edit_btn, self.dup_btn, self.note_btn, self.del_btn]
-        bulk_btns   = [self.bulk_print_btn, self.bulk_export_btn, self.bulk_del_btn]
-
-        for b in bulk_btns:
-            b.pack_forget()
-        for b in single_btns:
-            b.pack_forget()
-
+        
         if n >= 2:
-            for b in bulk_btns:
-                b.pack(side="right", padx=4)
-            self.del_btn.pack_forget()
+            self._show_bulk_actions()
             self.hint_lbl.config(text=f"{n} invoices selected")
         else:
-            for b in single_btns:
-                b.pack(side="right", padx=4)
             state = "normal" if n == 1 else "disabled"
-            for b in single_btns:
-                b.config(state=state)
+            self._show_single_actions(state=state)
             self.hint_lbl.config(
-                text="Double-click to edit  •  Right-click for more options  •  Ctrl/Shift-click to multi-select" if n
+                text="Double-click to edit  •  Right-click for options  •  Ctrl/Shift-click to multi-select" if n
                      else "Select an invoice to take action"
             )
 
@@ -2137,12 +2177,17 @@ class DashboardFrame(ttk.Frame):
         return ids[0] if ids else None
 
     def _populate(self):
+        # Remember selection so it doesn't drop when typing in search or clicking sort
+        current_selection = self.tree.selection()
+        
         self.tree.delete(*self.tree.get_children())
         self._row_index.clear()
+        
         rows = self.db_manager.get_all_invoices(
             search_query=self.search_var.get().strip(),
             status_filter=self._status_filter,
         )
+        
         entries = []
         for inv in rows:
             row = dict(inv)
@@ -2153,23 +2198,39 @@ class DashboardFrame(ttk.Frame):
             paid_txt   = "-"         if is_comp else fmt_money(row.get("total_paid"))
             bal_txt    = "-"         if is_comp else fmt_money(row.get("balance_due"))
             note_icon  = "📝" if (row.get("notes") or "").strip() else ""
+            
             values = (row["invoice_number"], row["bill_to"], date_val, status_val,
                       total_txt, paid_txt, bal_txt, note_icon)
+            
+            # Robust Sort Keys - ensuring safe fallbacks for missing data
             sort_keys = {
-                "id": row["invoice_number"], "client": row["bill_to"],
-                "date": row["invoice_date"] or "", "status": status_val,
-                "total": row.get("grand_total") or 0, "paid": row.get("total_paid") or 0,
-                "balance": row.get("balance_due") or 0, "note": note_icon,
+                "id":      row.get("invoice_number", ""),
+                "client":  row.get("bill_to", ""),
+                "date":    row.get("invoice_date") or "0000-00-00", 
+                "status":  status_val,
+                "total":   float(row.get("grand_total") or 0.0), 
+                "paid":    float(row.get("total_paid") or 0.0),
+                "balance": float(row.get("balance_due") or 0.0), 
+                "note":    note_icon,
             }
             entries.append((values, status_val, sort_keys, row))
 
+        # Perform the actual sort based on the chosen column
         entries.sort(key=lambda e: e[2].get(self._sort_col, ""), reverse=self._sort_rev)
 
+        # Insert rows back into the tree
         for values, tag, _keys, raw in entries:
             badge = tag if tag in STATUS_BADGE else ""
             iid = raw["invoice_number"]
             self.tree.insert("", "end", iid=iid, values=values, tags=(badge,) if badge else ())
             self._row_index[iid] = raw
+            
+        # Restore selection
+        for item in current_selection:
+            if self.tree.exists(item):
+                self.tree.selection_add(item)
+                
+        self._on_select() # Re-evaluate button states
 
     def _update_stats(self):
         s = self.db_manager.get_dashboard_stats()
@@ -2204,6 +2265,7 @@ class DashboardFrame(ttk.Frame):
             msg = f"Permanently delete Invoice #{ids[0]}?\nThis cannot be undone."
         else:
             msg = f"Permanently delete {len(ids)} invoices?\nThis cannot be undone."
+            
         if Messagebox.okcancel("Delete Invoice" if len(ids) == 1 else "Bulk Delete", msg):
             self.db_manager.delete_invoices(ids)
             self.on_show()
@@ -2212,6 +2274,7 @@ class DashboardFrame(ttk.Frame):
         if not (inv_id := self._selected_id()): return
         row = self.db_manager.get_invoice_by_id(inv_id)
         if not row: return
+        
         new_data = {k: row[k] for k in row.keys() if k not in
                     ("grand_total", "total_paid", "balance_due", "created_ts")}
         new_data["invoice_number"] = self.db_manager.get_next_invoice_number()
@@ -2221,6 +2284,7 @@ class DashboardFrame(ttk.Frame):
         new_data["advance_amount"] = 0.0
         new_data["payment_date"]   = None
         new_data["advance_date"]   = None
+        
         ok, err = self.db_manager.save_invoice(new_data, is_update=False, payments=[])
         if ok:
             self.on_show()
@@ -2401,7 +2465,6 @@ class ClientsFrame(ttk.Frame):
                 self.tree.selection_set(row)
             self._ctx.post(event.x_root, event.y_root)
 
-
 # =============================================================================
 #  CATALOG  (Product & Service manager)
 # =============================================================================
@@ -2513,7 +2576,7 @@ class CatalogFrame(ttk.Frame):
             self._ctx.post(event.x_root, event.y_root)
 
 # =============================================================================
-#  INVOICE FORM
+#  INVOICE FORM (MODERNIZED & REACTIVE)
 # =============================================================================
 class InvoiceFormFrame(ttk.Frame):
     """Create / edit an invoice: billing info, items, tax & discount, and a
@@ -2528,7 +2591,7 @@ class InvoiceFormFrame(ttk.Frame):
         self.payment_rows: List[Dict[str, Any]] = []
         self._catalog_cache: List[Dict] = []
         self._client_cache:  List[Dict] = []
-        self._initial_snapshot: Optional[str] = None   # unsaved-changes tracking
+        self._initial_snapshot: Optional[str] = None   
         self._build()
 
     # ------------------------------------------------------------------ #
@@ -2557,10 +2620,35 @@ class InvoiceFormFrame(ttk.Frame):
         self._section_save_bar(body)
 
     def _card(self, parent, title: str) -> ttk.Frame:
-        wrap = ttk.Frame(parent, padding=16) # <-- FIXED
+        wrap = ttk.Frame(parent, padding=16) 
         wrap.pack(fill="x", pady=(0, 16))
         ttk.Label(wrap, text=title, font=(FONT_FAMILY, 12, "bold")).pack(anchor="w", pady=(0, 10))
         return wrap
+
+    def _prevent_scroll_hijack(self, widget):
+        """Prevents Comboboxes from changing values, and forwards the scroll to the main page."""
+        
+        def on_mousewheel(event):
+            # Windows and macOS scrolling
+            if event.delta:
+                # Calculate direction and scroll the parent ScrolledFrame directly
+                self.scroller.yview_scroll(int(-1 * (event.delta / 120)), "units")
+            return "break" # Stop the combobox data from changing
+            
+        def on_linux_scroll_up(event):
+            # Linux scroll up
+            self.scroller.yview_scroll(-1, "units")
+            return "break"
+            
+        def on_linux_scroll_down(event):
+            # Linux scroll down
+            self.scroller.yview_scroll(1, "units")
+            return "break"
+
+        # Apply the bindings to the widget
+        widget.bind("<MouseWheel>", on_mousewheel)
+        widget.bind("<Button-4>", on_linux_scroll_up)
+        widget.bind("<Button-5>", on_linux_scroll_down)
 
     # ---- Billing (Bill To / From) ------------------------------------ #
     def _section_billing(self, parent):
@@ -2574,10 +2662,12 @@ class InvoiceFormFrame(ttk.Frame):
         ttk.Label(left, text="Bill To", font=(FONT_FAMILY, 12, "bold")).pack(anchor="w", pady=(0, 10))
         ttk.Label(left, text="Client / Company Name *", font=(FONT_FAMILY, 9)).pack(anchor="w")
         self.client_name_var = tk.StringVar()
-        self.client_combo = ttk.Combobox(left, textvariable=self.client_name_var)
+        self.client_combo = ttk.Combobox(left, textvariable=self.client_name_var, height=6)
         self.client_combo.pack(fill="x", pady=(2, 8))
+        self._prevent_scroll_hijack(self.client_combo)
         self.client_combo.bind("<KeyRelease>", self._filter_client_suggestions)
         self.client_combo.bind("<<ComboboxSelected>>", self._on_client_picked)
+        
         ttk.Label(left, text="Contact Info", font=(FONT_FAMILY, 9)).pack(anchor="w")
         self.client_contact_text = tk.Text(left, height=3, relief="flat", highlightthickness=1, wrap="word")
         self.client_contact_text.pack(fill="x", pady=(2, 8))
@@ -2637,8 +2727,9 @@ class InvoiceFormFrame(ttk.Frame):
 
         rg = ttk.Frame(right); rg.pack(fill="x", pady=4)
         self.gst_var = tk.BooleanVar(value=True)
+        # BUG FIX: Ensure toggling GST immediately recalculates totals
         ttk.Checkbutton(rg, text="This is a GST Invoice", variable=self.gst_var,
-                        bootstyle="round-toggle", command=self._apply_field_states).pack(side="left")
+                        bootstyle="round-toggle", command=self._on_gst_toggle).pack(side="left")
 
         rt = ttk.Frame(right); rt.pack(fill="x", pady=4)
         ttk.Label(rt, text="GST / Tax Rate (%)", width=20, anchor="w").pack(side="left")
@@ -2650,9 +2741,12 @@ class InvoiceFormFrame(ttk.Frame):
         rgt = ttk.Frame(right); rgt.pack(fill="x", pady=4)
         ttk.Label(rgt, text="Tax Split Type", width=20, anchor="w").pack(side="left")
         self.gst_type_var = tk.StringVar(value="CGST/SGST")
+        # BUG FIX: Live update when switching between CGST and IGST
+        self.gst_type_var.trace_add("write", lambda *_: self._recalc_totals())
         self.gst_type_combo = ttk.Combobox(rgt, textvariable=self.gst_type_var, state="readonly",
                                            values=["CGST/SGST", "IGST"])
         self.gst_type_combo.pack(side="left", fill="x", expand=True)
+        self._prevent_scroll_hijack(self.gst_type_combo)
 
         rd = ttk.Frame(right); rd.pack(fill="x", pady=4)
         ttk.Label(rd, text="Overall Discount", width=20, anchor="w").pack(side="left")
@@ -2661,9 +2755,18 @@ class InvoiceFormFrame(ttk.Frame):
         self.global_discount_entry.insert(0, "0")
         self.global_discount_entry.pack(side="left", fill="x", expand=True)
         self.global_discount_entry.bind("<KeyRelease>", lambda _: self._recalc_totals())
+        
         self.global_discount_type_var = tk.StringVar(value="amount")
-        ttk.Combobox(disc_wrap, textvariable=self.global_discount_type_var, state="readonly",
-                    values=["amount", "%"], width=7).pack(side="left", padx=(6, 0))
+        
+        # 1. CREATE and SAVE the combobox to a variable first
+        self.disc_type_combo = ttk.Combobox(disc_wrap, textvariable=self.global_discount_type_var, state="readonly", values=["amount", "%"], width=7)
+        
+        # 2. Pack it on the next line
+        self.disc_type_combo.pack(side="left", padx=(6, 0))
+        
+        # 3. Now the scroll fix knows exactly what self.disc_type_combo is!
+        self._prevent_scroll_hijack(self.disc_type_combo) 
+        
         self.global_discount_type_var.trace_add("write", lambda *_: self._recalc_totals())
 
         self.gst_dependents = [self.tax_rate_entry, self.gst_type_combo]
@@ -2671,10 +2774,12 @@ class InvoiceFormFrame(ttk.Frame):
     def _toggle_no_charge(self):
         self._apply_field_states()
         self._recalc_totals()
+        
+    def _on_gst_toggle(self):
+        self._apply_field_states()
+        self._recalc_totals()
 
     def _apply_field_states(self):
-        """Single source of truth for enabling/disabling GST + payment
-        fields, avoiding the inconsistent-state bugs of separate toggles."""
         no_charge = self.no_charge_var.get()
         is_gst    = self.gst_var.get() and not no_charge
 
@@ -2704,8 +2809,9 @@ class InvoiceFormFrame(ttk.Frame):
 
         top = ttk.Frame(row_frame); top.pack(fill="x")
         title_var = tk.StringVar(value=title)
-        title_combo = ttk.Combobox(top, textvariable=title_var, values=[c["title"] for c in self._catalog_cache])
+        title_combo = ttk.Combobox(top, textvariable=title_var, values=[c["title"] for c in self._catalog_cache], height=6)
         title_combo.pack(side="left", fill="x", expand=True)
+        self._prevent_scroll_hijack(title_combo)
         title_combo.bind("<<ComboboxSelected>>", lambda e, tv=title_var: self._on_catalog_picked(tv))
         title_combo.bind("<KeyRelease>", lambda e, tc=title_combo: self._filter_catalog_suggestions(tc))
 
@@ -2794,6 +2900,7 @@ class InvoiceFormFrame(ttk.Frame):
         mode_combo = ttk.Combobox(row_frame, values=PAYMENT_MODES, state="readonly", width=13)
         mode_combo.set(mode if mode in PAYMENT_MODES else "Cash")
         mode_combo.pack(side="left", padx=(0, 6))
+        self._prevent_scroll_hijack(mode_combo)
 
         note_entry = ttk.Entry(row_frame)
         note_entry.insert(0, note)
@@ -2820,17 +2927,51 @@ class InvoiceFormFrame(ttk.Frame):
     # ---- Notes ------------------------------------------------------------ #
     def _section_notes(self, parent):
         wrap = self._card(parent, "Internal Notes")
-        ttk.Label(wrap, text="Visible only inside BillFlow — never printed on the invoice PDF.",
+        ttk.Label(wrap, text="Visible only inside Vyaprix — never printed on the invoice PDF.",
                   font=(FONT_FAMILY, 9), bootstyle="secondary").pack(anchor="w", pady=(0, 6))
         self.notes_text = tk.Text(wrap, height=3, relief="flat", highlightthickness=1, wrap="word")
         self.notes_text.pack(fill="x")
 
-    # ---- Totals ------------------------------------------------------------ #
     def _section_totals(self, parent):
         wrap = ttk.Frame(parent, padding=16)
         wrap.pack(fill="x", pady=(0, 16))
-        self.totals_lbl = ttk.Label(wrap, text="", font=(FONT_FAMILY, 10), justify="right", anchor="e")
-        self.totals_lbl.pack(fill="x")
+        
+        self.summary_box = ttk.Frame(wrap)
+        self.summary_box.pack(side="right", anchor="e")
+        
+        # Initialize variables
+        self.var_subtotal    = tk.StringVar(value="0.00")
+        self.var_discount    = tk.StringVar(value="")
+        self.var_tax_lbl     = tk.StringVar(value="Tax:")
+        self.var_tax_val     = tk.StringVar(value="")
+        self.var_grand_total = tk.StringVar(value="0.00")
+        self.var_paid        = tk.StringVar(value="")
+        self.var_balance     = tk.StringVar(value="0.00")
+
+        # Helper to create consistent rows
+        def add_row(lbl_text, var_val, is_bold=False, is_color=None):
+            row = ttk.Frame(self.summary_box)
+            font_style = (FONT_FAMILY, 11, "bold") if is_bold else (FONT_FAMILY, 10)
+            
+            lbl = ttk.Label(row, text=lbl_text, width=25, anchor="e", font=font_style)
+            lbl.pack(side="left", padx=(0, 15))
+            
+            val_lbl = ttk.Label(row, textvariable=var_val, width=15, anchor="e", font=font_style)
+            val_lbl.pack(side="right")
+            if is_color: val_lbl.configure(bootstyle=is_color)
+            return row
+
+        # Build Rows and save explicit references
+        self.row_subtotal = add_row("Subtotal:", self.var_subtotal)
+        self.row_disc = add_row("Discount:", self.var_discount)
+        
+        self.row_tax = ttk.Frame(self.summary_box)
+        ttk.Label(self.row_tax, textvariable=self.var_tax_lbl, width=25, anchor="e", font=(FONT_FAMILY, 10)).pack(side="left", padx=(0, 15))
+        ttk.Label(self.row_tax, textvariable=self.var_tax_val, width=15, anchor="e", font=(FONT_FAMILY, 10)).pack(side="right")
+
+        self.row_grand_total = add_row("Grand Total:", self.var_grand_total, is_bold=True)
+        self.row_paid = add_row("Total Paid:", self.var_paid)
+        self.row_balance = add_row("Balance Due:", self.var_balance, is_bold=True, is_color="danger")
 
     def _section_save_bar(self, parent):
         row = ttk.Frame(parent, padding=(0, 4, 0, 24))
@@ -2889,13 +3030,7 @@ class InvoiceFormFrame(ttk.Frame):
             })
         return payments
 
-    # ------------------------------------------------------------------ #
-    #  Unsaved-changes protection
-    # ------------------------------------------------------------------ #
     def _snapshot(self) -> str:
-        """Serialize everything the user can edit on this screen into one
-        comparable string, so we can tell whether they've changed anything
-        since the form was last loaded (see confirm_navigate_away)."""
         try:
             state = {
                 "invoice_number": self.invoice_number_entry.get().strip(),
@@ -2919,9 +3054,6 @@ class InvoiceFormFrame(ttk.Frame):
             }
             return json.dumps(state, sort_keys=True, default=str)
         except Exception:
-            # If anything's not built yet (e.g. called too early), treat the
-            # form as unchanged rather than risk a false "you have unsaved
-            # changes" prompt.
             return self._initial_snapshot or ""
 
     def has_unsaved_changes(self) -> bool:
@@ -2930,9 +3062,6 @@ class InvoiceFormFrame(ttk.Frame):
         return self._snapshot() != self._initial_snapshot
 
     def confirm_navigate_away(self) -> bool:
-        """Called by the app shell before switching away from this frame.
-        Returns True if it's safe to leave (nothing changed, or the user
-        confirmed discarding their changes), False to stay put."""
         if not self.has_unsaved_changes():
             return True
         return Messagebox.yesno(
@@ -2942,54 +3071,87 @@ class InvoiceFormFrame(ttk.Frame):
         )
 
     def _recalc_totals(self, *_):
+        """Calculates live totals and instantly updates the UI grid."""
         if self.no_charge_var.get():
-            self.totals_lbl.config(text="This invoice is marked Complimentary (No Charge).")
-            self.status_badge.config(text="COMPLIMENTARY", **STATUS_BADGE["COMPLIMENTARY"])
+            self.var_subtotal.set("0.00")
+            self.var_grand_total.set("0.00")
+            self.var_balance.set("0.00")
+            
+            # Repack strictly the relevant rows
+            self.row_subtotal.pack(fill="x", pady=2)
+            self.row_disc.pack_forget()
+            self.row_tax.pack_forget()
+            self.row_grand_total.pack(fill="x", pady=2)
+            self.row_paid.pack_forget()
+            self.row_balance.pack(fill="x", pady=2)
+            
+            self.status_badge.config(text="COMPLIMENTARY", bootstyle="info-inverse")
             return
+            
         items    = self._collect_items()
         tax_rate = safe_float(self.tax_rate_entry.get()) if self.gst_var.get() else 0.0
         g_disc   = safe_float(self.global_discount_entry.get())
+        
         totals   = DatabaseManager.calculate_totals(items, tax_rate, g_disc, self.global_discount_type_var.get())
         paid     = sum(safe_float(r["amount_entry"].get()) for r in self.payment_rows)
         balance  = totals["grand_total"] - paid
 
-        lines = [f"Subtotal:  {fmt_money(totals['subtotal'])}"]
+        self.var_subtotal.set(fmt_money(totals['subtotal']))
+        self.var_grand_total.set(fmt_money(totals['grand_total']))
+        self.var_balance.set(fmt_money(balance))
+
+        # Pack in chronological order to avoid layout bugs
+        self.row_subtotal.pack(fill="x", pady=2)
+
+        # 1. Handle Discount Row
         if totals["total_discount"] > 0:
-            lines.append(f"Discount:  − {fmt_money(totals['total_discount'])}")
+            self.var_discount.set(f"− {fmt_money(totals['total_discount'])}")
+            self.row_disc.pack(fill="x", pady=2)
+        else:
+            self.row_disc.pack_forget()
+
+        # 2. Handle GST Row
         if self.gst_var.get() and tax_rate > 0:
             if self.gst_type_var.get() == "IGST":
-                lines.append(f"IGST ({tax_rate:g}%):  {fmt_money(totals['cgst']*2)}")
+                self.var_tax_lbl.set(f"IGST ({tax_rate:g}%):")
+                self.var_tax_val.set(fmt_money(totals['cgst'] * 2))
             else:
-                lines.append(f"CGST ({tax_rate/2:g}%) + SGST ({tax_rate/2:g}%):  {fmt_money(totals['cgst']+totals['sgst'])}")
-        lines.append(f"Grand Total:  {fmt_money(totals['grand_total'])}")
-        if paid > 0:
-            lines.append(f"Total Paid:  − {fmt_money(paid)}")
-        lines.append(f"Balance Due:  {fmt_money(balance)}")
-        self.totals_lbl.config(text="\n".join(lines))
+                self.var_tax_lbl.set(f"GST ({tax_rate:g}% - CGST/SGST):")
+                self.var_tax_val.set(fmt_money(totals['cgst'] + totals['sgst']))
+            self.row_tax.pack(fill="x", pady=2)
+        else:
+            self.row_tax.pack_forget()
 
+        self.row_grand_total.pack(fill="x", pady=2)
+
+        # 3. Handle Paid Row
+        if paid > 0:
+            self.var_paid.set(f"− {fmt_money(paid)}")
+            self.row_paid.pack(fill="x", pady=2)
+        else:
+            self.row_paid.pack_forget()
+
+        self.row_balance.pack(fill="x", pady=2)
+
+        # Status Logic mapping safely to ttkbootstrap styles
         if totals["grand_total"] > 0 and paid >= totals["grand_total"] - 0.005:
             status = "PAID"
+            b_style = "success-inverse"
         elif paid > 0:
             status = "PARTIAL"
+            b_style = "warning-inverse"
         else:
             status = "DUE"
-        self.status_badge.config(text=status, **STATUS_BADGE[status])
+            b_style = "danger-inverse"
+            
+        self.status_badge.config(text=status, bootstyle=b_style)
 
-    # ------------------------------------------------------------------ #
-    #  Lightweight refresh (theme/currency changed elsewhere) -- unlike
-    #  on_show(), this NEVER resets or reloads the form, so it's safe to
-    #  call while the user is mid-edit on an invoice (e.g. after they save
-    #  the Settings dialog without leaving this screen first).
-    # ------------------------------------------------------------------ #
     def refresh_after_settings_change(self):
         self._catalog_cache = self.db_manager.get_all_catalog_items()
         self._client_cache  = self.db_manager.get_all_clients()
         self.client_combo["values"] = [c["name"] for c in self._client_cache]
-        self._recalc_totals()   # picks up a changed currency symbol, if any
+        self._recalc_totals() 
 
-    # ------------------------------------------------------------------ #
-    #  Load for edit / reset
-    # ------------------------------------------------------------------ #
     def on_show(self, invoice_id: Optional[str] = None):
         self._catalog_cache = self.db_manager.get_all_catalog_items()
         self._client_cache  = self.db_manager.get_all_clients()
@@ -3009,9 +3171,6 @@ class InvoiceFormFrame(ttk.Frame):
             self._add_item_row()
             self._apply_field_states()
             self._recalc_totals()
-        # Baseline for unsaved-changes detection -- anything the user does
-        # from here on is compared against this to decide whether leaving
-        # the screen needs a confirmation prompt.
         self._initial_snapshot = self._snapshot()
 
     def _reset(self):
@@ -3038,7 +3197,7 @@ class InvoiceFormFrame(ttk.Frame):
         self.gst_type_var.set("CGST/SGST")
         self.global_discount_entry.delete(0, "end"); self.global_discount_entry.insert(0, "0")
         self.global_discount_type_var.set("amount")
-        self.status_badge.config(text="", background="", foreground="")
+        self.status_badge.config(text="", bootstyle="default")
 
     def _load_for_edit(self, invoice_id: str):
         row = self.db_manager.get_invoice_by_id(invoice_id)
@@ -3092,7 +3251,7 @@ class InvoiceFormFrame(ttk.Frame):
         if INVALID_FILENAME_CHARS.search(inv_num):
             return Messagebox.show_error(
                 "Validation",
-                'Invoice Number cannot contain any of:  \\  /  :  *  ?  "  <  >  |\n'
+                'Invoice Number cannot contain any of:  \\  /  :  * ?  "  <  >  |\n'
                 "(these characters break the PDF file that gets generated from it).",
             )
 
@@ -3163,8 +3322,9 @@ class InvoiceFormFrame(ttk.Frame):
                 self.db_manager.save_catalog_item(item["title"], item["description"], item["amount"])
 
         Messagebox.show_info("Saved", f"Invoice #{inv_num} saved successfully.")
-        self._initial_snapshot = self._snapshot()   # just saved -- nothing "unsaved" anymore
+        self._initial_snapshot = self._snapshot() 
         self.controller.show_frame(DashboardFrame)
+
 
 # =============================================================================
 #  APPLICATION SHELL  (sidebar navigation + page container)
@@ -3194,7 +3354,7 @@ class Sidebar(ttk.Frame):
             lbl.image = logo
             lbl.pack(anchor="center", pady=(0, 8))
             
-        ttk.Label(top, text="BillFlow", font=(FONT_FAMILY, 16, "bold")).pack(anchor="center")
+        ttk.Label(top, text="Vyaprix", font=(FONT_FAMILY, 16, "bold")).pack(anchor="center")
         ttk.Label(top, text="by EllowLabs", font=(FONT_FAMILY, 8), bootstyle="secondary").pack(anchor="center")
 
         ttk.Separator(self, bootstyle="secondary").pack(fill="x", padx=18, pady=(4, 12))
@@ -3225,13 +3385,89 @@ class Sidebar(ttk.Frame):
             # Solid primary blue for active tab, outline for inactive tabs
             btn.configure(bootstyle="primary" if name == frame_name else "secondary-outline")
 
+# =============================================================================
+#  SPLASH SCREEN (MODERNIZED)
+# =============================================================================
+class SplashScreen(tk.Toplevel):
+    def __init__(self, parent):
+        super().__init__(parent)
+        # Remove standard window borders and controls
+        self.overrideredirect(True)
+        # Keep splash screen on top of other windows
+        self.attributes("-topmost", True)
+        
+        # Start fully transparent for the fade-in effect
+        self.attributes("-alpha", 0.0) 
+        
+        # --- Size and Centering ---
+        width, height = 420, 420
+        sw = self.winfo_screenwidth()
+        sh = self.winfo_screenheight()
+        x = (sw - width) // 2
+        y = (sh - height) // 2
+        self.geometry(f"{width}x{height}+{x}+{y}")
+        
+        # --- Modern Pseudo-Border ---
+        # Because we removed the OS window, we lose drop shadows. 
+        # A 1-2px border frame keeps the app from bleeding into white backgrounds.
+        self.border_frame = tk.Frame(self, bg="#3b82f6", bd=0) # Match to your primary theme color
+        self.border_frame.pack(fill="both", expand=True)
+        
+        # --- Main UI Container ---
+        # Using the default theme background makes it look cleaner than a solid block of color
+        self.main_frame = ttk.Frame(self.border_frame, padding=2)
+        self.main_frame.pack(fill="both", expand=True, padx=2, pady=2)
+        
+        # --- Center Content (Logo & Branding) ---
+        center_content = ttk.Frame(self.main_frame)
+        # Place it slightly above absolute center for better visual balance
+        center_content.place(relx=0.5, rely=0.45, anchor="center")
+        
+        logo = load_app_logo_image(self)
+        if logo:
+            lbl = ttk.Label(center_content, image=logo)
+            lbl.image = logo
+            lbl.pack(pady=(0, 20))
+            
+        ttk.Label(center_content, text=APP_NAME, font=(FONT_FAMILY, 28, "bold")).pack()
+        ttk.Label(center_content, text=APP_TAGLINE, font=(FONT_FAMILY, 10), bootstyle="secondary").pack(pady=(5, 0))
+        
+        # --- Bottom Bar (Loading Status) ---
+        bottom_bar = ttk.Frame(self.main_frame, padding=(20, 15))
+        bottom_bar.pack(side="bottom", fill="x")
+        
+        ttk.Label(bottom_bar, text="Starting up...", font=(FONT_FAMILY, 8, "bold"), bootstyle="secondary").pack(side="left")
+        ttk.Label(bottom_bar, text=APP_VERSION, font=(FONT_FAMILY, 8), bootstyle="secondary").pack(side="right")
+        
+        pb = ttk.Progressbar(self.main_frame, mode="indeterminate", bootstyle="primary")
+        pb.pack(side="bottom", fill="x")
+        pb.start(15)
+
+        # Trigger the fade-in animation
+        self._fade_in()
+
+    def _fade_in(self):
+        """Creates a smooth fade-in effect."""
+        current_alpha = self.attributes("-alpha")
+        if current_alpha < 0.97: # 97% gives it a very subtle, modern transparency
+            current_alpha += 0.05
+            self.attributes("-alpha", current_alpha)
+            self.after(15, self._fade_in)
+
 class InvoiceApp(ttk.Window):
     def __init__(self):
         cfg = load_config()
         super().__init__(themename=cfg.get("theme", "litera"))
         configure_windows_app_identity()
+        
+        # 1. HIDE MAIN WINDOW IMMEDIATELY
+        self.withdraw()
+        
+        # 2. SHOW SPLASH SCREEN
+        self.splash = SplashScreen(self)
+        self.update() # Force Tkinter to draw the splash screen immediately
 
-        self.title(f"{APP_NAME}  {APP_VERSION}")
+        self.title(f"{APP_NAME} • {APP_TAGLINE}")
         self.geometry("1280x800")
         self.minsize(1080, 680)
         try:
@@ -3248,7 +3484,15 @@ class InvoiceApp(ttk.Window):
         self.show_frame(DashboardFrame)
         self.after(200, self._poll_queue)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
+        
+        # 3. SCHEDULE SPLASH SCREEN REMOVAL (2.5 seconds later)
+        self.after(2500, self._close_splash_and_show_main)
 
+    # 4. ADD THIS NEW METHOD TO HANDLE THE TRANSITION
+    def _close_splash_and_show_main(self):
+        if hasattr(self, "splash") and self.splash.winfo_exists():
+            self.splash.destroy()
+        self.deiconify() # Reveal the main application window
     # ------------------------------------------------------------------ #
     def _build_shell(self):
         self.sidebar = Sidebar(self, self)
@@ -3361,6 +3605,21 @@ class InvoiceApp(ttk.Window):
     def _on_close(self):
         self.destroy()
 
+# =============================================================================
+#  BACKGROUND WORKER
+# =============================================================================
+def startup_background_task(app_instance):
+    """
+    Put whatever heavy lifting you need to do here.
+    Because this runs in a thread, it won't freeze the splash screen or GUI.
+    """
+    logger.info("Background thread started successfully.")
+    
+    # Example: Simulating a heavy startup task (like syncing a DB or checking for updates)
+    # time.sleep(2) 
+    
+    # If this thread needs to update the GUI, it MUST use the app's queue!
+    # app_instance.task_queue.put({"status": "info", "message": "Background sync complete"})
 
 # =============================================================================
 #  ENTRY POINT
@@ -3368,14 +3627,27 @@ class InvoiceApp(ttk.Window):
 def main():
     try:
         app = InvoiceApp()
+        
+        # --- ADD THREADING HERE ---
+        # Start your background task as a daemon thread before the mainloop starts
+        bg_thread = threading.Thread(
+            target=startup_background_task, 
+            args=(app,), 
+            daemon=True  # Crucial: Ensures the thread dies when the app is closed
+        )
+        bg_thread.start()
+        # --------------------------
+
+        # The mainloop MUST remain on the main thread
         app.mainloop()
+        
     except Exception:
         logger.critical("Fatal error during application startup", exc_info=True)
         try:
             import tkinter.messagebox as mb
-            mb.showerror("BillFlow — Fatal Error",
-                        "BillFlow could not start. See the log file for details:\n"
-                        f"{LOG_FILE}")
+            mb.showerror("Vyaprix — Fatal Error",
+                         "Vyaprix could not start. See the log file for details:\n"
+                         f"{LOG_FILE}")
         except Exception:
             pass
         raise
