@@ -6,7 +6,7 @@
 import tkinter as tk
 from tkinter import filedialog
 import ttkbootstrap as ttk
-from ttkbootstrap.dialogs import Messagebox
+from ttkbootstrap.dialogs import Messagebox as _TTKMessagebox
 from ttkbootstrap.widgets.scrolled import ScrolledFrame
 from ttkbootstrap.widgets import DateEntry
 import sqlite3
@@ -19,6 +19,8 @@ import datetime
 import threading
 import queue
 import logging
+from logging.handlers import RotatingFileHandler
+from xml.sax.saxutils import escape as xml_escape
 import csv
 import time
 from pathlib import Path
@@ -29,6 +31,63 @@ from contextlib import closing
 import barcode
 from barcode.writer import ImageWriter
 import io
+
+
+# =============================================================================
+#  MESSAGEBOX COMPATIBILITY WRAPPER
+# =============================================================================
+# ttkbootstrap's real Messagebox API is `show_error(message, title=..., ...)`
+# -- message first. Every call site in this file (39 of them) was written
+# assuming stdlib tkinter.messagebox's convention instead, where TITLE comes
+# first: `Messagebox.show_error("Validation", "Client name is required.")`.
+# With the real API that swaps the dialog's title and body.
+#
+# Worse: ttkbootstrap's `okcancel()`/`yesno()` return the *label text* of
+# whichever button was clicked ("OK", "Cancel", "Yes", "No"), not a bool.
+# Every "if Messagebox.okcancel(...):" check in this app was therefore
+# always true -- both "OK" and "Cancel" are non-empty, truthy strings --
+# so clicking Cancel on a delete confirmation deleted anyway.
+#
+# Fixing this in one place (instead of touching 39 call sites full of
+# f-strings, ternaries, and keyword args) is far lower-risk. Every existing
+# call site keeps working unchanged, now with correct behavior.
+class Messagebox:
+    """Drop-in replacement matching how this app actually calls Messagebox:
+    title first, then message -- and real booleans from confirmation dialogs."""
+
+    @staticmethod
+    def show_info(title, message, *args, **kwargs):
+        return _TTKMessagebox.show_info(message, title, *args, **kwargs)
+
+    @staticmethod
+    def show_warning(title, message, *args, **kwargs):
+        return _TTKMessagebox.show_warning(message, title, *args, **kwargs)
+
+    @staticmethod
+    def show_error(title, message, *args, **kwargs):
+        return _TTKMessagebox.show_error(message, title, *args, **kwargs)
+
+    @staticmethod
+    def show_question(title, message, *args, **kwargs):
+        return _TTKMessagebox.show_question(message, title, *args, **kwargs)
+
+    @staticmethod
+    def ok(title, message, *args, **kwargs):
+        return _TTKMessagebox.ok(message, title, *args, **kwargs)
+
+    @staticmethod
+    def okcancel(title, message, *args, **kwargs) -> bool:
+        """True only if the user actually clicked OK."""
+        kwargs.setdefault("localize", False)  # keep button text predictable for comparison
+        result = _TTKMessagebox.okcancel(message, title, *args, **kwargs)
+        return result == "OK"
+
+    @staticmethod
+    def yesno(title, message, *args, **kwargs) -> bool:
+        """True only if the user actually clicked Yes."""
+        kwargs.setdefault("localize", False)
+        result = _TTKMessagebox.yesno(message, title, *args, **kwargs)
+        return result == "Yes"
 
 # --- PyMuPDF ---
 try:
@@ -107,7 +166,7 @@ _initialize_environment()
 FONT_FAMILY          = "Segoe UI"
 APP_NAME             = "BillFlow by EllowLabs"
 APP_VERSION          = "v3.0"
-APP_BUILD_VERSION    = "3.0.0"
+APP_BUILD_VERSION    = "3.0.0.2"
 APP_RELEASE_DATE     = "07 July 2026"
 APP_TAGLINE          = "Invoices That Work for You"
 
@@ -119,6 +178,12 @@ APP_ATTRIBUTION = (
 DB_DATE_FORMAT       = "%Y-%m-%d"
 DISPLAY_DATE_FORMAT  = "%d %b %Y"
 PAYMENT_MODES        = ['Cash', 'UPI', 'Bank Transfer', 'Card', 'Cheque', 'Other']
+
+# Characters that are illegal (or dangerous) in a filename on Windows, and
+# that also happen to enable path traversal if left unchecked ("/", "\").
+# Invoice numbers become PDF filenames, so they're validated against this
+# at save time and defensively re-sanitized again in PDFGenerator.
+INVALID_FILENAME_CHARS = re.compile(r'[\\/:*?"<>|]')
 
 # For UI, read directly from the EXE MEIPASS for speed and reliability
 APP_LOGO_PNG         = RESOURCE_ASSETS_DIR / "app_logo.png"
@@ -144,7 +209,10 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler(LOG_FILE, mode='a', encoding='utf-8'),
+        # Rotate at 5MB, keep 5 backups -- prevents the log from growing
+        # forever on a machine that runs BillFlow for years.
+        RotatingFileHandler(LOG_FILE, mode='a', maxBytes=5 * 1024 * 1024,
+                            backupCount=5, encoding='utf-8'),
         logging.StreamHandler(),
     ],
 )
@@ -240,6 +308,13 @@ def safe_float(value: Any, fallback: float = 0.0) -> float:
         return float(value or 0)
     except (TypeError, ValueError):
         return fallback
+
+def safe_markup(value: Any) -> str:
+    """Escape user-supplied text before it's embedded in ReportLab Paragraph
+    strings, which parse a small XML/HTML-like markup subset. Without this,
+    any free-text field containing '&', '<', or '>' (e.g. a client name like
+    "Smith & Sons") throws a parse error and PDF generation fails outright."""
+    return xml_escape(str(value or ""))
 
 def load_app_logo_image(master: tk.Misc) -> Optional[tk.PhotoImage]:
     if APP_LOGO_PNG.exists():
@@ -892,7 +967,12 @@ class PDFGenerator:
         self.payments = payments or []
 
         # --- Smart File Naming to bypass Windows file locks ---
-        base_filename = f"Invoice-{data.get('invoice_number', 'NA')}"
+        # Defensive re-sanitize: invoice_number is validated at save time now,
+        # but older rows (saved before that check existed) could still carry
+        # unsafe characters, so never trust it blindly as a path component.
+        raw_number    = str(data.get('invoice_number') or 'NA').strip()
+        safe_number   = INVALID_FILENAME_CHARS.sub('_', raw_number).strip('. ') or "NA"
+        base_filename = f"Invoice-{safe_number}"
         target_dir    = out_dir or INVOICES_DIR
         self.filename = target_dir / f"{base_filename}.pdf"
 
@@ -952,26 +1032,34 @@ class PDFGenerator:
 
     def _build_header(self) -> Table:
         comp  = self.config.get("company_details", {})
-        left  = [Paragraph(comp.get("name", "Your Company"), self.styles["CompanyName"])]
+        left  = [Paragraph(safe_markup(comp.get("name", "Your Company")), self.styles["CompanyName"])]
         if d := comp.get("description"):
-            left += [Spacer(1, 2), Paragraph(d, self.styles["Tagline"])]
+            left += [Spacer(1, 2), Paragraph(safe_markup(d), self.styles["Tagline"])]
 
         status    = self.data.get("status")
         doc_title = ("RECEIPT"       if status == InvoiceStatus.PAID.value else
                      "COMPLIMENTARY" if status == InvoiceStatus.COMPLIMENTARY.value else "INVOICE")
         
         # --- BARCODE GENERATION ---
-        # Generate the barcode image in memory
-        code128 = barcode.get('code128', self.data.get('invoice_number', '000'), writer=ImageWriter())
-        buffer = io.BytesIO()
-        code128.write(buffer, options={"write_text": False, "module_width": 0.2, "module_height": 5.0})
-        buffer.seek(0)
-        barcode_img = Image(buffer, width=3.5*cm, height=0.8*cm)
+        # Code128 only supports a limited ASCII character set, and invoice
+        # numbers are user-editable free text -- so this must never be able
+        # to take down the whole PDF. If it fails for any reason, we simply
+        # skip the barcode instead of aborting invoice generation.
+        title_block_rows = []
+        try:
+            code128 = barcode.get('code128', str(self.data.get('invoice_number', '000')), writer=ImageWriter())
+            buffer = io.BytesIO()
+            code128.write(buffer, options={"write_text": False, "module_width": 0.2, "module_height": 5.0})
+            buffer.seek(0)
+            title_block_rows.append([Image(buffer, width=3.5*cm, height=0.8*cm)])
+        except Exception as exc:
+            logger.warning(f"Skipping barcode for invoice "
+                           f"{self.data.get('invoice_number')!r}: {exc}")
         # --------------------------
 
-        # Stack the barcode ABOVE the status title
-        title_block = Table([[barcode_img], [Paragraph(doc_title, self.styles["InvoiceTitle"])]], 
-                            style=[("ALIGN", (0,0), (-1,-1), "RIGHT")])
+        # Stack the barcode ABOVE the status title (barcode omitted if it failed)
+        title_block_rows.append([Paragraph(doc_title, self.styles["InvoiceTitle"])])
+        title_block = Table(title_block_rows, style=[("ALIGN", (0,0), (-1,-1), "RIGHT")])
 
         if logo := self._asset("logo"):
             try:
@@ -1024,13 +1112,17 @@ class PDFGenerator:
         cg = yg = ""
         if self.is_gst:
             if cgstin := self.data.get("client_gstin"):
-                cg = f"<br/>GSTIN: {cgstin}"
+                cg = f"<br/>GSTIN: {safe_markup(cgstin)}"
             if ygstin := self.config.get("company_details", {}).get("gstin"):
-                yg = f"<br/>GSTIN: {ygstin}"
-        your_c   = (self.data.get("your_contact")  or "").replace("\n", "<br/>")
-        client_c = (self.data.get("client_contact") or "").replace("\n", "<br/>")
-        your_p   = Paragraph(f"<font color='#6B7280'>FROM:</font><br/><b>{self.data.get('your_name') or ''}</b><br/>{your_c}{yg}",     self.styles["YourContact"])
-        bill_p   = Paragraph(f"<font color='#6B7280'>BILL TO:</font><br/><b>{self.data.get('bill_to') or ''}</b><br/>{client_c}{cg}", self.styles["BillTo"])
+                yg = f"<br/>GSTIN: {safe_markup(ygstin)}"
+        # Escape first, THEN turn newlines into <br/> -- safe_markup() only
+        # touches &/</>, so it won't disturb the newlines we're about to replace.
+        your_c   = safe_markup(self.data.get("your_contact")).replace("\n", "<br/>")
+        client_c = safe_markup(self.data.get("client_contact")).replace("\n", "<br/>")
+        your_name = safe_markup(self.data.get("your_name"))
+        bill_to   = safe_markup(self.data.get("bill_to"))
+        your_p   = Paragraph(f"<font color='#6B7280'>FROM:</font><br/><b>{your_name}</b><br/>{your_c}{yg}",     self.styles["YourContact"])
+        bill_p   = Paragraph(f"<font color='#6B7280'>BILL TO:</font><br/><b>{bill_to}</b><br/>{client_c}{cg}", self.styles["BillTo"])
         return Table([[bill_p, your_p]], colWidths=["50%","50%"], style=[
             ("VALIGN",(0,0),(-1,-1),"TOP"),
             ("LEFTPADDING",(0,0),(-1,-1),0), ("RIGHTPADDING",(0,0),(-1,-1),0),
@@ -1038,9 +1130,9 @@ class PDFGenerator:
 
     def _build_meta(self) -> Table:
         date_str = parse_date(self.data.get("invoice_date"), DB_DATE_FORMAT, DISPLAY_DATE_FORMAT)
-        meta     = f"<b>Invoice #:</b> {self.data.get('invoice_number') or ''}<br/><b>Invoice Date:</b> {date_str}"
+        meta     = f"<b>Invoice #:</b> {safe_markup(self.data.get('invoice_number'))}<br/><b>Invoice Date:</b> {date_str}"
         if not self.data.get("is_complimentary"):
-            meta += f"<br/><b>Payment Terms:</b> {self.data.get('payment_terms') or 'N/A'}"
+            meta += f"<br/><b>Payment Terms:</b> {safe_markup(self.data.get('payment_terms') or 'N/A')}"
         return Table([[Paragraph(meta, self.styles["NC"])]], style=[
             ("BOX",(0,0),(-1,-1),1,colors.HexColor("#E5E7EB")),
             ("BACKGROUND",(0,0),(-1,-1),colors.HexColor("#F9FAFB")),
@@ -1059,9 +1151,9 @@ class PDFGenerator:
             if not title.strip() and not desc.strip() and amount == 0:
                 rows.append([[Paragraph("<br/>", self.styles["NC"])], Paragraph("", self.styles["Right"])])
             else:
-                cell = [Paragraph(f"<b>{title}</b>", self.styles["NC"])]
+                cell = [Paragraph(f"<b>{safe_markup(title)}</b>", self.styles["NC"])]
                 if desc.strip():
-                    cell.append(Paragraph(desc, self.styles["ItemDesc"]))
+                    cell.append(Paragraph(safe_markup(desc), self.styles["ItemDesc"]))
                 rows.append([cell, Paragraph(f"{CURRENCY_SYMBOL}{amount:,.2f}", self.styles["Right"])])
         return Table(rows, colWidths=["80%","20%"], repeatRows=1, style=TableStyle([
             ("BACKGROUND",(0,0),(-1,0),colors.HexColor("#1F2937")),
@@ -1137,8 +1229,8 @@ class PDFGenerator:
             date_txt = parse_date(p.get("payment_date"), DB_DATE_FORMAT, DISPLAY_DATE_FORMAT)
             rows.append([
                 Paragraph(date_txt, self.styles["Small"]),
-                Paragraph(p.get("mode") or "-", self.styles["Small"]),
-                Paragraph(p.get("note") or "-", self.styles["Small"]),
+                Paragraph(safe_markup(p.get("mode") or "-"), self.styles["Small"]),
+                Paragraph(safe_markup(p.get("note") or "-"), self.styles["Small"]),
                 Paragraph(f"{CURRENCY_SYMBOL}{safe_float(p.get('amount')):,.2f}", self.styles["SmallRight"]),
             ])
         return Table(rows, colWidths=["22%","20%","33%","25%"], style=TableStyle([
@@ -1153,12 +1245,12 @@ class PDFGenerator:
         qr_cell = sig_cell = Spacer(0, 0)
         if self.data.get("show_qr_code") and not self.data.get("is_complimentary"):
             if qr := self._asset("upi_qr_code"):
-                upi = self.config.get("payment_details", {}).get("upi_id", "")
+                upi = safe_markup(self.config.get("payment_details", {}).get("upi_id", ""))
                 detail = Paragraph(f"<b>PAYMENT DETAILS</b><br/>Scan to pay.<br/>UPI ID: {upi}", self.styles["NC"])
                 qr_cell = Table([[Image(qr, 2.2*cm, 2.2*cm, kind="proportional"), detail]],
                                 colWidths=[2.5*cm,"100%"], style=[("VALIGN",(0,0),(-1,-1),"TOP")])
         if sig := self._asset("signature"):
-            name = self.data.get("your_name") or ""
+            name = safe_markup(self.data.get("your_name"))
             sig_cell = Table(
                 [[Image(sig, 4.0*cm, 2.0*cm, kind="proportional")],
                  [Paragraph(f"<b>{name}</b>", self.styles["Center"])]],
@@ -2436,6 +2528,7 @@ class InvoiceFormFrame(ttk.Frame):
         self.payment_rows: List[Dict[str, Any]] = []
         self._catalog_cache: List[Dict] = []
         self._client_cache:  List[Dict] = []
+        self._initial_snapshot: Optional[str] = None   # unsaved-changes tracking
         self._build()
 
     # ------------------------------------------------------------------ #
@@ -2796,6 +2889,58 @@ class InvoiceFormFrame(ttk.Frame):
             })
         return payments
 
+    # ------------------------------------------------------------------ #
+    #  Unsaved-changes protection
+    # ------------------------------------------------------------------ #
+    def _snapshot(self) -> str:
+        """Serialize everything the user can edit on this screen into one
+        comparable string, so we can tell whether they've changed anything
+        since the form was last loaded (see confirm_navigate_away)."""
+        try:
+            state = {
+                "invoice_number": self.invoice_number_entry.get().strip(),
+                "bill_to":        self.client_name_var.get().strip(),
+                "client_contact": self.client_contact_text.get("1.0", "end-1c").strip(),
+                "client_gstin":   self.client_gstin_entry.get().strip(),
+                "your_name":      self.your_name_entry.get().strip(),
+                "your_contact":   self.your_contact_text.get("1.0", "end-1c").strip(),
+                "invoice_date":   self.invoice_date_entry.entry.get().strip(),
+                "payment_terms":  self.payment_terms_entry.get().strip(),
+                "notes":          self.notes_text.get("1.0", "end-1c").strip(),
+                "no_charge":      self.no_charge_var.get(),
+                "show_qr":        self.show_qr_var.get(),
+                "gst":            self.gst_var.get(),
+                "tax_rate":       self.tax_rate_entry.get().strip(),
+                "gst_type":       self.gst_type_var.get(),
+                "g_disc":         self.global_discount_entry.get().strip(),
+                "g_disc_type":    self.global_discount_type_var.get(),
+                "items":          self._collect_items(),
+                "payments":       self._collect_payments(),
+            }
+            return json.dumps(state, sort_keys=True, default=str)
+        except Exception:
+            # If anything's not built yet (e.g. called too early), treat the
+            # form as unchanged rather than risk a false "you have unsaved
+            # changes" prompt.
+            return self._initial_snapshot or ""
+
+    def has_unsaved_changes(self) -> bool:
+        if self._initial_snapshot is None:
+            return False
+        return self._snapshot() != self._initial_snapshot
+
+    def confirm_navigate_away(self) -> bool:
+        """Called by the app shell before switching away from this frame.
+        Returns True if it's safe to leave (nothing changed, or the user
+        confirmed discarding their changes), False to stay put."""
+        if not self.has_unsaved_changes():
+            return True
+        return Messagebox.yesno(
+            "Discard Changes?",
+            "This invoice has unsaved changes. Leave without saving?",
+            parent=self.controller,
+        )
+
     def _recalc_totals(self, *_):
         if self.no_charge_var.get():
             self.totals_lbl.config(text="This invoice is marked Complimentary (No Charge).")
@@ -2831,6 +2976,18 @@ class InvoiceFormFrame(ttk.Frame):
         self.status_badge.config(text=status, **STATUS_BADGE[status])
 
     # ------------------------------------------------------------------ #
+    #  Lightweight refresh (theme/currency changed elsewhere) -- unlike
+    #  on_show(), this NEVER resets or reloads the form, so it's safe to
+    #  call while the user is mid-edit on an invoice (e.g. after they save
+    #  the Settings dialog without leaving this screen first).
+    # ------------------------------------------------------------------ #
+    def refresh_after_settings_change(self):
+        self._catalog_cache = self.db_manager.get_all_catalog_items()
+        self._client_cache  = self.db_manager.get_all_clients()
+        self.client_combo["values"] = [c["name"] for c in self._client_cache]
+        self._recalc_totals()   # picks up a changed currency symbol, if any
+
+    # ------------------------------------------------------------------ #
     #  Load for edit / reset
     # ------------------------------------------------------------------ #
     def on_show(self, invoice_id: Optional[str] = None):
@@ -2852,6 +3009,10 @@ class InvoiceFormFrame(ttk.Frame):
             self._add_item_row()
             self._apply_field_states()
             self._recalc_totals()
+        # Baseline for unsaved-changes detection -- anything the user does
+        # from here on is compared against this to decide whether leaving
+        # the screen needs a confirmation prompt.
+        self._initial_snapshot = self._snapshot()
 
     def _reset(self):
         for entry in list(self.item_rows):
@@ -2928,6 +3089,12 @@ class InvoiceFormFrame(ttk.Frame):
         your_name = self.your_name_entry.get().strip()
         if not inv_num or not bill_to or not your_name:
             return Messagebox.show_error("Validation", "Invoice Number, Client Name, and Your Name are all required.")
+        if INVALID_FILENAME_CHARS.search(inv_num):
+            return Messagebox.show_error(
+                "Validation",
+                'Invoice Number cannot contain any of:  \\  /  :  *  ?  "  <  >  |\n'
+                "(these characters break the PDF file that gets generated from it).",
+            )
 
         date_txt = self.invoice_date_entry.entry.get().strip()
         if not date_txt:
@@ -2996,6 +3163,7 @@ class InvoiceFormFrame(ttk.Frame):
                 self.db_manager.save_catalog_item(item["title"], item["description"], item["amount"])
 
         Messagebox.show_info("Saved", f"Invoice #{inv_num} saved successfully.")
+        self._initial_snapshot = self._snapshot()   # just saved -- nothing "unsaved" anymore
         self.controller.show_frame(DashboardFrame)
 
 # =============================================================================
@@ -3075,6 +3243,7 @@ class InvoiceApp(ttk.Window):
         self.db_manager = DatabaseManager(DB_NAME)
         self.task_queue: queue.Queue = queue.Queue()
 
+        self._current_frame_class: Optional[Type] = None
         self._build_shell()
         self.show_frame(DashboardFrame)
         self.after(200, self._poll_queue)
@@ -3107,10 +3276,19 @@ class InvoiceApp(ttk.Window):
     #  Navigation
     # ------------------------------------------------------------------ #
     def show_frame(self, frame_class: Type, *args):
+        # Give the currently-visible frame a chance to block navigation
+        # (e.g. an invoice form with unsaved edits).
+        if self._current_frame_class is not None and self._current_frame_class is not frame_class:
+            current_frame = self.frames.get(self._current_frame_class)
+            if current_frame is not None and hasattr(current_frame, "confirm_navigate_away"):
+                if not current_frame.confirm_navigate_away():
+                    return
+
         frame = self.frames[frame_class]
         frame.tkraise()
         self.sidebar.set_active(frame_class.__name__ if frame_class in
                                 (DashboardFrame, ClientsFrame, CatalogFrame) else "DashboardFrame")
+        self._current_frame_class = frame_class
         if hasattr(frame, "on_show"):
             frame.on_show(*args)
 
@@ -3134,9 +3312,16 @@ class InvoiceApp(ttk.Window):
         CONFIG = load_config()
         CURRENCY_SYMBOL = CONFIG.get("currency_symbol", "₹")
 
-        # 3. Force all active screens to redraw with the new colors
+        # 3. Force all active screens to redraw with the new colors.
+        #    InvoiceFormFrame is special-cased: on_show() resets/reloads the
+        #    whole form, which would silently wipe out an in-progress invoice
+        #    if the user opened Settings mid-edit without leaving this screen
+        #    first. It gets a lightweight refresh instead that only updates
+        #    currency/theme-dependent display, never form data.
         for frame in self.frames.values():
-            if hasattr(frame, "on_show"):
+            if isinstance(frame, InvoiceFormFrame):
+                frame.refresh_after_settings_change()
+            elif hasattr(frame, "on_show"):
                 try:
                     frame.on_show()
                 except TypeError:
