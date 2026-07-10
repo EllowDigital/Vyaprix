@@ -914,21 +914,30 @@ class DatabaseManager:
         return len(inv_ids)
 
     def get_next_invoice_number(self) -> str:
-        """Pick the highest numeric suffix actually in use (rather than trusting
-        date ordering, which breaks if invoice dates are edited out of order)."""
+        """Continue the numbering scheme of the most recently *created* invoice
+        (by creation time, falling back to insertion order), NOT the highest
+        numeric suffix anywhere in the table.
+
+        BUG FIX: the old version scanned every invoice_number in the table and
+        kept whichever had the single highest numeric suffix, regardless of
+        its prefix or how long ago it was created. One-off invoice numbers in
+        a different format (e.g. a number copied from an old system, or a
+        client-requested series like "PROJECT-2025-999") would then hijack
+        the suggestion for every future invoice forever -- even years later --
+        since nothing about the old logic let the normal INV-xxx sequence
+        "win back" the suggestion. Anchoring on recency instead means a single
+        manually-typed correction immediately restores the right sequence.
+        """
         with closing(self._conn()) as c:
-            all_ids = [r["invoice_number"] for r in c.execute("SELECT invoice_number FROM invoices").fetchall()]
-        if not all_ids:
-            return "INV-001"
-        best_prefix, best_num, best_width = "INV-", 0, 3
-        for inv_id in all_ids:
-            m = re.match(r"^(.*-)(\d+)$", inv_id)
+            rows = c.execute(
+                "SELECT invoice_number FROM invoices ORDER BY created_ts DESC, rowid DESC"
+            ).fetchall()
+        for r in rows:
+            m = re.match(r"^(.*-)(\d+)$", r["invoice_number"])
             if m:
                 prefix, num_str = m.group(1), m.group(2)
-                num = int(num_str)
-                if num > best_num:
-                    best_num, best_prefix, best_width = num, prefix, len(num_str)
-        return f"{best_prefix}{best_num + 1:0{best_width}d}"
+                return f"{prefix}{int(num_str) + 1:0{len(num_str)}d}"
+        return "INV-001"
 
     def export_to_csv(self, file_path: str, invoice_ids: Optional[List[str]] = None) -> Tuple[bool, Optional[str]]:
         try:
@@ -1721,6 +1730,8 @@ class PDFViewer(tk.Toplevel):
         from PyQt5.QtGui import QImage, QPixmap, QPainter
         from PyQt5.QtCore import Qt
 
+        painter = None
+        doc = None
         try:
             qapp = QApplication.instance()
             if qapp is None:
@@ -1759,14 +1770,23 @@ class PDFViewer(tk.Toplevel):
                 painter.setWindow(pixmap.rect())
                 painter.drawPixmap(0, 0, pixmap)
 
-            painter.end()
-            doc.close()
-
             if not show_dialog:
                 Messagebox.show_info("Success", f"Document sent to {printer_name}!", parent=self)
 
         except Exception as exc:
             Messagebox.show_error("Print Error", str(exc), parent=self)
+        finally:
+            # BUG FIX: cleanup used to live only on the success path, so a
+            # failure partway through the page loop (e.g. one corrupt page)
+            # skipped painter.end()/doc.close() -- leaking the PDF file
+            # handle and leaving the painter attached to the print spooler.
+            if painter is not None:
+                try:
+                    painter.end()
+                except Exception:
+                    pass
+            if doc is not None:
+                doc.close()
 
     def _save_copy(self):
         if path := filedialog.asksaveasfilename(
