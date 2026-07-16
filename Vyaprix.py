@@ -423,6 +423,214 @@ class Debouncer:
             self.widget.after_cancel(self._id)
             self._id = None
 
+
+# =============================================================================
+#  PLACEHOLDER-AWARE INPUT WIDGETS
+# =============================================================================
+class _PlaceholderMixin:
+    """Shared placeholder behaviour for the Entry/Combobox subclasses below.
+
+    The hint text is drawn directly into the widget -- so it automatically
+    inherits the widget's real font, padding, and per-theme styling instead
+    of needing a pixel-matched overlay -- but every read path is guaranteed
+    to see an empty string while the hint is showing. get() is overridden to
+    return "" in that state, so every existing call site in this file that
+    does `widget.get()` keeps working completely unchanged: it can never
+    mistake the hint for real user input and accidentally save it.
+
+    Widgets bound to a `textvariable` still sync that variable's text to the
+    Tk layer as usual (that's necessary for autocomplete filtering elsewhere
+    in the app to keep working), so code that reads the *variable* directly
+    rather than the widget must not do that for a placeholder-enabled field --
+    this file always reads such fields via the widget itself.
+    """
+    _PLACEHOLDER_COLOR = "#9CA3AF"  # muted grey; readable on every bundled theme
+
+    def _init_placeholder(self, placeholder: str):
+        self._placeholder = placeholder
+        self._showing_placeholder = False
+        self._real_fg = self._lookup_normal_fg()
+        self.bind("<FocusIn>", self._ph_on_focus_in, add="+")
+        self.bind("<FocusOut>", self._ph_on_focus_out, add="+")
+        if placeholder:
+            self._ph_draw()
+
+    def _lookup_normal_fg(self) -> str:
+        """Looks the *current* theme's real foreground color up fresh (rather
+        than caching it once) so placeholders keep rendering correctly even
+        after the user switches themes live from Settings."""
+        try:
+            color = ttk.Style().lookup(self.winfo_class(), "foreground")
+            return str(color) if color else "black"
+        except Exception:
+            return "black"
+
+    def _ph_draw(self):
+        if not self._placeholder or self._raw_get():
+            return
+        self._showing_placeholder = True
+        try:
+            self.configure(foreground=self._PLACEHOLDER_COLOR)
+        except tk.TclError:
+            pass
+        self._raw_insert(self._placeholder)
+
+    def _ph_clear(self):
+        if self._showing_placeholder:
+            self._raw_clear()
+            try:
+                self.configure(foreground=self._lookup_normal_fg())
+            except tk.TclError:
+                pass
+            self._showing_placeholder = False
+
+    def _ph_on_focus_in(self, _event=None):
+        self._ph_clear()
+
+    def _ph_on_focus_out(self, _event=None):
+        if not self._raw_get():
+            self._ph_draw()
+
+    def set_placeholder(self, text: str):
+        """Changes the hint text after construction (e.g. an item row whose
+        purpose changes) and redraws it immediately if applicable."""
+        showing = self._showing_placeholder
+        if showing:
+            self._ph_clear()
+        self._placeholder = text
+        if showing or not self._raw_get():
+            self._ph_draw()
+
+
+class PlaceholderEntry(_PlaceholderMixin, ttk.Entry):
+    """Drop-in replacement for ttk.Entry that shows greyed-out hint text
+    while empty and unfocused. get() transparently returns "" while the
+    hint is showing."""
+
+    def __init__(self, master=None, placeholder: str = "", **kw):
+        ttk.Entry.__init__(self, master, **kw)
+        self._init_placeholder(placeholder)
+
+    def _raw_get(self) -> str:
+        return ttk.Entry.get(self)
+
+    def _raw_insert(self, text: str):
+        ttk.Entry.insert(self, 0, text)
+
+    def _raw_clear(self):
+        ttk.Entry.delete(self, 0, "end")
+
+    def get(self) -> str:
+        return "" if self._showing_placeholder else ttk.Entry.get(self)
+
+    def insert(self, index, text):
+        self._ph_clear()
+        if text:
+            ttk.Entry.insert(self, index, text)
+        if not ttk.Entry.get(self):
+            self._ph_draw()
+
+    def delete(self, first, last=None):
+        ttk.Entry.delete(self, first, last)
+        if not ttk.Entry.get(self):
+            self._ph_draw()
+
+
+class PlaceholderCombobox(_PlaceholderMixin, ttk.Combobox):
+    """Same placeholder behaviour as PlaceholderEntry, for the app's two
+    *editable* (non-readonly) comboboxes -- client name and catalog item
+    title -- which can be freely typed into as well as picked from a list."""
+
+    def __init__(self, master=None, placeholder: str = "", **kw):
+        ttk.Combobox.__init__(self, master, **kw)
+        self._init_placeholder(placeholder)
+
+    def _raw_get(self) -> str:
+        return ttk.Combobox.get(self)
+
+    def _raw_insert(self, text: str):
+        ttk.Combobox.insert(self, 0, text)
+
+    def _raw_clear(self):
+        ttk.Combobox.delete(self, 0, "end")
+
+    def get(self) -> str:
+        return "" if self._showing_placeholder else ttk.Combobox.get(self)
+
+    def insert(self, index, text):
+        self._ph_clear()
+        if text:
+            ttk.Combobox.insert(self, index, text)
+        if not ttk.Combobox.get(self):
+            self._ph_draw()
+
+    def delete(self, first, last=None):
+        ttk.Combobox.delete(self, first, last)
+        if not ttk.Combobox.get(self):
+            self._ph_draw()
+
+
+class PlaceholderText(tk.Text):
+    """A tk.Text box with the same placeholder behaviour, adapted to Text's
+    "1.0" / "end-1c" indexing instead of Entry's integer indexing."""
+
+    _PLACEHOLDER_COLOR = "#9CA3AF"
+
+    def __init__(self, master=None, placeholder: str = "", **kw):
+        tk.Text.__init__(self, master, **kw)
+        self._placeholder = placeholder
+        self._showing_placeholder = False
+        try:
+            fg = self.cget("foreground")
+            self._real_fg = str(fg) if fg else "black"
+        except tk.TclError:
+            self._real_fg = "black"
+        self.bind("<FocusIn>", self._ph_on_focus_in, add="+")
+        self.bind("<FocusOut>", self._ph_on_focus_out, add="+")
+        if placeholder:
+            self._ph_draw()
+
+    def _raw_get(self) -> str:
+        return tk.Text.get(self, "1.0", "end-1c")
+
+    def _ph_draw(self):
+        if not self._placeholder or self._raw_get():
+            return
+        self._showing_placeholder = True
+        self.configure(foreground=self._PLACEHOLDER_COLOR)
+        tk.Text.insert(self, "1.0", self._placeholder)
+
+    def _ph_clear(self):
+        if self._showing_placeholder:
+            tk.Text.delete(self, "1.0", "end")
+            self.configure(foreground=self._real_fg)
+            self._showing_placeholder = False
+
+    def _ph_on_focus_in(self, _event=None):
+        self._ph_clear()
+
+    def _ph_on_focus_out(self, _event=None):
+        if not self._raw_get():
+            self._ph_draw()
+
+    def get(self, index1="1.0", index2="end-1c"):
+        norm = lambda ix: "end-1c" if str(ix).startswith("end") else str(ix)
+        if self._showing_placeholder and norm(index1) == "1.0" and norm(index2) == "end-1c":
+            return ""
+        return tk.Text.get(self, index1, index2)
+
+    def insert(self, index, text, *args):
+        self._ph_clear()
+        if text:
+            tk.Text.insert(self, index, text, *args)
+        if not self._raw_get():
+            self._ph_draw()
+
+    def delete(self, index1, index2=None):
+        tk.Text.delete(self, index1, index2)
+        if not self._raw_get():
+            self._ph_draw()
+
 # =============================================================================
 #  DATABASE
 # =============================================================================
@@ -914,21 +1122,30 @@ class DatabaseManager:
         return len(inv_ids)
 
     def get_next_invoice_number(self) -> str:
-        """Pick the highest numeric suffix actually in use (rather than trusting
-        date ordering, which breaks if invoice dates are edited out of order)."""
+        """Continue the numbering scheme of the most recently *created* invoice
+        (by creation time, falling back to insertion order), NOT the highest
+        numeric suffix anywhere in the table.
+
+        BUG FIX: the old version scanned every invoice_number in the table and
+        kept whichever had the single highest numeric suffix, regardless of
+        its prefix or how long ago it was created. A one-off invoice number in
+        a different format (e.g. a number copied from an old system, or a
+        client-requested series like "PROJECT-2025-999") would then hijack the
+        suggestion for every future invoice forever -- even years later --
+        since nothing in the old logic let the normal INV-xxx sequence "win
+        back" the suggestion. Anchoring on recency instead means a single
+        manually-typed correction immediately restores the right sequence.
+        """
         with closing(self._conn()) as c:
-            all_ids = [r["invoice_number"] for r in c.execute("SELECT invoice_number FROM invoices").fetchall()]
-        if not all_ids:
-            return "INV-001"
-        best_prefix, best_num, best_width = "INV-", 0, 3
-        for inv_id in all_ids:
-            m = re.match(r"^(.*-)(\d+)$", inv_id)
+            rows = c.execute(
+                "SELECT invoice_number FROM invoices ORDER BY created_ts DESC, rowid DESC"
+            ).fetchall()
+        for r in rows:
+            m = re.match(r"^(.*-)(\d+)$", r["invoice_number"])
             if m:
                 prefix, num_str = m.group(1), m.group(2)
-                num = int(num_str)
-                if num > best_num:
-                    best_num, best_prefix, best_width = num, prefix, len(num_str)
-        return f"{best_prefix}{best_num + 1:0{best_width}d}"
+                return f"{prefix}{int(num_str) + 1:0{len(num_str)}d}"
+        return "INV-001"
 
     def export_to_csv(self, file_path: str, invoice_ids: Optional[List[str]] = None) -> Tuple[bool, Optional[str]]:
         try:
@@ -1330,11 +1547,13 @@ class SettingsDialog(tk.Toplevel):
     def _section(self, parent, title: str):
         ttk.Label(parent, text=title, font=(FONT_FAMILY, 11, "bold")).pack(anchor="w", pady=(0, 8))
 
-    def _labeled_entry(self, parent, label: str, var: tk.StringVar):
+    def _labeled_entry(self, parent, label: str, placeholder: str = "") -> "PlaceholderEntry":
         row = ttk.Frame(parent)
         row.pack(fill="x", pady=4)
         ttk.Label(row, text=label, width=24, anchor="w").pack(side="left")
-        ttk.Entry(row, textvariable=var).pack(side="left", fill="x", expand=True)
+        entry = PlaceholderEntry(row, placeholder=placeholder)
+        entry.pack(side="left", fill="x", expand=True)
+        return entry
 
     def _labeled_combo(self, parent, label: str, var: tk.StringVar, values: list):
         row = ttk.Frame(parent)
@@ -1374,25 +1593,27 @@ class SettingsDialog(tk.Toplevel):
                             ["litera","cosmo","flatly","darkly","cyborg","superhero","morph","pulse"])
         ttk.Separator(t1, bootstyle="secondary").pack(fill="x", pady=12)
         self._section(t1, "Company Details")
-        self.co_name = tk.StringVar();  self._labeled_entry(t1, "Company Name:",    self.co_name)
-        self.co_desc = tk.StringVar();  self._labeled_entry(t1, "Company Tagline:", self.co_desc)
-        self.co_gst  = tk.StringVar();  self._labeled_entry(t1, "Company GSTIN:",   self.co_gst)
+        self.co_name = self._labeled_entry(t1, "Company Name:",    "Your company name")
+        self.co_desc = self._labeled_entry(t1, "Company Tagline:", "A short tagline, e.g. Business Made Smarter.")
+        self.co_gst  = self._labeled_entry(t1, "Company GSTIN:",   "22ABCDE1234F1Z5")
         ttk.Separator(t1, bootstyle="secondary").pack(fill="x", pady=12)
         self._section(t1, "Your / User Details")
-        self.user_name = tk.StringVar(); self._labeled_entry(t1, "Your Name / Firm:", self.user_name)
+        self.user_name = self._labeled_entry(t1, "Your Name / Firm:", "Your name or firm")
         ttk.Label(t1, text="Contact Info:", font=(FONT_FAMILY, 9)).pack(anchor="w", pady=(5, 2))
-        self.contact_text = tk.Text(t1, height=4, relief="flat", highlightthickness=1, wrap="word")
+        self.contact_text = PlaceholderText(t1, placeholder="+91 98765 43210, name@email.com, City",
+                                             height=4, relief="flat", highlightthickness=1, wrap="word")
         self.contact_text.pack(fill="x")
 
         t2 = ttk.Frame(nb, padding=16)
         nb.add(t2, text="  Payment & PDF  ")
         self._section(t2, "Payment Settings")
-        self.currency   = tk.StringVar(); self._labeled_entry(t2, "Currency Symbol:", self.currency)
-        self.upi_id     = tk.StringVar(); self._labeled_entry(t2, "UPI ID:",          self.upi_id)
-        self.pay_terms  = tk.StringVar(); self._labeled_entry(t2, "Default Terms:",   self.pay_terms)
+        self.currency   = self._labeled_entry(t2, "Currency Symbol:", "₹")
+        self.upi_id     = self._labeled_entry(t2, "UPI ID:",          "company@upi")
+        self.pay_terms  = self._labeled_entry(t2, "Default Terms:",   "Due on Receipt")
         ttk.Separator(t2, bootstyle="secondary").pack(fill="x", pady=12)
         self._section(t2, "PDF Footer Note")
-        self.footer_text = tk.Text(t2, height=3, relief="flat", highlightthickness=1, wrap="word")
+        self.footer_text = PlaceholderText(t2, placeholder="Thank you for your business!",
+                                            height=3, relief="flat", highlightthickness=1, wrap="word")
         self.footer_text.pack(fill="x")
 
         t3 = ttk.Frame(nb, padding=16)
@@ -1437,14 +1658,14 @@ class SettingsDialog(tk.Toplevel):
     def _load(self):
         c = self._cfg
         self.theme_var.set(c.get("theme", "litera"))
-        self.co_name.set(c.get("company_details", {}).get("name", ""))
-        self.co_desc.set(c.get("company_details", {}).get("description", ""))
-        self.co_gst.set(c.get("company_details", {}).get("gstin", ""))
-        self.user_name.set(c.get("user_details", {}).get("name", ""))
+        self.co_name.insert(0, c.get("company_details", {}).get("name", ""))
+        self.co_desc.insert(0, c.get("company_details", {}).get("description", ""))
+        self.co_gst.insert(0, c.get("company_details", {}).get("gstin", ""))
+        self.user_name.insert(0, c.get("user_details", {}).get("name", ""))
         self.contact_text.insert("1.0", c.get("user_details", {}).get("contact_info", ""))
-        self.currency.set(c.get("currency_symbol", "₹"))
-        self.upi_id.set(c.get("payment_details", {}).get("upi_id", ""))
-        self.pay_terms.set(c.get("payment_details", {}).get("payment_terms", ""))
+        self.currency.insert(0, c.get("currency_symbol", "₹"))
+        self.upi_id.insert(0, c.get("payment_details", {}).get("upi_id", ""))
+        self.pay_terms.insert(0, c.get("payment_details", {}).get("payment_terms", ""))
         self.footer_text.insert("1.0", c.get("pdf_settings", {}).get("footer_message", ""))
         self.logo_var.set(c.get("asset_paths", {}).get("logo", ""))
         self.sig_var.set(c.get("asset_paths", {}).get("signature", ""))
@@ -1721,6 +1942,8 @@ class PDFViewer(tk.Toplevel):
         from PyQt5.QtGui import QImage, QPixmap, QPainter
         from PyQt5.QtCore import Qt
 
+        painter = None
+        doc = None
         try:
             qapp = QApplication.instance()
             if qapp is None:
@@ -1759,14 +1982,23 @@ class PDFViewer(tk.Toplevel):
                 painter.setWindow(pixmap.rect())
                 painter.drawPixmap(0, 0, pixmap)
 
-            painter.end()
-            doc.close()
-
             if not show_dialog:
                 Messagebox.show_info("Success", f"Document sent to {printer_name}!", parent=self)
 
         except Exception as exc:
             Messagebox.show_error("Print Error", str(exc), parent=self)
+        finally:
+            # BUG FIX: cleanup used to live only on the success path, so a
+            # failure partway through the page loop (e.g. one corrupt page)
+            # skipped painter.end()/doc.close() -- leaking the PDF file
+            # handle and leaving the painter attached to the print spooler.
+            if painter is not None:
+                try:
+                    painter.end()
+                except Exception:
+                    pass
+            if doc is not None:
+                doc.close()
 
     def _save_copy(self):
         if path := filedialog.asksaveasfilename(
@@ -1803,15 +2035,16 @@ class ClientDialog(tk.Toplevel):
         pad.pack(fill="both", expand=True)
 
         ttk.Label(pad, text="Client / Company Name *", font=(FONT_FAMILY, 9)).pack(anchor="w")
-        self.name_entry = ttk.Entry(pad)
+        self.name_entry = PlaceholderEntry(pad, placeholder="Enter client name")
         self.name_entry.pack(fill="x", pady=(2, 10))
 
         ttk.Label(pad, text="Contact Info", font=(FONT_FAMILY, 9)).pack(anchor="w")
-        self.contact_text = tk.Text(pad, height=5, relief="flat", highlightthickness=1, wrap="word")
+        self.contact_text = PlaceholderText(pad, placeholder="+91 98765 43210, name@email.com, City",
+                                             height=5, relief="flat", highlightthickness=1, wrap="word")
         self.contact_text.pack(fill="x", pady=(2, 10))
 
         ttk.Label(pad, text="GSTIN (Optional)", font=(FONT_FAMILY, 9)).pack(anchor="w")
-        self.gstin_entry = ttk.Entry(pad)
+        self.gstin_entry = PlaceholderEntry(pad, placeholder="22ABCDE1234F1Z5")
         self.gstin_entry.pack(fill="x", pady=(2, 10))
 
         if client:
@@ -1871,11 +2104,12 @@ class CatalogItemDialog(tk.Toplevel):
         pad.pack(fill="both", expand=True)
 
         ttk.Label(pad, text="Item / Service Title *", font=(FONT_FAMILY, 9)).pack(anchor="w")
-        self.title_entry = ttk.Entry(pad)
+        self.title_entry = PlaceholderEntry(pad, placeholder="Enter item / service name")
         self.title_entry.pack(fill="x", pady=(2, 10))
 
         ttk.Label(pad, text="Description", font=(FONT_FAMILY, 9)).pack(anchor="w")
-        self.desc_text = tk.Text(pad, height=5, relief="flat", highlightthickness=1, wrap="word")
+        self.desc_text = PlaceholderText(pad, placeholder="Description (optional)",
+                                          height=5, relief="flat", highlightthickness=1, wrap="word")
         self.desc_text.pack(fill="x", pady=(2, 10))
 
         ttk.Label(pad, text=f"Default Amount ({CURRENCY_SYMBOL})", font=(FONT_FAMILY, 9)).pack(anchor="w")
@@ -1933,7 +2167,8 @@ class NoteDialog(tk.Toplevel):
         pad.pack(fill="both", expand=True)
         ttk.Label(pad, text="Internal note (not printed on the invoice PDF)",
                   font=(FONT_FAMILY, 9), bootstyle="secondary").pack(anchor="w", pady=(0, 6))
-        self.text = tk.Text(pad, height=7, relief="flat", highlightthickness=1, wrap="word")
+        self.text = PlaceholderText(pad, placeholder="Add an internal note...",
+                                     height=7, relief="flat", highlightthickness=1, wrap="word")
         self.text.pack(fill="both", expand=True)
         self.text.insert("1.0", current_note or "")
 
@@ -2662,27 +2897,30 @@ class InvoiceFormFrame(ttk.Frame):
         ttk.Label(left, text="Bill To", font=(FONT_FAMILY, 12, "bold")).pack(anchor="w", pady=(0, 10))
         ttk.Label(left, text="Client / Company Name *", font=(FONT_FAMILY, 9)).pack(anchor="w")
         self.client_name_var = tk.StringVar()
-        self.client_combo = ttk.Combobox(left, textvariable=self.client_name_var, height=6)
+        self.client_combo = PlaceholderCombobox(left, placeholder="Enter client name",
+                                                 textvariable=self.client_name_var, height=6)
         self.client_combo.pack(fill="x", pady=(2, 8))
         self._prevent_scroll_hijack(self.client_combo)
         self.client_combo.bind("<KeyRelease>", self._filter_client_suggestions)
         self.client_combo.bind("<<ComboboxSelected>>", self._on_client_picked)
         
         ttk.Label(left, text="Contact Info", font=(FONT_FAMILY, 9)).pack(anchor="w")
-        self.client_contact_text = tk.Text(left, height=3, relief="flat", highlightthickness=1, wrap="word")
+        self.client_contact_text = PlaceholderText(left, placeholder="Phone, email, address...",
+                                                     height=3, relief="flat", highlightthickness=1, wrap="word")
         self.client_contact_text.pack(fill="x", pady=(2, 8))
         ttk.Label(left, text="GSTIN", font=(FONT_FAMILY, 9)).pack(anchor="w")
-        self.client_gstin_entry = ttk.Entry(left)
+        self.client_gstin_entry = PlaceholderEntry(left, placeholder="22ABCDE1234F1Z5 (optional)")
         self.client_gstin_entry.pack(fill="x", pady=(2, 0))
 
         right = ttk.Frame(wrap, padding=16)
         right.grid(row=0, column=1, sticky="nsew", padx=(8, 0))
         ttk.Label(right, text="From", font=(FONT_FAMILY, 12, "bold")).pack(anchor="w", pady=(0, 10))
         ttk.Label(right, text="Your Name / Firm *", font=(FONT_FAMILY, 9)).pack(anchor="w")
-        self.your_name_entry = ttk.Entry(right)
+        self.your_name_entry = PlaceholderEntry(right, placeholder="Your business / firm name")
         self.your_name_entry.pack(fill="x", pady=(2, 8))
         ttk.Label(right, text="Contact Info", font=(FONT_FAMILY, 9)).pack(anchor="w")
-        self.your_contact_text = tk.Text(right, height=3, relief="flat", highlightthickness=1, wrap="word")
+        self.your_contact_text = PlaceholderText(right, placeholder="Phone, email, address...",
+                                                   height=3, relief="flat", highlightthickness=1, wrap="word")
         self.your_contact_text.pack(fill="x", pady=(2, 0))
 
     # ---- Invoice Details / Tax & Payment Settings ---------------------- #
@@ -2698,7 +2936,7 @@ class InvoiceFormFrame(ttk.Frame):
 
         r1 = ttk.Frame(left); r1.pack(fill="x", pady=4)
         ttk.Label(r1, text="Invoice Number *", width=20, anchor="w").pack(side="left")
-        self.invoice_number_entry = ttk.Entry(r1)
+        self.invoice_number_entry = PlaceholderEntry(r1, placeholder="INV-001")
         self.invoice_number_entry.pack(side="left", fill="x", expand=True)
 
         r2 = ttk.Frame(left); r2.pack(fill="x", pady=4)
@@ -2708,7 +2946,7 @@ class InvoiceFormFrame(ttk.Frame):
 
         r3 = ttk.Frame(left); r3.pack(fill="x", pady=4)
         ttk.Label(r3, text="Payment Terms", width=20, anchor="w").pack(side="left")
-        self.payment_terms_entry = ttk.Entry(r3)
+        self.payment_terms_entry = PlaceholderEntry(r3, placeholder="e.g. Due on Receipt, Net 15")
         self.payment_terms_entry.pack(side="left", fill="x", expand=True)
 
         r4 = ttk.Frame(left); r4.pack(fill="x", pady=(10, 0))
@@ -2809,10 +3047,11 @@ class InvoiceFormFrame(ttk.Frame):
 
         top = ttk.Frame(row_frame); top.pack(fill="x")
         title_var = tk.StringVar(value=title)
-        title_combo = ttk.Combobox(top, textvariable=title_var, values=[c["title"] for c in self._catalog_cache], height=6)
+        title_combo = PlaceholderCombobox(top, placeholder="Item / service name", textvariable=title_var,
+                                           values=[c["title"] for c in self._catalog_cache], height=6)
         title_combo.pack(side="left", fill="x", expand=True)
         self._prevent_scroll_hijack(title_combo)
-        title_combo.bind("<<ComboboxSelected>>", lambda e, tv=title_var: self._on_catalog_picked(tv))
+        title_combo.bind("<<ComboboxSelected>>", lambda e, tc=title_combo: self._on_catalog_picked(tc))
         title_combo.bind("<KeyRelease>", lambda e, tc=title_combo: self._filter_catalog_suggestions(tc))
 
         amount_entry = ttk.Entry(top, width=12)
@@ -2829,7 +3068,7 @@ class InvoiceFormFrame(ttk.Frame):
         remove_btn = ttk.Button(top, text="✕", width=3, bootstyle="danger-outline")
         remove_btn.pack(side="left")
 
-        desc_entry = ttk.Entry(row_frame)
+        desc_entry = PlaceholderEntry(row_frame, placeholder="Description (optional)")
         desc_entry.insert(0, description)
         desc_entry.pack(fill="x", pady=(4, 0))
 
@@ -2849,12 +3088,15 @@ class InvoiceFormFrame(ttk.Frame):
         self.item_rows.remove(entry)
         self._recalc_totals()
 
-    def _on_catalog_picked(self, title_var: tk.StringVar):
-        chosen = title_var.get()
+    def _on_catalog_picked(self, title_combo: "PlaceholderCombobox"):
+        # Matched and read via the combo widget itself (not the linked
+        # StringVar) so a still-visible placeholder can never be mistaken
+        # for a chosen catalog title.
+        chosen = title_combo.get()
         for c in self._catalog_cache:
             if c["title"] == chosen:
                 for row in self.item_rows:
-                    if row["title_var"] is title_var:
+                    if row["title_combo"] is title_combo:
                         row["desc_entry"].delete(0, "end")
                         row["desc_entry"].insert(0, c.get("description") or "")
                         row["amount_entry"].delete(0, "end")
@@ -2883,7 +3125,7 @@ class InvoiceFormFrame(ttk.Frame):
         row_frame = ttk.Frame(self.payments_container, padding=(0, 5))
         row_frame.pack(fill="x")
 
-        date_entry = DateEntry(row_frame, dateformat="%d %b %Y", width=12)
+        date_entry = DateEntry(row_frame, dateformat=DISPLAY_DATE_FORMAT, width=12)
         if payment_date:
             try:
                 date_entry.entry.delete(0, "end")
@@ -2902,7 +3144,7 @@ class InvoiceFormFrame(ttk.Frame):
         mode_combo.pack(side="left", padx=(0, 6))
         self._prevent_scroll_hijack(mode_combo)
 
-        note_entry = ttk.Entry(row_frame)
+        note_entry = PlaceholderEntry(row_frame, placeholder="Note (optional)")
         note_entry.insert(0, note)
         note_entry.pack(side="left", fill="x", expand=True, padx=(0, 6))
 
@@ -2929,7 +3171,8 @@ class InvoiceFormFrame(ttk.Frame):
         wrap = self._card(parent, "Internal Notes")
         ttk.Label(wrap, text="Visible only inside Vyaprix — never printed on the invoice PDF.",
                   font=(FONT_FAMILY, 9), bootstyle="secondary").pack(anchor="w", pady=(0, 6))
-        self.notes_text = tk.Text(wrap, height=3, relief="flat", highlightthickness=1, wrap="word")
+        self.notes_text = PlaceholderText(wrap, placeholder="Internal notes (optional) — not shown on the PDF",
+                                           height=3, relief="flat", highlightthickness=1, wrap="word")
         self.notes_text.pack(fill="x")
 
     def _section_totals(self, parent):
@@ -2989,7 +3232,7 @@ class InvoiceFormFrame(ttk.Frame):
                                        [c["name"] for c in self._client_cache]
 
     def _on_client_picked(self, _=None):
-        chosen = self.client_name_var.get()
+        chosen = self.client_combo.get()
         for c in self._client_cache:
             if c["name"] == chosen:
                 self.client_contact_text.delete("1.0", "end")
@@ -3005,7 +3248,7 @@ class InvoiceFormFrame(ttk.Frame):
         items = []
         for row in self.item_rows:
             items.append({
-                "title": row["title_var"].get().strip(),
+                "title": row["title_combo"].get().strip(),
                 "description": row["desc_entry"].get().strip(),
                 "amount": safe_float(row["amount_entry"].get()),
                 "discount": max(0.0, safe_float(row["disc_entry"].get())),
@@ -3034,7 +3277,7 @@ class InvoiceFormFrame(ttk.Frame):
         try:
             state = {
                 "invoice_number": self.invoice_number_entry.get().strip(),
-                "bill_to":        self.client_name_var.get().strip(),
+                "bill_to":        self.client_combo.get().strip(),
                 "client_contact": self.client_contact_text.get("1.0", "end-1c").strip(),
                 "client_gstin":   self.client_gstin_entry.get().strip(),
                 "your_name":      self.your_name_entry.get().strip(),
@@ -3181,7 +3424,7 @@ class InvoiceFormFrame(ttk.Frame):
             entry["frame"].destroy()
         self.payment_rows.clear()
 
-        self.client_name_var.set("")
+        self.client_combo.delete(0, "end")
         self.client_contact_text.delete("1.0", "end")
         self.client_gstin_entry.delete(0, "end")
         self.your_name_entry.delete(0, "end")
@@ -3209,7 +3452,7 @@ class InvoiceFormFrame(ttk.Frame):
         self.editing_id = invoice_id
         self.title_lbl.config(text=f"Editing Invoice #{invoice_id}")
 
-        self.client_name_var.set(d.get("bill_to") or "")
+        self.client_combo.insert(0, d.get("bill_to") or "")
         self.client_contact_text.insert("1.0", d.get("client_contact") or "")
         self.client_gstin_entry.insert(0, d.get("client_gstin") or "")
         self.your_name_entry.insert(0, d.get("your_name") or "")
@@ -3244,7 +3487,7 @@ class InvoiceFormFrame(ttk.Frame):
     # ------------------------------------------------------------------ #
     def _save(self):
         inv_num = self.invoice_number_entry.get().strip()
-        bill_to = self.client_name_var.get().strip()
+        bill_to = self.client_combo.get().strip()
         your_name = self.your_name_entry.get().strip()
         if not inv_num or not bill_to or not your_name:
             return Messagebox.show_error("Validation", "Invoice Number, Client Name, and Your Name are all required.")
