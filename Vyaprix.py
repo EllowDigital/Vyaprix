@@ -555,7 +555,18 @@ class PlaceholderCombobox(_PlaceholderMixin, ttk.Combobox):
         ttk.Combobox.delete(self, 0, "end")
 
     def get(self) -> str:
-        return "" if self._showing_placeholder else ttk.Combobox.get(self)
+        # --- THE FIX ---
+        # Smart detection: If the native text in the box no longer matches 
+        # the placeholder, the user MUST have selected an item from the list natively.
+        current_text = ttk.Combobox.get(self)
+        if self._showing_placeholder and current_text != self._placeholder:
+            self._showing_placeholder = False
+            try:
+                self.configure(foreground=self._lookup_normal_fg())
+            except tk.TclError:
+                pass
+                
+        return "" if self._showing_placeholder else current_text
 
     def insert(self, index, text):
         self._ph_clear()
@@ -568,7 +579,6 @@ class PlaceholderCombobox(_PlaceholderMixin, ttk.Combobox):
         ttk.Combobox.delete(self, first, last)
         if not ttk.Combobox.get(self):
             self._ph_draw()
-
 
 class PlaceholderText(tk.Text):
     """A tk.Text box with the same placeholder behaviour, adapted to Text's
@@ -3702,6 +3712,13 @@ class InvoiceApp(ttk.Window):
         cfg = load_config()
         super().__init__(themename=cfg.get("theme", "litera"))
         configure_windows_app_identity()
+        
+        # --- BULLETPROOF SCROLL FIX ---
+        # Reaches directly into the Tcl interpreter to permanently delete 
+        # the native bindings that cause Comboboxes to change values on scroll.
+        self.tk.call('bind', 'TCombobox', '<MouseWheel>', '')
+        self.tk.call('bind', 'TCombobox', '<Button-4>', '')
+        self.tk.call('bind', 'TCombobox', '<Button-5>', '')
         
         # 1. HIDE MAIN WINDOW IMMEDIATELY
         self.withdraw()
