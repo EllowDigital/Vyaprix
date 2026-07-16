@@ -371,6 +371,48 @@ def configure_windows_app_identity() -> None:
     except Exception as exc:
         logger.warning("Could not set Windows application identity: %s", exc)
 
+# =============================================================================
+#  KEYBOARD-SHORTCUT HELPERS
+# =============================================================================
+def _bind_action(func: Callable[[], Any]) -> Callable[..., str]:
+    """Wraps a zero-argument callable into a Tk key-event handler that runs
+    it and then returns "break".
+
+    Every application-wide shortcut needs that "break": without it, a key
+    combo bound with bind_all still falls through to whatever a widget's
+    own class bindings do with the same keys (for example Tk's built-in
+    Ctrl+D, which deletes the character after the cursor in Entry/Text
+    widgets) -- so the shortcut and the widget's default behaviour would
+    both fire from a single keystroke. Centralising the "break" here means
+    every shortcut below gets that guarantee the same way, instead of each
+    binding site having to remember it individually.
+    """
+    def _handler(event=None):
+        func()
+        return "break"
+    return _handler
+
+
+def prompt_and_backup_database(parent: tk.Misc) -> None:
+    """Asks where to save a copy of the live database, then copies it
+    there. Shared by the Settings dialog's "Save a Backup Copy" button and
+    the Ctrl+B keyboard shortcut, so there is one place that defines what
+    "back up the database" means rather than two copies that could drift
+    apart.
+    """
+    path = filedialog.asksaveasfilename(
+        parent=parent,
+        initialfile=f"Vyaprix-backup-{datetime.date.today().isoformat()}.db",
+        defaultextension=".db", filetypes=[("SQLite Database", "*.db")],
+    )
+    if not path:
+        return
+    try:
+        shutil.copy(DB_NAME, path)
+        Messagebox.show_info("Backup Saved", f"Database backed up to:\n{path}")
+    except Exception as exc:
+        Messagebox.show_error("Backup Failed", str(exc))
+
 class ToolTip:
     def __init__(self, widget: tk.Widget, text: str, delay: int = 500):
         self.widget = widget
@@ -1553,6 +1595,7 @@ class SettingsDialog(tk.Toplevel):
         self._build()
         self._load()
         self.focus_force()
+        self.bind("<Escape>", lambda e: self.destroy())
 
     def _section(self, parent, title: str):
         ttk.Label(parent, text=title, font=(FONT_FAMILY, 11, "bold")).pack(anchor="w", pady=(0, 8))
@@ -1655,15 +1698,7 @@ class SettingsDialog(tk.Toplevel):
         ttk.Button(btn_row, text="Save Configuration", bootstyle="success",   command=self._save).pack(side="right")
 
     def _backup_db(self):
-        if path := filedialog.asksaveasfilename(
-            initialfile=f"Vyaprix-backup-{datetime.date.today().isoformat()}.db",
-            defaultextension=".db", filetypes=[("SQLite Database", "*.db")],
-        ):
-            try:
-                shutil.copy(DB_NAME, path)
-                Messagebox.show_info("Backup Saved", f"Database backed up to:\n{path}")
-            except Exception as exc:
-                Messagebox.show_error("Backup Failed", str(exc))
+        prompt_and_backup_database(self)
 
     def _load(self):
         c = self._cfg
@@ -1786,6 +1821,13 @@ class PDFViewer(tk.Toplevel):
         self.bind("<Control-equal>", lambda _: self._zoom(+0.15))
         self.bind("<Control-minus>", lambda _: self._zoom(-0.15))
         self.bind("<Control-0>",     lambda _: self._reset_zoom())
+        # Bound locally (rather than left to the app-wide shortcuts) so
+        # printing/saving act on *this* PDF the moment the viewer has
+        # focus; _bind_action's "break" keeps the keystroke from also
+        # reaching the Dashboard's own Ctrl+P/Ctrl+E handling underneath.
+        self.bind("<Control-p>", _bind_action(self._print))
+        self.bind("<Control-e>", _bind_action(self._save_copy))
+        self.bind("<Escape>",    _bind_action(self._close))
         self.protocol("WM_DELETE_WINDOW", self._close)
         self.transient(parent)
         self.grab_set()
@@ -1815,7 +1857,8 @@ class PDFViewer(tk.Toplevel):
         self.canvas = tk.Canvas(self, bg="#555555", highlightthickness=0)
         self.canvas.pack(fill="both", expand=True)
 
-        ttk.Label(self, text="← → or Page Up/Down to navigate  •  Ctrl + / − zoom  •  Ctrl+0 fit",
+        ttk.Label(self, text="← → or Page Up/Down to navigate  •  Ctrl + / − zoom  •  Ctrl+0 fit  •  "
+                             "Ctrl+P print  •  Ctrl+E save  •  Esc close",
                   font=(FONT_FAMILY, 8), bootstyle="secondary").pack(side="bottom", pady=3)
 
     def _on_resize(self, _=None):
@@ -2290,9 +2333,9 @@ class DashboardFrame(ttk.Frame):
         self.search_var = tk.StringVar()
         self.search_var.trace_add("write", lambda *_: self._debounce_search())
         
-        entry = ttk.Entry(srch, textvariable=self.search_var, width=28)
-        entry.pack(side="left")
-        ToolTip(entry, "Search by invoice number, client name, or note")
+        self.search_entry = ttk.Entry(srch, textvariable=self.search_var, width=28)
+        self.search_entry.pack(side="left")
+        ToolTip(self.search_entry, "Search by invoice number, client name, or note")
         ttk.Button(srch, text="✕", width=3, bootstyle="secondary-outline", command=lambda: self.search_var.set("")).pack(side="left", padx=(4, 0))
 
     def _set_filter(self, status: str):
@@ -2571,6 +2614,32 @@ class DashboardFrame(ttk.Frame):
             Messagebox.show_info("Exported", f"Saved to:\n{path}") if ok else Messagebox.show_error("Failed", msg)
 
     # ------------------------------------------------------------------ #
+    #  Public API used by application-level keyboard shortcuts
+    # ------------------------------------------------------------------ #
+    def focus_search(self):
+        """Ctrl+F: jump into this screen's search box, with any existing
+        text selected so typing immediately replaces it."""
+        self.search_entry.focus_set()
+        self.search_entry.selection_range(0, "end")
+
+    def prepare_selected_pdf(self):
+        """Ctrl+P and Ctrl+E both start here: PDF generation is
+        asynchronous, so both shortcuts generate (or re-use) the PDF and
+        open it in the viewer -- the dedicated Print/Save buttons there
+        (and their own Ctrl+P/Ctrl+E shortcuts) handle the actual
+        print-or-save step. Mirrors the existing single-vs-bulk split
+        already used by the right-click context menu."""
+        ids = self._selected_ids()
+        if len(ids) >= 2:
+            self._act_bulk_print()
+        elif ids:
+            self._act_view_pdf()
+
+    def duplicate_selected(self):
+        """Ctrl+D: duplicate the single selected invoice."""
+        self._act_duplicate()
+
+    # ------------------------------------------------------------------ #
     #  Background workers
     # ------------------------------------------------------------------ #
     def _pdf_worker(self, invoice_id: str, q: queue.Queue):
@@ -2630,7 +2699,8 @@ class ClientsFrame(ttk.Frame):
         ttk.Label(srch, text="🔍", font=(FONT_FAMILY, 12)).pack(side="left", padx=(0, 4))
         self.search_var = tk.StringVar()
         self.search_var.trace_add("write", lambda *_: self._debounce_search())
-        ttk.Entry(srch, textvariable=self.search_var, width=32).pack(side="left")
+        self.search_entry = ttk.Entry(srch, textvariable=self.search_var, width=32)
+        self.search_entry.pack(side="left")
 
         wrap = ttk.Frame(outer); wrap.pack(fill="both", expand=True)
         self.tree = ttk.Treeview(wrap, columns=[c[0] for c in self.COL_DEFS], show="headings",
@@ -2703,6 +2773,12 @@ class ClientsFrame(ttk.Frame):
             self.db_manager.delete_clients(ids)
             self._populate()
 
+    def focus_search(self):
+        """Ctrl+F: jump into the search box, with any existing text
+        selected so typing immediately replaces it."""
+        self.search_entry.focus_set()
+        self.search_entry.selection_range(0, "end")
+
     def _show_ctx_menu(self, event):
         row = self.tree.identify_row(event.y)
         if row:
@@ -2742,7 +2818,8 @@ class CatalogFrame(ttk.Frame):
         ttk.Label(srch, text="🔍", font=(FONT_FAMILY, 12)).pack(side="left", padx=(0, 4))
         self.search_var = tk.StringVar()
         self.search_var.trace_add("write", lambda *_: self._debounce_search())
-        ttk.Entry(srch, textvariable=self.search_var, width=32).pack(side="left")
+        self.search_entry = ttk.Entry(srch, textvariable=self.search_var, width=32)
+        self.search_entry.pack(side="left")
 
         wrap = ttk.Frame(outer); wrap.pack(fill="both", expand=True)
         self.tree = ttk.Treeview(wrap, columns=[c[0] for c in self.COL_DEFS], show="headings",
@@ -2812,6 +2889,12 @@ class CatalogFrame(ttk.Frame):
         if Messagebox.okcancel("Delete Item(s)", msg):
             self.db_manager.delete_catalog_items(ids)
             self._populate()
+
+    def focus_search(self):
+        """Ctrl+F: jump into the search box, with any existing text
+        selected so typing immediately replaces it."""
+        self.search_entry.focus_set()
+        self.search_entry.selection_range(0, "end")
 
     def _show_ctx_menu(self, event):
         row = self.tree.identify_row(event.y)
@@ -2895,6 +2978,20 @@ class InvoiceFormFrame(ttk.Frame):
         widget.bind("<Button-4>", on_linux_scroll_up)
         widget.bind("<Button-5>", on_linux_scroll_down)
 
+    def _advance_focus_on_enter(self, widget):
+        """Binds <Return> so pressing Enter moves focus to the next widget
+        in tab order -- the same field-to-field flow Tab already gives,
+        just from the keyboard's most natural "confirm" key. Applied to
+        single-line Entry/editable-Combobox fields only: multi-line Text
+        widgets (Contact Info, Notes) deliberately keep plain Enter so it
+        can insert a newline instead."""
+        widget.bind("<Return>", self._focus_next_widget)
+
+    @staticmethod
+    def _focus_next_widget(event):
+        event.widget.tk_focusNext().focus_set()
+        return "break"
+
     # ---- Billing (Bill To / From) ------------------------------------ #
     def _section_billing(self, parent):
         wrap = ttk.Frame(parent)
@@ -2913,6 +3010,7 @@ class InvoiceFormFrame(ttk.Frame):
         self._prevent_scroll_hijack(self.client_combo)
         self.client_combo.bind("<KeyRelease>", self._filter_client_suggestions)
         self.client_combo.bind("<<ComboboxSelected>>", self._on_client_picked)
+        self._advance_focus_on_enter(self.client_combo)
         
         ttk.Label(left, text="Contact Info", font=(FONT_FAMILY, 9)).pack(anchor="w")
         self.client_contact_text = PlaceholderText(left, placeholder="Phone, email, address...",
@@ -2921,6 +3019,7 @@ class InvoiceFormFrame(ttk.Frame):
         ttk.Label(left, text="GSTIN", font=(FONT_FAMILY, 9)).pack(anchor="w")
         self.client_gstin_entry = PlaceholderEntry(left, placeholder="22ABCDE1234F1Z5 (optional)")
         self.client_gstin_entry.pack(fill="x", pady=(2, 0))
+        self._advance_focus_on_enter(self.client_gstin_entry)
 
         right = ttk.Frame(wrap, padding=16)
         right.grid(row=0, column=1, sticky="nsew", padx=(8, 0))
@@ -2928,6 +3027,7 @@ class InvoiceFormFrame(ttk.Frame):
         ttk.Label(right, text="Your Name / Firm *", font=(FONT_FAMILY, 9)).pack(anchor="w")
         self.your_name_entry = PlaceholderEntry(right, placeholder="Your business / firm name")
         self.your_name_entry.pack(fill="x", pady=(2, 8))
+        self._advance_focus_on_enter(self.your_name_entry)
         ttk.Label(right, text="Contact Info", font=(FONT_FAMILY, 9)).pack(anchor="w")
         self.your_contact_text = PlaceholderText(right, placeholder="Phone, email, address...",
                                                    height=3, relief="flat", highlightthickness=1, wrap="word")
@@ -2948,16 +3048,19 @@ class InvoiceFormFrame(ttk.Frame):
         ttk.Label(r1, text="Invoice Number *", width=20, anchor="w").pack(side="left")
         self.invoice_number_entry = PlaceholderEntry(r1, placeholder="INV-001")
         self.invoice_number_entry.pack(side="left", fill="x", expand=True)
+        self._advance_focus_on_enter(self.invoice_number_entry)
 
         r2 = ttk.Frame(left); r2.pack(fill="x", pady=4)
         ttk.Label(r2, text="Invoice Date *", width=20, anchor="w").pack(side="left")
         self.invoice_date_entry = DateEntry(r2, dateformat=DISPLAY_DATE_FORMAT)
         self.invoice_date_entry.pack(side="left", fill="x", expand=True)
+        self._advance_focus_on_enter(self.invoice_date_entry.entry)
 
         r3 = ttk.Frame(left); r3.pack(fill="x", pady=4)
         ttk.Label(r3, text="Payment Terms", width=20, anchor="w").pack(side="left")
         self.payment_terms_entry = PlaceholderEntry(r3, placeholder="e.g. Due on Receipt, Net 15")
         self.payment_terms_entry.pack(side="left", fill="x", expand=True)
+        self._advance_focus_on_enter(self.payment_terms_entry)
 
         r4 = ttk.Frame(left); r4.pack(fill="x", pady=(10, 0))
         self.no_charge_var = tk.BooleanVar(value=False)
@@ -2985,6 +3088,7 @@ class InvoiceFormFrame(ttk.Frame):
         self.tax_rate_entry.insert(0, "18")
         self.tax_rate_entry.pack(side="left", fill="x", expand=True)
         self.tax_rate_entry.bind("<KeyRelease>", lambda _: self._recalc_totals())
+        self._advance_focus_on_enter(self.tax_rate_entry)
 
         rgt = ttk.Frame(right); rgt.pack(fill="x", pady=4)
         ttk.Label(rgt, text="Tax Split Type", width=20, anchor="w").pack(side="left")
@@ -3003,6 +3107,7 @@ class InvoiceFormFrame(ttk.Frame):
         self.global_discount_entry.insert(0, "0")
         self.global_discount_entry.pack(side="left", fill="x", expand=True)
         self.global_discount_entry.bind("<KeyRelease>", lambda _: self._recalc_totals())
+        self._advance_focus_on_enter(self.global_discount_entry)
         
         self.global_discount_type_var = tk.StringVar(value="amount")
         
