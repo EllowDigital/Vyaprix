@@ -3168,24 +3168,28 @@ class InvoiceFormFrame(ttk.Frame):
         self._prevent_scroll_hijack(title_combo)
         title_combo.bind("<<ComboboxSelected>>", lambda e, tc=title_combo: self._on_catalog_picked(tc))
         title_combo.bind("<KeyRelease>", lambda e, tc=title_combo: self._filter_catalog_suggestions(tc))
+        self._advance_focus_on_enter(title_combo)
 
         amount_entry = ttk.Entry(top, width=12)
         amount_entry.insert(0, f"{amount:.2f}")
         amount_entry.pack(side="left", padx=6)
         amount_entry.bind("<KeyRelease>", lambda _: self._recalc_totals())
+        self._advance_focus_on_enter(amount_entry)
 
         disc_entry = ttk.Entry(top, width=10)
         disc_entry.insert(0, f"{discount:.2f}")
         disc_entry.pack(side="left", padx=(0, 6))
         disc_entry.bind("<KeyRelease>", lambda _: self._recalc_totals())
+        self._advance_focus_on_enter(disc_entry)
         ToolTip(disc_entry, "Per-item discount amount")
 
-        remove_btn = ttk.Button(top, text="✕", width=3, bootstyle="danger-outline")
+        remove_btn = ttk.Button(top, text="✕", width=3, bootstyle="danger-outline", takefocus=False)
         remove_btn.pack(side="left")
 
         desc_entry = PlaceholderEntry(row_frame, placeholder="Description (optional)")
         desc_entry.insert(0, description)
         desc_entry.pack(fill="x", pady=(4, 0))
+        self._advance_focus_on_enter(desc_entry)
 
         ttk.Separator(row_frame, bootstyle="secondary").pack(fill="x", pady=(8, 0))
 
@@ -3248,11 +3252,13 @@ class InvoiceFormFrame(ttk.Frame):
             except Exception:
                 pass
         date_entry.pack(side="left", padx=(0, 6))
+        self._advance_focus_on_enter(date_entry.entry)
 
         amount_entry = ttk.Entry(row_frame, width=12)
         amount_entry.insert(0, f"{amount:.2f}")
         amount_entry.pack(side="left", padx=(0, 6))
         amount_entry.bind("<KeyRelease>", lambda _: self._recalc_totals())
+        self._advance_focus_on_enter(amount_entry)
 
         mode_combo = ttk.Combobox(row_frame, values=PAYMENT_MODES, state="readonly", width=13)
         mode_combo.set(mode if mode in PAYMENT_MODES else "Cash")
@@ -3262,8 +3268,9 @@ class InvoiceFormFrame(ttk.Frame):
         note_entry = PlaceholderEntry(row_frame, placeholder="Note (optional)")
         note_entry.insert(0, note)
         note_entry.pack(side="left", fill="x", expand=True, padx=(0, 6))
+        self._advance_focus_on_enter(note_entry)
 
-        remove_btn = ttk.Button(row_frame, text="✕", width=3, bootstyle="danger-outline")
+        remove_btn = ttk.Button(row_frame, text="✕", width=3, bootstyle="danger-outline", takefocus=False)
         remove_btn.pack(side="left")
 
         entry = {
@@ -3683,6 +3690,47 @@ class InvoiceFormFrame(ttk.Frame):
         self._initial_snapshot = self._snapshot() 
         self.controller.show_frame(DashboardFrame)
 
+    # ------------------------------------------------------------------ #
+    #  Public API used by application-level keyboard shortcuts
+    # ------------------------------------------------------------------ #
+    def save(self):
+        """Ctrl+S: validates and saves the invoice, exactly like the
+        Save button."""
+        self._save()
+
+    def _focused_item_row(self) -> Optional[Dict]:
+        """Walks up from the current keyboard focus to find which item
+        row (if any) owns it, so shortcuts can act on "whichever row the
+        user is in" the same way F2/Ctrl+Shift+Delete do in a spreadsheet."""
+        widget = self.focus_get()
+        while widget is not None:
+            for row in self.item_rows:
+                if widget is row.get("frame"):
+                    return row
+            widget = getattr(widget, "master", None)
+        return None
+
+    def add_item(self):
+        """Ctrl+Shift+A / Ctrl+Plus: adds a new blank item row and moves
+        focus straight into it, ready to type."""
+        row = self._add_item_row()
+        row["title_combo"].focus_set()
+
+    def remove_selected_item(self):
+        """Ctrl+Shift+Delete / Ctrl+Minus: removes whichever item row
+        currently has focus, or the last row if none does -- the same
+        row a row's own "✕" button would remove."""
+        row = self._focused_item_row() or (self.item_rows[-1] if self.item_rows else None)
+        if row is not None:
+            self._remove_item_row(row)
+
+    def edit_selected_item(self):
+        """F2: jumps focus into the title field of the currently
+        focused/last item row, ready to edit."""
+        row = self._focused_item_row() or (self.item_rows[-1] if self.item_rows else None)
+        if row is not None:
+            row["title_combo"].focus_set()
+
 
 # =============================================================================
 #  APPLICATION SHELL  (sidebar navigation + page container)
@@ -3846,6 +3894,7 @@ class InvoiceApp(ttk.Window):
 
         self._current_frame_class: Optional[Type] = None
         self._build_shell()
+        self._setup_keyboard_shortcuts()
         self.show_frame(DashboardFrame)
         self.after(200, self._poll_queue)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -3880,6 +3929,120 @@ class InvoiceApp(ttk.Window):
             frame = FrameClass(self.container, self)
             self.frames[FrameClass] = frame
             frame.grid(row=0, column=0, sticky="nsew")
+
+    # ------------------------------------------------------------------ #
+    #  Keyboard shortcuts
+    # ------------------------------------------------------------------ #
+    def _setup_keyboard_shortcuts(self):
+        """Wires the application-wide keyboard shortcuts. Bound with
+        bind_all so they fire no matter which widget currently has focus,
+        and dispatched based on whichever frame is active -- e.g. Ctrl+S
+        only does something while the invoice form is open.
+
+        Two of these keys collide with bindings Tk's stock widgets already
+        ship with: Control-d deletes the character after the cursor on
+        Entry/TEntry/TCombobox/Text, and Control-o inserts a newline on
+        Text. Left alone, both would fire *alongside* our shortcut on
+        every keystroke -- a duplicate invoice pop-up while also deleting
+        a character from whatever field was focused. So besides the
+        bind_all entries below, those two exact (widget class, sequence)
+        pairs are replaced outright at the class level, the same way a
+        professional Tkinter app claims a key combo it wants for itself.
+        """
+        shortcuts = {
+            "<Control-n>":            self._sc_new_invoice,
+            "<Control-s>":            self._sc_save_invoice,
+            "<Control-p>":            self._sc_print_pdf,
+            "<Control-e>":            self._sc_export_pdf,
+            "<Control-f>":            self._sc_search,
+            "<Control-o>":            self._sc_open_invoice,
+            "<Control-q>":            self._sc_quit,
+            "<Control-d>":            self._sc_duplicate_invoice,
+            "<Control-b>":            self._sc_backup_database,
+            "<Control-Shift-A>":      self._sc_add_item,
+            "<Control-Shift-Delete>": self._sc_delete_item,
+            "<Control-equal>":        self._sc_add_item,    # Ctrl+Plus (physical =/+ key -- matches this app's existing PDFViewer Ctrl+= zoom-in convention)
+            "<Control-plus>":         self._sc_add_item,    # fallback if the platform reports the shifted keysym instead
+            "<Control-KP_Add>":       self._sc_add_item,    # numeric keypad +
+            "<Control-minus>":        self._sc_remove_item, # Ctrl+Minus (matches PDFViewer's existing zoom-out convention)
+            "<Control-KP_Subtract>":  self._sc_remove_item,
+            "<F2>":                   self._sc_edit_item,
+        }
+        for sequence, handler in shortcuts.items():
+            self.bind_all(sequence, _bind_action(handler))
+
+        for widget_class in ("Entry", "TEntry", "TCombobox", "Text"):
+            self.bind_class(widget_class, "<Control-d>", _bind_action(self._sc_duplicate_invoice))
+        self.bind_class("Text", "<Control-o>", _bind_action(self._sc_open_invoice))
+
+    def _active_frame(self) -> Optional[ttk.Frame]:
+        return self.frames.get(self._current_frame_class)
+
+    def _sc_new_invoice(self):
+        """Ctrl+N: open a fresh invoice. If the invoice form is already
+        open with unsaved edits, ask before discarding them -- the same
+        confirmation navigating away from it any other way would give."""
+        frame = self._active_frame()
+        if isinstance(frame, InvoiceFormFrame) and not frame.confirm_navigate_away():
+            return
+        self.show_frame(InvoiceFormFrame)
+
+    def _sc_save_invoice(self):
+        frame = self._active_frame()
+        if isinstance(frame, InvoiceFormFrame):
+            frame.save()
+
+    def _sc_print_pdf(self):
+        frame = self._active_frame()
+        if isinstance(frame, DashboardFrame):
+            frame.prepare_selected_pdf()
+
+    def _sc_export_pdf(self):
+        frame = self._active_frame()
+        if isinstance(frame, DashboardFrame):
+            frame.prepare_selected_pdf()
+
+    def _sc_search(self):
+        frame = self._active_frame()
+        if hasattr(frame, "focus_search"):
+            frame.focus_search()
+
+    def _sc_open_invoice(self):
+        """Ctrl+O: always jumps to the invoice list and into its search
+        box, regardless of which screen you're currently on -- unlike
+        Ctrl+F, which searches whatever screen is already active."""
+        self.show_frame(DashboardFrame)
+        if self._current_frame_class is DashboardFrame:
+            self.frames[DashboardFrame].focus_search()
+
+    def _sc_quit(self):
+        self._on_close()
+
+    def _sc_duplicate_invoice(self):
+        frame = self._active_frame()
+        if isinstance(frame, DashboardFrame):
+            frame.duplicate_selected()
+
+    def _sc_backup_database(self):
+        prompt_and_backup_database(self)
+
+    def _sc_add_item(self):
+        frame = self._active_frame()
+        if isinstance(frame, InvoiceFormFrame):
+            frame.add_item()
+
+    def _sc_remove_item(self):
+        frame = self._active_frame()
+        if isinstance(frame, InvoiceFormFrame):
+            frame.remove_selected_item()
+
+    def _sc_delete_item(self):
+        self._sc_remove_item()
+
+    def _sc_edit_item(self):
+        frame = self._active_frame()
+        if isinstance(frame, InvoiceFormFrame):
+            frame.edit_selected_item()
 
     # ------------------------------------------------------------------ #
     #  Navigation
@@ -3968,6 +4131,9 @@ class InvoiceApp(ttk.Window):
             self.after(200, self._poll_queue)
 
     def _on_close(self):
+        frame = self._active_frame()
+        if isinstance(frame, InvoiceFormFrame) and not frame.confirm_navigate_away():
+            return
         self.destroy()
 
 # =============================================================================
