@@ -1689,8 +1689,10 @@ class SettingsDialog(tk.Toplevel):
         ttk.Label(t4, text=str(DB_NAME), font=(FONT_FAMILY, 9), bootstyle="secondary", wraplength=540).pack(anchor="w")
         ttk.Separator(t4, bootstyle="secondary").pack(fill="x", pady=12)
         self._section(t4, "Backup")
-        ttk.Button(t4, text="💾  Save a Backup Copy…", bootstyle="secondary-outline",
-                   command=self._backup_db).pack(anchor="w")
+        backup_btn = ttk.Button(t4, text="💾  Save a Backup Copy…  (Ctrl+B)", bootstyle="secondary-outline",
+                                 command=self._backup_db)
+        backup_btn.pack(anchor="w")
+        ToolTip(backup_btn, "Back up the database now (Ctrl+B works from anywhere in the app)")
 
         btn_row = ttk.Frame(main)
         btn_row.pack(fill="x")
@@ -1786,6 +1788,81 @@ class AboutDialog(tk.Toplevel):
         ttk.Button(container, text="Close", width=14, bootstyle="primary", command=self.destroy).pack(side="bottom", pady=(20, 0))
 
 # =============================================================================
+#  KEYBOARD SHORTCUTS REFERENCE
+# =============================================================================
+class ShortcutsDialog(tk.Toplevel):
+    """A reference card listing every keyboard shortcut the app responds
+    to, grouped the same way the shortcuts themselves are scoped: global
+    navigation, the invoice form, and dialogs/viewers. Opened from the
+    sidebar's "⌨  Shortcuts" button or by pressing F1 anywhere."""
+
+    GROUPS = [
+        ("Navigation", [
+            ("Ctrl+N", "New Invoice"),
+            ("Ctrl+S", "Save Invoice"),
+            ("Ctrl+P", "Print PDF"),
+            ("Ctrl+E", "Export PDF"),
+            ("Ctrl+F", "Search"),
+            ("Ctrl+O", "Open Invoice"),
+            ("Ctrl+D", "Duplicate Invoice"),
+            ("Ctrl+B", "Backup Database"),
+            ("Ctrl+Q", "Quit"),
+        ]),
+        ("Invoice Form", [
+            ("Ctrl+Shift+A", "Add Item"),
+            ("Ctrl + Plus", "Add Item (Row)"),
+            ("Ctrl+Shift+Del", "Delete Selected Item"),
+            ("Ctrl + Minus", "Remove Item (Row)"),
+            ("F2", "Edit Selected Item"),
+            ("Tab / Shift+Tab", "Move Between Fields"),
+            ("Enter", "Next Field"),
+        ]),
+        ("Anywhere", [
+            ("Esc", "Close Dialog / PDF Viewer"),
+            ("F1", "Show This Help"),
+        ]),
+    ]
+
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.title("Keyboard Shortcuts")
+        self.geometry("440x600")
+        self.minsize(400, 420)
+        self.transient(parent)
+        self.grab_set()
+        self._build()
+        self.focus_force()
+        self.bind("<Escape>", lambda e: self.destroy())
+
+    def _build(self):
+        style = ttk.Style()
+        self.configure(bg=style.colors.bg)
+        container = ttk.Frame(self, padding=15)
+        container.pack(fill="both", expand=True)
+
+        hero = ttk.Frame(container, padding=15, bootstyle="primary")
+        hero.pack(fill="x")
+        ttk.Label(hero, text="⌨  Keyboard Shortcuts", font=(FONT_FAMILY, 15, "bold"),
+                  bootstyle="inverse-primary", anchor="center", justify="center").pack(fill="x")
+        ttk.Label(hero, text="Everything below works without touching the mouse",
+                  font=(FONT_FAMILY, 9), bootstyle="inverse-primary", anchor="center", justify="center").pack(fill="x", pady=(4, 0))
+
+        scroller = ScrolledFrame(container, autohide=True)
+        scroller.pack(fill="both", expand=True, pady=(15, 0))
+
+        for group_title, items in self.GROUPS:
+            ttk.Label(scroller, text=group_title, font=(FONT_FAMILY, 11, "bold"),
+                      bootstyle="secondary").pack(anchor="w", pady=(12, 6))
+            for keys, desc in items:
+                row = ttk.Frame(scroller)
+                row.pack(fill="x", pady=3)
+                ttk.Label(row, text=keys, font=(FONT_FAMILY, 9, "bold"), width=16,
+                          bootstyle="inverse-secondary", anchor="center", padding=(4, 3)).pack(side="left")
+                ttk.Label(row, text=desc, font=(FONT_FAMILY, 10)).pack(side="left", padx=(10, 0))
+
+        ttk.Button(container, text="Close", width=14, bootstyle="primary", command=self.destroy).pack(side="bottom", pady=(15, 0))
+
+# =============================================================================
 #  PDF VIEWER
 # =============================================================================
 class PDFViewer(tk.Toplevel):
@@ -1837,14 +1914,24 @@ class PDFViewer(tk.Toplevel):
         tb = ttk.Frame(self, padding=(10, 7))
         tb.pack(side="top", fill="x")
 
-        ttk.Button(tb, text="◀  Prev",  command=self._prev,         width=9).pack(side="left", padx=(0, 4))
-        ttk.Button(tb, text="Next  ▶",  command=self._next,         width=9).pack(side="left", padx=(0, 14))
+        prev_btn = ttk.Button(tb, text="◀  Prev",  command=self._prev,         width=9)
+        next_btn = ttk.Button(tb, text="Next  ▶",  command=self._next,         width=9)
+        prev_btn.pack(side="left", padx=(0, 4))
+        next_btn.pack(side="left", padx=(0, 14))
+        ToolTip(prev_btn, "Previous page (← or Page Up)")
+        ToolTip(next_btn, "Next page (→ or Page Down)")
         self.page_lbl = ttk.Label(tb, text="", font=(FONT_FAMILY, 10))
         self.page_lbl.pack(side="left")
 
-        ttk.Button(tb, text="✕  Close",  bootstyle="danger",    command=self._close,      width=9).pack(side="right", padx=(4, 0))
-        ttk.Button(tb, text="💾  Save",   bootstyle="secondary", command=self._save_copy,  width=9).pack(side="right", padx=4)
-        ttk.Button(tb, text="🖨  Print",  bootstyle="success",   command=self._print,      width=9).pack(side="right", padx=4)
+        close_btn = ttk.Button(tb, text="✕  Close",  bootstyle="danger",    command=self._close,      width=9)
+        save_btn  = ttk.Button(tb, text="💾  Save",   bootstyle="secondary", command=self._save_copy,  width=9)
+        print_btn = ttk.Button(tb, text="🖨  Print",  bootstyle="success",   command=self._print,      width=9)
+        close_btn.pack(side="right", padx=(4, 0))
+        save_btn.pack(side="right", padx=4)
+        print_btn.pack(side="right", padx=4)
+        ToolTip(close_btn, "Close this viewer (Esc)")
+        ToolTip(save_btn,  "Save a copy of this PDF (Ctrl+E)")
+        ToolTip(print_btn, "Print this PDF (Ctrl+P)")
 
         ttk.Separator(tb, orient="vertical").pack(side="right", fill="y", padx=10)
         self.zoom_lbl = ttk.Label(tb, text="100%", font=(FONT_FAMILY, 9), width=6, anchor="center")
@@ -2289,7 +2376,10 @@ class DashboardFrame(ttk.Frame):
         right = ttk.Frame(row)
         right.pack(side="right")
         ttk.Button(right, text="📊  Export CSV", bootstyle="info-outline", command=self._export_csv).pack(side="left", padx=4)
-        ttk.Button(right, text="＋  New Invoice", bootstyle="primary", command=lambda: self.controller.show_frame(InvoiceFormFrame)).pack(side="left", padx=(4, 0))
+        new_inv_btn = ttk.Button(right, text="＋  New Invoice  (Ctrl+N)", bootstyle="primary",
+                                  command=lambda: self.controller.show_frame(InvoiceFormFrame))
+        new_inv_btn.pack(side="left", padx=(4, 0))
+        ToolTip(new_inv_btn, "Start a new invoice (Ctrl+N)")
 
     def _stat_cards(self, parent):
         row = ttk.Frame(parent)
@@ -2335,7 +2425,7 @@ class DashboardFrame(ttk.Frame):
         
         self.search_entry = ttk.Entry(srch, textvariable=self.search_var, width=28)
         self.search_entry.pack(side="left")
-        ToolTip(self.search_entry, "Search by invoice number, client name, or note")
+        ToolTip(self.search_entry, "Search by invoice number, client name, or note (Ctrl+F)")
         ttk.Button(srch, text="✕", width=3, bootstyle="secondary-outline", command=lambda: self.search_var.set("")).pack(side="left", padx=(4, 0))
 
     def _set_filter(self, status: str):
@@ -2416,11 +2506,16 @@ class DashboardFrame(ttk.Frame):
         self.dup_btn  = ttk.Button(row, text="📋  Duplicate",  bootstyle="secondary-outline", state="disabled", command=self._act_duplicate)
         self.edit_btn = ttk.Button(row, text="✏  Edit",      bootstyle="secondary",         state="disabled", command=self._act_edit)
         self.pdf_btn  = ttk.Button(row, text="📄  View PDF",  bootstyle="primary",           state="disabled", command=self._act_view_pdf)
+        ToolTip(self.del_btn,  "Delete the selected invoice (Delete key)")
+        ToolTip(self.dup_btn,  "Duplicate this invoice (Ctrl+D)")
+        ToolTip(self.pdf_btn,  "Open this invoice's PDF, ready to print or export (Ctrl+P / Ctrl+E)")
 
         # -- Bulk-selection actions --
         self.bulk_del_btn    = ttk.Button(row, text="🗑  Bulk Delete", bootstyle="danger-outline",    command=self._act_delete)
         self.bulk_export_btn = ttk.Button(row, text="📊  Bulk Export", bootstyle="secondary-outline",  command=self._act_bulk_export)
         self.bulk_print_btn  = ttk.Button(row, text="🖨  Bulk Print",  bootstyle="primary",            command=self._act_bulk_print)
+        ToolTip(self.bulk_del_btn,   "Delete the selected invoices (Delete key)")
+        ToolTip(self.bulk_print_btn, "Merge & open the selected invoices' PDFs, ready to print or export (Ctrl+P / Ctrl+E)")
 
         self._show_single_actions()
 
@@ -2701,6 +2796,7 @@ class ClientsFrame(ttk.Frame):
         self.search_var.trace_add("write", lambda *_: self._debounce_search())
         self.search_entry = ttk.Entry(srch, textvariable=self.search_var, width=32)
         self.search_entry.pack(side="left")
+        ToolTip(self.search_entry, "Search clients (Ctrl+F)")
 
         wrap = ttk.Frame(outer); wrap.pack(fill="both", expand=True)
         self.tree = ttk.Treeview(wrap, columns=[c[0] for c in self.COL_DEFS], show="headings",
@@ -2820,6 +2916,7 @@ class CatalogFrame(ttk.Frame):
         self.search_var.trace_add("write", lambda *_: self._debounce_search())
         self.search_entry = ttk.Entry(srch, textvariable=self.search_var, width=32)
         self.search_entry.pack(side="left")
+        ToolTip(self.search_entry, "Search catalog items (Ctrl+F)")
 
         wrap = ttk.Frame(outer); wrap.pack(fill="both", expand=True)
         self.tree = ttk.Treeview(wrap, columns=[c[0] for c in self.COL_DEFS], show="headings",
@@ -3153,8 +3250,10 @@ class InvoiceFormFrame(ttk.Frame):
         wrap = self._card(parent, "Items")
         self.items_container = ttk.Frame(wrap)
         self.items_container.pack(fill="x")
-        ttk.Button(wrap, text="＋  Add Item", bootstyle="secondary-outline",
-                  command=lambda: self._add_item_row()).pack(anchor="w", pady=(8, 0))
+        add_item_btn = ttk.Button(wrap, text="＋  Add Item  (Ctrl+Shift+A)", bootstyle="secondary-outline",
+                                   command=lambda: self._add_item_row())
+        add_item_btn.pack(anchor="w", pady=(8, 0))
+        ToolTip(add_item_btn, "Add a blank item row (Ctrl+Shift+A or Ctrl+Plus)")
 
     def _add_item_row(self, title: str = "", description: str = "", amount: float = 0.0, discount: float = 0.0):
         row_frame = ttk.Frame(self.items_container, padding=(0, 6))
@@ -3185,6 +3284,7 @@ class InvoiceFormFrame(ttk.Frame):
 
         remove_btn = ttk.Button(top, text="✕", width=3, bootstyle="danger-outline", takefocus=False)
         remove_btn.pack(side="left")
+        ToolTip(remove_btn, "Remove this item (Ctrl+Shift+Del or Ctrl+Minus)")
 
         desc_entry = PlaceholderEntry(row_frame, placeholder="Description (optional)")
         desc_entry.insert(0, description)
@@ -3307,13 +3407,17 @@ class InvoiceFormFrame(ttk.Frame):
         # Initialize variables
         self.var_subtotal    = tk.StringVar(value="0.00")
         self.var_discount    = tk.StringVar(value="")
-        self.var_tax_lbl     = tk.StringVar(value="Tax:")
-        self.var_tax_val     = tk.StringVar(value="")
+        self.var_cgst_lbl    = tk.StringVar(value="CGST:")
+        self.var_cgst_val    = tk.StringVar(value="")
+        self.var_sgst_lbl    = tk.StringVar(value="SGST:")
+        self.var_sgst_val    = tk.StringVar(value="")
+        self.var_igst_lbl    = tk.StringVar(value="IGST:")
+        self.var_igst_val    = tk.StringVar(value="")
         self.var_grand_total = tk.StringVar(value="0.00")
         self.var_paid        = tk.StringVar(value="")
         self.var_balance     = tk.StringVar(value="0.00")
 
-        # Helper to create consistent rows
+        # Helper to create consistent rows with a fixed label
         def add_row(lbl_text, var_val, is_bold=False, is_color=None):
             row = ttk.Frame(self.summary_box)
             font_style = (FONT_FAMILY, 11, "bold") if is_bold else (FONT_FAMILY, 10)
@@ -3326,24 +3430,50 @@ class InvoiceFormFrame(ttk.Frame):
             if is_color: val_lbl.configure(bootstyle=is_color)
             return row
 
-        # Build Rows and save explicit references
-        self.row_subtotal = add_row("Subtotal:", self.var_subtotal)
-        self.row_disc = add_row("Discount:", self.var_discount)
-        
-        self.row_tax = ttk.Frame(self.summary_box)
-        ttk.Label(self.row_tax, textvariable=self.var_tax_lbl, width=25, anchor="e", font=(FONT_FAMILY, 10)).pack(side="left", padx=(0, 15))
-        ttk.Label(self.row_tax, textvariable=self.var_tax_val, width=15, anchor="e", font=(FONT_FAMILY, 10)).pack(side="right")
+        # Same as add_row, but for rows whose *label* also changes at
+        # runtime -- the GST rows, whose percentage depends on the tax rate.
+        def add_dynamic_row(lbl_var, var_val, is_bold=False, is_color=None):
+            row = ttk.Frame(self.summary_box)
+            font_style = (FONT_FAMILY, 11, "bold") if is_bold else (FONT_FAMILY, 10)
+            ttk.Label(row, textvariable=lbl_var, width=25, anchor="e", font=font_style).pack(side="left", padx=(0, 15))
+            val_lbl = ttk.Label(row, textvariable=var_val, width=15, anchor="e", font=font_style)
+            val_lbl.pack(side="right")
+            if is_color: val_lbl.configure(bootstyle=is_color)
+            return row
 
+        # Rows are created here but deliberately left unpacked.
+        # _recalc_totals() rebuilds the stacking order from scratch on
+        # every call -- unpacking every row, then re-packing only the
+        # ones currently relevant, in this fixed order:
+        #   Subtotal -> Discount -> Tax (CGST+SGST or IGST) -> Grand
+        #   Total -> Total Paid -> Balance Due
+        # A row that toggles from hidden to visible after later rows are
+        # already packed would otherwise land at the *end* of the stack
+        # instead of its correct place -- that's what used to put
+        # Discount below Balance Due.
+        self.row_subtotal    = add_row("Subtotal:", self.var_subtotal)
+        self.row_disc        = add_row("Discount:", self.var_discount)
+        self.row_cgst        = add_dynamic_row(self.var_cgst_lbl, self.var_cgst_val)
+        self.row_sgst        = add_dynamic_row(self.var_sgst_lbl, self.var_sgst_val)
+        self.row_igst        = add_dynamic_row(self.var_igst_lbl, self.var_igst_val)
         self.row_grand_total = add_row("Grand Total:", self.var_grand_total, is_bold=True)
-        self.row_paid = add_row("Total Paid:", self.var_paid)
-        self.row_balance = add_row("Balance Due:", self.var_balance, is_bold=True, is_color="danger")
+        self.row_paid        = add_row("Total Paid:", self.var_paid)
+        self.row_balance     = add_row("Balance Due:", self.var_balance, is_bold=True, is_color="danger")
+
+        self._summary_rows = (self.row_subtotal, self.row_disc, self.row_cgst, self.row_sgst,
+                               self.row_igst, self.row_grand_total, self.row_paid, self.row_balance)
 
     def _section_save_bar(self, parent):
         row = ttk.Frame(parent, padding=(0, 4, 0, 24))
         row.pack(fill="x")
-        ttk.Button(row, text="Cancel", bootstyle="secondary",
-                  command=lambda: self.controller.show_frame(DashboardFrame)).pack(side="right", padx=(8, 0))
-        ttk.Button(row, text="💾  Save Invoice", bootstyle="success", command=self._save).pack(side="right")
+        back_btn = ttk.Button(row, text="←  Back to Dashboard", bootstyle="secondary",
+                               command=lambda: self.controller.show_frame(DashboardFrame))
+        back_btn.pack(side="right", padx=(8, 0))
+        ToolTip(back_btn, "Return to the invoice list (unsaved changes will ask first)")
+
+        self.save_btn = ttk.Button(row, text="💾  Save Invoice  (Ctrl+S)", bootstyle="success", command=self._save)
+        self.save_btn.pack(side="right")
+        ToolTip(self.save_btn, "Save this invoice (Ctrl+S)")
 
     # ------------------------------------------------------------------ #
     #  Client autocomplete
@@ -3436,66 +3566,85 @@ class InvoiceFormFrame(ttk.Frame):
         )
 
     def _recalc_totals(self, *_):
-        """Calculates live totals and instantly updates the UI grid."""
+        """Calculates live totals and instantly updates the UI grid.
+
+        Every row is unpacked and then re-packed from scratch on each
+        call, rather than toggled in place, so the summary always lays
+        out in the fixed, correct order -- Subtotal, Discount, Tax,
+        Grand Total, Total Paid, Balance Due -- no matter which rows
+        were visible on the previous call. This is a handful of Frame
+        widgets, so repacking them on every keystroke has no noticeable
+        cost.
+        """
+        for row in self._summary_rows:
+            row.pack_forget()
+
         if self.no_charge_var.get():
             self.var_subtotal.set("0.00")
             self.var_grand_total.set("0.00")
             self.var_balance.set("0.00")
-            
-            # Repack strictly the relevant rows
+
             self.row_subtotal.pack(fill="x", pady=2)
-            self.row_disc.pack_forget()
-            self.row_tax.pack_forget()
             self.row_grand_total.pack(fill="x", pady=2)
-            self.row_paid.pack_forget()
             self.row_balance.pack(fill="x", pady=2)
-            
+
             self.status_badge.config(text="COMPLIMENTARY", bootstyle="info-inverse")
             return
-            
+
         items    = self._collect_items()
         tax_rate = safe_float(self.tax_rate_entry.get()) if self.gst_var.get() else 0.0
         g_disc   = safe_float(self.global_discount_entry.get())
-        
+
         totals   = DatabaseManager.calculate_totals(items, tax_rate, g_disc, self.global_discount_type_var.get())
         paid     = sum(safe_float(r["amount_entry"].get()) for r in self.payment_rows)
         balance  = totals["grand_total"] - paid
 
+        # Grand Total = Subtotal - Discount + Tax, and Balance Due =
+        # Grand Total - Total Paid (so Balance Due == Grand Total when
+        # nothing has been paid yet) -- both already hold true here:
+        # calculate_totals() derives grand_total as taxable + cgst + sgst,
+        # where taxable is subtotal minus total_discount.
         self.var_subtotal.set(fmt_money(totals['subtotal']))
         self.var_grand_total.set(fmt_money(totals['grand_total']))
         self.var_balance.set(fmt_money(balance))
 
-        # Pack in chronological order to avoid layout bugs
+        # 1. Subtotal always shows first.
         self.row_subtotal.pack(fill="x", pady=2)
 
-        # 1. Handle Discount Row
+        # 2. Discount -- shown as a negative value, only when there is one.
         if totals["total_discount"] > 0:
             self.var_discount.set(f"− {fmt_money(totals['total_discount'])}")
             self.row_disc.pack(fill="x", pady=2)
-        else:
-            self.row_disc.pack_forget()
 
-        # 2. Handle GST Row
+        # 3. Tax -- CGST/SGST is split equally and shown as two separate
+        # lines (e.g. 18% -> CGST 9% + SGST 9%); IGST is shown as a
+        # single line at the full rate. calculate_totals() always splits
+        # the tax into equal cgst/sgst halves regardless of type, so
+        # IGST's single amount is just those two halves added back
+        # together at the full rate.
         if self.gst_var.get() and tax_rate > 0:
+            half_rate = tax_rate / 2.0
             if self.gst_type_var.get() == "IGST":
-                self.var_tax_lbl.set(f"IGST ({tax_rate:g}%):")
-                self.var_tax_val.set(fmt_money(totals['cgst'] * 2))
+                self.var_igst_lbl.set(f"IGST ({tax_rate:g}%):")
+                self.var_igst_val.set(fmt_money(totals['cgst'] + totals['sgst']))
+                self.row_igst.pack(fill="x", pady=2)
             else:
-                self.var_tax_lbl.set(f"GST ({tax_rate:g}% - CGST/SGST):")
-                self.var_tax_val.set(fmt_money(totals['cgst'] + totals['sgst']))
-            self.row_tax.pack(fill="x", pady=2)
-        else:
-            self.row_tax.pack_forget()
+                self.var_cgst_lbl.set(f"CGST ({half_rate:g}%):")
+                self.var_cgst_val.set(fmt_money(totals['cgst']))
+                self.var_sgst_lbl.set(f"SGST ({half_rate:g}%):")
+                self.var_sgst_val.set(fmt_money(totals['sgst']))
+                self.row_cgst.pack(fill="x", pady=2)
+                self.row_sgst.pack(fill="x", pady=2)
 
+        # 4. Grand Total always shows.
         self.row_grand_total.pack(fill="x", pady=2)
 
-        # 3. Handle Paid Row
+        # 5. Total Paid -- only when something has actually been paid.
         if paid > 0:
             self.var_paid.set(f"− {fmt_money(paid)}")
             self.row_paid.pack(fill="x", pady=2)
-        else:
-            self.row_paid.pack_forget()
 
+        # 6. Balance Due always shows last.
         self.row_balance.pack(fill="x", pady=2)
 
         # Status Logic mapping safely to ttkbootstrap styles
@@ -3527,6 +3676,7 @@ class InvoiceFormFrame(ttk.Frame):
         else:
             self.editing_id = None
             self.title_lbl.config(text="New Invoice")
+            self.save_btn.config(text="💾  Save Invoice  (Ctrl+S)")
             self.invoice_number_entry.insert(0, self.db_manager.get_next_invoice_number())
             self.invoice_date_entry.entry.delete(0, "end")
             self.invoice_date_entry.entry.insert(0, datetime.date.today().strftime(DISPLAY_DATE_FORMAT))
@@ -3573,6 +3723,7 @@ class InvoiceFormFrame(ttk.Frame):
         d = dict(row)
         self.editing_id = invoice_id
         self.title_lbl.config(text=f"Editing Invoice #{invoice_id}")
+        self.save_btn.config(text="💾  Update Invoice  (Ctrl+S)")
 
         self.client_combo.insert(0, d.get("bill_to") or "")
         self.client_contact_text.insert("1.0", d.get("client_contact") or "")
@@ -3780,6 +3931,8 @@ class Sidebar(ttk.Frame):
         
         ttk.Button(bottom, text="⚙️  Settings", bootstyle="info-outline", padding=(10, 8),
                   command=self.controller.open_settings).pack(fill="x", pady=4)
+        ttk.Button(bottom, text="⌨️  Shortcuts", bootstyle="info-outline", padding=(10, 8),
+                  command=self.controller.open_shortcuts).pack(fill="x", pady=4)
         ttk.Button(bottom, text="ℹ️  About", bootstyle="info-outline", padding=(10, 8),
                   command=self.controller.open_about).pack(fill="x", pady=4)
                   
@@ -3967,6 +4120,7 @@ class InvoiceApp(ttk.Window):
             "<Control-minus>":        self._sc_remove_item, # Ctrl+Minus (matches PDFViewer's existing zoom-out convention)
             "<Control-KP_Subtract>":  self._sc_remove_item,
             "<F2>":                   self._sc_edit_item,
+            "<F1>":                   self._sc_show_shortcuts,
         }
         for sequence, handler in shortcuts.items():
             self.bind_all(sequence, _bind_action(handler))
@@ -4044,6 +4198,9 @@ class InvoiceApp(ttk.Window):
         if isinstance(frame, InvoiceFormFrame):
             frame.edit_selected_item()
 
+    def _sc_show_shortcuts(self):
+        self.open_shortcuts()
+
     # ------------------------------------------------------------------ #
     #  Navigation
     # ------------------------------------------------------------------ #
@@ -4073,6 +4230,9 @@ class InvoiceApp(ttk.Window):
 
     def open_about(self):
         AboutDialog(self)
+
+    def open_shortcuts(self):
+        ShortcutsDialog(self)
 
     def _on_settings_saved(self, new_theme=None):
         # 1. LIVE THEME SWITCHING ENGINE
