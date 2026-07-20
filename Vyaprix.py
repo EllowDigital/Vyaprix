@@ -282,7 +282,7 @@ def get_default_config() -> Dict[str, Any]:
         "company_details": {"name": APP_NAME, "description": APP_TAGLINE, "gstin": "22AAAAA0000A1Z5"},
         "payment_details": {"upi_id": "yourupi@bank",         "payment_terms": "Due upon receipt"},
         "asset_paths":     {"logo": "assets/app_logo.png",    "signature": "assets/sign.png", "upi_qr_code": "assets/upi_qr.png"},
-        "pdf_settings":    {"footer_message": "Generated with Vyaprix • Business Made Smarter."},
+        "pdf_settings":    {"footer_message": "Generated with Vyaprix • Business Made Smarter.", "always_show_qr_code": False},
         "currency_symbol": "₹",
     }
 
@@ -1627,9 +1627,27 @@ class PDFGenerator:
             ("LEFTPADDING",(0,0),(-1,-1),6),  ("RIGHTPADDING",(0,0),(-1,-1),6),
         ]))
 
+    def _should_show_qr(self) -> bool:
+        """Whether the QR code prints on this invoice.
+
+        Always requires the per-invoice "Show QR Code" toggle to be on
+        and the invoice not to be complimentary -- both pre-existing
+        controls, unchanged. On top of those, by default, the QR only
+        appears on invoices that still owe money (Unpaid/Partially
+        Paid): there's nothing left to pay on a fully settled invoice,
+        so a "scan to pay" code there is just noise. Settings > Images
+        & Assets has an "Always show the QR code" override for anyone
+        who wants it printed regardless of payment status.
+        """
+        if not self.data.get("show_qr_code") or self.data.get("is_complimentary"):
+            return False
+        if self.config.get("pdf_settings", {}).get("always_show_qr_code", False):
+            return True
+        return self.data.get("status") in (InvoiceStatus.DUE.value, InvoiceStatus.PARTIAL.value)
+
     def _build_footer_section(self) -> Table:
         qr_cell = sig_cell = Spacer(0, 0)
-        if self.data.get("show_qr_code") and not self.data.get("is_complimentary"):
+        if self._should_show_qr():
             if qr := self._asset("upi_qr_code"):
                 upi = safe_markup(self.config.get("payment_details", {}).get("upi_id", ""))
                 detail = Paragraph(f"<b>PAYMENT DETAILS</b><br/>Scan to pay.<br/>UPI ID: {upi}", self.styles["NC"])
@@ -1787,6 +1805,17 @@ class SettingsDialog(tk.Toplevel):
         self.sig_var  = tk.StringVar(); self._file_picker(t3, "Authorized Signature:", self.sig_var,  "sign.png")
         self.qr_var   = tk.StringVar(); self._file_picker(t3, "UPI QR Code:",          self.qr_var,   "upi_qr.png")
 
+        ttk.Separator(t3, bootstyle="secondary").pack(fill="x", pady=12)
+        self._section(t3, "QR Code Visibility")
+        self.always_show_qr_var = tk.BooleanVar()
+        qr_check = ttk.Checkbutton(t3, text="Always show the QR code, even on fully paid invoices",
+                                    variable=self.always_show_qr_var, bootstyle="round-toggle")
+        qr_check.pack(anchor="w")
+        ttk.Label(t3, text="Off by default: the QR code only prints on Unpaid or Partially Paid invoices, "
+                            "since there's nothing left to pay once an invoice is settled. Turn this on to "
+                            "always include it regardless of payment status.",
+                  font=(FONT_FAMILY, 9), bootstyle="secondary", wraplength=540, justify="left").pack(anchor="w", pady=(4, 0))
+
         t4 = ttk.Frame(nb, padding=16)
         nb.add(t4, text="  Data  ")
         self._section(t4, "Database Location")
@@ -1821,6 +1850,7 @@ class SettingsDialog(tk.Toplevel):
         self.logo_var.set(c.get("asset_paths", {}).get("logo", ""))
         self.sig_var.set(c.get("asset_paths", {}).get("signature", ""))
         self.qr_var.set(c.get("asset_paths", {}).get("upi_qr_code", ""))
+        self.always_show_qr_var.set(bool(c.get("pdf_settings", {}).get("always_show_qr_code", False)))
 
     def _save(self):
         save_config({
@@ -1838,7 +1868,8 @@ class SettingsDialog(tk.Toplevel):
                 "upi_id": self.upi_id.get().strip(),
                 "payment_terms": self.pay_terms.get().strip(),
             },
-            "pdf_settings": {"footer_message": self.footer_text.get("1.0", "end-1c").strip()},
+            "pdf_settings": {"footer_message": self.footer_text.get("1.0", "end-1c").strip(),
+                              "always_show_qr_code": self.always_show_qr_var.get()},
             "asset_paths": {
                 "logo": self.logo_var.get(),
                 "signature": self.sig_var.get(),
@@ -3124,8 +3155,10 @@ class InvoiceFormFrame(ttk.Frame):
     def _build(self):
         header = ttk.Frame(self, padding=(24, 16, 24, 6))
         header.pack(fill="x")
-        ttk.Button(header, text="←  Back to Dashboard", bootstyle="secondary-outline",
-                   command=lambda: self.controller.show_frame(DashboardFrame)).pack(side="left")
+        top_back_btn = ttk.Button(header, text="←  Back to Dashboard  (Esc)", bootstyle="secondary-outline",
+                                   command=lambda: self.controller.show_frame(DashboardFrame))
+        top_back_btn.pack(side="left")
+        ToolTip(top_back_btn, "Return to the invoice list (Esc). Unsaved changes will ask first.")
         self.title_lbl = ttk.Label(header, text="New Invoice", font=(FONT_FAMILY, 20, "bold"))
         self.title_lbl.pack(side="left", padx=20)
         self.status_badge = ttk.Label(header, text="", font=(FONT_FAMILY, 10, "bold"), padding=(10, 3))
@@ -3134,6 +3167,7 @@ class InvoiceFormFrame(ttk.Frame):
         self.scroller = ScrolledFrame(self, autohide=True)
         self.scroller.pack(fill="both", expand=True, padx=24, pady=(0, 10))
         body = self.scroller
+        self._bind_arrow_scrolling()
 
         self._section_billing(body)
         self._section_details(body)
@@ -3173,6 +3207,38 @@ class InvoiceFormFrame(ttk.Frame):
         widget.bind("<MouseWheel>", on_mousewheel)
         widget.bind("<Button-4>", on_linux_scroll_up)
         widget.bind("<Button-5>", on_linux_scroll_down)
+
+    def _bind_arrow_scrolling(self):
+        """Lets ↑ / ↓ scroll the invoice form the same way the mouse
+        wheel already does -- one "unit" per press (the same amount
+        _prevent_scroll_hijack() above uses), so keyboard scrolling
+        feels exactly as smooth/incremental as the mouse wheel, not a
+        jarring page-at-a-time jump.
+
+        Bound once, at the whole-application level, because Tk has no
+        clean "only while this widget is visible" binding scope --
+        instead, the handler itself checks that the invoice form is the
+        page actually showing before it does anything, so this is a
+        no-op while any other page is active. It also leaves combo
+        boxes and multi-line Text fields alone entirely: those widgets
+        already use ↑ / ↓ for something real (cycling values / moving
+        the cursor a line), and overriding that here would make typing
+        in Notes or picking from a dropdown fight the page scrolling
+        underneath it.
+        """
+        def on_arrow(event, direction: int):
+            if self.controller._active_frame() is not self:
+                return  # a different page is showing; don't touch this keystroke
+            try:
+                if isinstance(event.widget, (ttk.Combobox, tk.Text, ttk.Treeview)):
+                    return  # these widgets already use Up/Down for their own purpose
+            except Exception:
+                return  # can't safely resolve this event's widget; do nothing rather than risk a crash
+            self.scroller.yview_scroll(direction, "units")
+            return "break"
+
+        self.controller.bind_all("<Up>",   lambda e: on_arrow(e, -1))
+        self.controller.bind_all("<Down>", lambda e: on_arrow(e, 1))
 
     def _advance_focus_on_enter(self, widget):
         """Binds <Return> so pressing Enter moves focus to the next widget
@@ -4286,16 +4352,19 @@ class ShortcutManager:
     def _dispatch(self, sequence: str, event) -> str:
         # Safety rule 1: a modal dialog owns the keyboard while it's open.
         # event.widget is normally a live widget object, but Tk can hand
-        # back a bare path string instead if the widget is mid-destroy
-        # when the event fires (e.g. closing a dialog with Escape while
-        # another key event is already queued) -- guard against both a
-        # destroyed widget (TclError) and a widget that never resolved
-        # past its path string (AttributeError) rather than crashing.
+        # back something that fails to resolve cleanly in a few edge
+        # cases -- a bare path string if the widget is mid-destroy
+        # (TclError/AttributeError), or, as testing turned up, a
+        # reference into a combobox's internal dropdown popup that
+        # Python's binding can't map back to a widget object (KeyError).
+        # None of that is worth crashing over: if we can't confidently
+        # tell where this event came from, the safe answer is to do
+        # nothing, the same as if a dialog were genuinely focused.
         try:
             if isinstance(event.widget, str) or event.widget.winfo_toplevel() is not self.app:
                 return "break"
-        except (tk.TclError, AttributeError):
-            return "break"   # widget was destroyed mid-event; nothing to do
+        except Exception:
+            return "break"   # can't safely resolve this event's widget; nothing to act on
 
         handler = self._global_handlers.get(sequence)
         if handler is None:
