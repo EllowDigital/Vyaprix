@@ -301,10 +301,24 @@ PDF_FONT = register_fonts()
 # =============================================================================
 def get_default_config() -> Dict[str, Any]:
     return {
-        "theme":           "litera",
-        "user_details":    {"name": "Your Name/Company",      "contact_info": "email@example.com\n+91 XXXXX XXXXX"},
+        "theme": "litera",
+        "user_details": {
+            # Structured "Your Details" fields (Settings > Your Details).
+            "name": "", "firm_name": "", "phone": "", "email": "",
+            "website": "", "gst_number": "", "address": "", "city": "",
+            "state": "", "pin_code": "",
+            # Legacy free-text field from older builds. No longer edited
+            # by SettingsDialog, but kept (and still readable) so nobody's
+            # existing data silently disappears on upgrade -- see
+            # compose_your_contact()'s fallback below.
+            "contact_info": "",
+        },
         "company_details": {"name": APP_NAME, "description": APP_TAGLINE, "gstin": "22AAAAA0000A1Z5"},
-        "payment_details": {"upi_id": "yourupi@bank",         "payment_terms": "Due upon receipt"},
+        "payment_details": {
+            "upi_id": "yourupi@bank", "payment_terms": "Due upon receipt",
+            "bank_name": "", "account_holder_name": "", "account_number": "",
+            "ifsc_code": "", "payment_notes": "",
+        },
         "asset_paths":     {"logo": "assets/app_logo.png",    "signature": "assets/sign.png", "upi_qr_code": "assets/upi_qr.png"},
         "pdf_settings":    {"footer_message": "Generated with Vyaprix • Business Made Smarter.", "always_show_qr_code": False},
         "currency_symbol": "₹",
