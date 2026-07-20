@@ -254,20 +254,44 @@ logger = logging.getLogger(__name__)
 #  FONTS
 # =============================================================================
 def register_fonts() -> str:
-    try:
-        # POINT TO THE NEW PROGRAMDATA FOLDER
-        reg  = DATA_FONTS_DIR / "NotoSans-Regular.ttf"
-        bold = DATA_FONTS_DIR / "NotoSans-Bold.ttf"
-        
-        if reg.exists() and bold.exists():
+    """Registers the bundled NotoSans font (needed for the currency symbol
+    and any non-Latin characters) with ReportLab.
+
+    Tries the writable ProgramData copy first (DATA_FONTS_DIR), then falls
+    back to the read-only copy bundled directly in the EXE (FONTS_DIR) --
+    that second location still works fine as a font source even if the
+    first-run copy into ProgramData failed for some reason (permissions,
+    a partial install, etc.), so trying it here means a copy hiccup
+    doesn't have to take the real font down with it.
+
+    Falling all the way back to the built-in "Helvetica" is a real,
+    user-visible correctness problem, not a cosmetic one: Helvetica's
+    encoding has no glyph for "₹" (or most non-Latin characters), and
+    ReportLab silently substitutes an unrelated character instead of
+    raising an error -- every amount on every generated PDF would be
+    wrong with no indication anything failed. See InvoiceApp's
+    _warn_if_fallback_font(), which surfaces this to the user once at
+    startup so it can't fail completely silently.
+    """
+    for font_dir in (DATA_FONTS_DIR, FONTS_DIR):
+        reg  = font_dir / "NotoSans-Regular.ttf"
+        bold = font_dir / "NotoSans-Bold.ttf"
+        if not (reg.exists() and bold.exists()):
+            continue
+        try:
             # Remember to keep the str() fix!
             pdfmetrics.registerFont(TTFont("NotoSans",      str(reg)))
             pdfmetrics.registerFont(TTFont("NotoSans-Bold", str(bold)))
             addMapping("NotoSans", 0, 0, "NotoSans")
             addMapping("NotoSans", 1, 0, "NotoSans-Bold")
             return "NotoSans"
-    except Exception as exc:
-        logger.warning(f"Could not register custom fonts: {exc}")
+        except Exception as exc:
+            logger.warning(f"Could not register custom fonts from {font_dir}: {exc}")
+    logger.error(
+        "NotoSans font files were not found in %s or %s -- falling back to "
+        "Helvetica. PDFs will NOT render the currency symbol or non-Latin "
+        "characters correctly until this is fixed.", DATA_FONTS_DIR, FONTS_DIR,
+    )
     return "Helvetica"
 
 PDF_FONT = register_fonts()
@@ -2453,6 +2477,8 @@ class DashboardFrame(ttk.Frame):
         ("balance", "Balance",          108, "e"),
         ("note",    "🗒",                40, "center"),
     ]
+    PAGE_SIZE_OPTIONS = [25, 50, 100]
+    DEFAULT_PAGE_SIZE = 50
 
     def __init__(self, parent, controller):
         super().__init__(parent)
@@ -2462,7 +2488,10 @@ class DashboardFrame(ttk.Frame):
         self._sort_col      = "date"
         self._sort_rev      = True
         self._filter_btns: Dict[str, ttk.Button] = {}
-        self._row_index: Dict[str, Dict] = {}   
+        self._row_index: Dict[str, Dict] = {}
+        self._page          = 1
+        self._page_size     = self.DEFAULT_PAGE_SIZE
+        self._total_pages   = 1
         self._build()
         self._debounce_search = Debouncer(self, 200, self._populate)
 
@@ -2473,6 +2502,7 @@ class DashboardFrame(ttk.Frame):
         self._stat_cards(outer)
         self._filter_bar(outer)
         self._table(outer)
+        self._pagination_bar(outer)
         self._action_bar(outer)
 
     def _header(self, parent):
@@ -2486,6 +2516,9 @@ class DashboardFrame(ttk.Frame):
 
         right = ttk.Frame(row)
         right.pack(side="right")
+        refresh_btn = ttk.Button(right, text="🔄  Refresh  (Ctrl+R)", bootstyle="secondary-outline", command=self._act_refresh)
+        refresh_btn.pack(side="left", padx=4)
+        ToolTip(refresh_btn, "Reload the invoice list and stats (Ctrl+R)")
         ttk.Button(right, text="📊  Export CSV", bootstyle="info-outline", command=self._export_csv).pack(side="left", padx=4)
         new_inv_btn = ttk.Button(right, text="＋  New Invoice  (Ctrl+N)", bootstyle="primary",
                                   command=lambda: self.controller.show_frame(InvoiceFormFrame))
@@ -2533,15 +2566,33 @@ class DashboardFrame(ttk.Frame):
         srch.pack(side="right")
         ttk.Label(srch, text="🔍", font=(FONT_FAMILY, 12)).pack(side="left", padx=(0, 4))
         self.search_var = tk.StringVar()
-        self.search_var.trace_add("write", lambda *_: self._debounce_search())
+        self.search_var.trace_add("write", lambda *_: self._on_search_changed())
         
         self.search_entry = ttk.Entry(srch, textvariable=self.search_var, width=28)
         self.search_entry.pack(side="left")
         ToolTip(self.search_entry, "Search by invoice number, client name, or note (Ctrl+F)")
+        # Ctrl+A means "Select All invoices" on this screen (see select_all()
+        # below), but inside the search box specifically that would be a
+        # surprising side effect of just moving your cursor while typing --
+        # this local, higher-priority binding keeps the native "jump to
+        # start of text" behaviour here instead, without needing to touch
+        # every Entry/Combobox app-wide the way the app's Ctrl+D handling
+        # does for its own (more disruptive) native-binding collision.
+        self.search_entry.bind("<Control-a>", self._search_entry_ctrl_a)
         ttk.Button(srch, text="✕", width=3, bootstyle="secondary-outline", command=lambda: self.search_var.set("")).pack(side="left", padx=(4, 0))
+
+    @staticmethod
+    def _search_entry_ctrl_a(event):
+        event.widget.icursor(0)
+        return "break"
+
+    def _on_search_changed(self):
+        self._page = 1  # a new search query invalidates the old page position
+        self._debounce_search()
 
     def _set_filter(self, status: str):
         self._status_filter = status
+        self._page = 1  # a new filter invalidates the old page position
         for s, btn in self._filter_btns.items():
             btn.configure(bootstyle="primary" if s == status else "secondary-outline")
         self._populate()
@@ -2594,7 +2645,8 @@ class DashboardFrame(ttk.Frame):
         else:
             self._sort_col = col
             self._sort_rev = False # Default to ascending when clicking a new column
-            
+        self._page = 1  # a new sort order invalidates the old page position
+
         # Update column headers to show the correct arrow and clear others
         for cid, text, _, _ in self.COL_DEFS:
             if cid == col:
@@ -2604,6 +2656,48 @@ class DashboardFrame(ttk.Frame):
                 self.tree.heading(cid, text=text) 
                 
         self._populate()
+
+    def _pagination_bar(self, parent):
+        row = ttk.Frame(parent)
+        row.pack(fill="x", pady=(8, 0))
+
+        self.page_info_lbl = ttk.Label(row, text="", font=(FONT_FAMILY, 9), bootstyle="secondary")
+        self.page_info_lbl.pack(side="left")
+
+        nav = ttk.Frame(row)
+        nav.pack(side="right")
+
+        ttk.Label(nav, text="Rows per page:", font=(FONT_FAMILY, 9), bootstyle="secondary").pack(side="left", padx=(0, 6))
+        self.page_size_var = tk.StringVar(value=str(self._page_size))
+        page_size_combo = ttk.Combobox(nav, textvariable=self.page_size_var, state="readonly", width=5,
+                                        values=[str(n) for n in self.PAGE_SIZE_OPTIONS])
+        page_size_combo.pack(side="left", padx=(0, 16))
+        page_size_combo.bind("<<ComboboxSelected>>", self._on_page_size_change)
+
+        self.prev_page_btn = ttk.Button(nav, text="◀  Prev", width=8, bootstyle="secondary-outline", command=self._prev_page)
+        self.prev_page_btn.pack(side="left", padx=2)
+        self.next_page_btn = ttk.Button(nav, text="Next  ▶", width=8, bootstyle="secondary-outline", command=self._next_page)
+        self.next_page_btn.pack(side="left", padx=2)
+
+    def _prev_page(self):
+        if self._page > 1:
+            self._page -= 1
+            self._populate()
+
+    def _next_page(self):
+        if self._page < self._total_pages:
+            self._page += 1
+            self._populate()
+
+    def _on_page_size_change(self, _=None):
+        try:
+            new_size = int(self.page_size_var.get())
+        except (TypeError, ValueError):
+            new_size = self.DEFAULT_PAGE_SIZE
+        if new_size != self._page_size:
+            self._page_size = new_size
+            self._page = 1
+            self._populate()
 
     def _action_bar(self, parent):
         row = ttk.Frame(parent)
@@ -2717,19 +2811,46 @@ class DashboardFrame(ttk.Frame):
         # Perform the actual sort based on the chosen column
         entries.sort(key=lambda e: e[2].get(self._sort_col, ""), reverse=self._sort_rev)
 
-        # Insert rows back into the tree
-        for values, tag, _keys, raw in entries:
+        # --- Pagination: slice the sorted, filtered result set down to
+        # just the current page before touching the Treeview at all.
+        # Sorting still has to run over the *full* result set above --
+        # otherwise "sort by total" would only sort within whichever
+        # page happened to be showing -- but only inserting one page's
+        # worth of rows into the Treeview keeps large invoice lists
+        # fast to render and easy to scan, instead of one giant
+        # scrollable wall of rows.
+        total = len(entries)
+        self._total_pages = max(1, -(-total // self._page_size))  # ceiling division
+        self._page = max(1, min(self._page, self._total_pages))   # clamp: e.g. the last item
+                                                                     # on the last page just got deleted
+        start = (self._page - 1) * self._page_size
+        page_entries = entries[start:start + self._page_size]
+
+        # Insert this page's rows into the tree
+        for values, tag, _keys, raw in page_entries:
             badge = tag if tag in STATUS_BADGE else ""
             iid = raw["invoice_number"]
             self.tree.insert("", "end", iid=iid, values=values, tags=(badge,) if badge else ())
             self._row_index[iid] = raw
             
-        # Restore selection
+        # Restore selection (only rows on the current page can still exist)
         for item in current_selection:
             if self.tree.exists(item):
                 self.tree.selection_add(item)
-                
+
+        self._update_pagination_controls(total, start, len(page_entries))
         self._on_select() # Re-evaluate button states
+
+    def _update_pagination_controls(self, total: int, start: int, shown: int):
+        if total == 0:
+            self.page_info_lbl.config(text="No invoices found")
+        else:
+            self.page_info_lbl.config(
+                text=f"Showing {start + 1}–{start + shown} of {total}  •  "
+                     f"Page {self._page} of {self._total_pages}"
+            )
+        self.prev_page_btn.config(state="normal" if self._page > 1 else "disabled")
+        self.next_page_btn.config(state="normal" if self._page < self._total_pages else "disabled")
 
     def _update_stats(self):
         s = self.db_manager.get_dashboard_stats()
@@ -2824,6 +2945,16 @@ class DashboardFrame(ttk.Frame):
             ok, msg = self.db_manager.export_to_csv(path)
             Messagebox.show_info("Exported", f"Saved to:\n{path}") if ok else Messagebox.show_error("Failed", msg)
 
+    def _act_refresh(self):
+        """Reloads the invoice list and summary stats from the database --
+        used by both the Refresh button and Ctrl+R. This is the same
+        query _populate()/_update_stats() already run on every
+        navigation; refresh just triggers it on demand (e.g. after
+        editing data outside the app, or just to be sure the numbers
+        are current) without changing which page or filter is active."""
+        self._populate()
+        self._update_stats()
+
     # ------------------------------------------------------------------ #
     #  Public API used by application-level keyboard shortcuts
     # ------------------------------------------------------------------ #
@@ -2832,6 +2963,19 @@ class DashboardFrame(ttk.Frame):
         text selected so typing immediately replaces it."""
         self.search_entry.focus_set()
         self.search_entry.selection_range(0, "end")
+
+    def refresh(self):
+        """Ctrl+R: reload the invoice list and stats, exactly like the
+        Refresh button."""
+        self._act_refresh()
+
+    def select_all(self):
+        """Ctrl+A: select every invoice on the currently-shown page of
+        the list. Selection lives in the Treeview widget itself, so
+        this can only select rows actually on screen -- with
+        pagination, that means the current page; switch pages first to
+        select rows elsewhere."""
+        self.tree.selection_set(self.tree.get_children())
 
     def prepare_selected_pdf(self):
         """Ctrl+P and Ctrl+E both start here: PDF generation is
@@ -3209,24 +3353,30 @@ class InvoiceFormFrame(ttk.Frame):
         widget.bind("<Button-5>", on_linux_scroll_down)
 
     def _bind_arrow_scrolling(self):
-        """Lets ↑ / ↓ scroll the invoice form the same way the mouse
-        wheel already does -- one "unit" per press (the same amount
-        _prevent_scroll_hijack() above uses), so keyboard scrolling
-        feels exactly as smooth/incremental as the mouse wheel, not a
-        jarring page-at-a-time jump.
+        """Lets the keyboard scroll the invoice form the same way the
+        mouse wheel already does:
+          - ↑ / ↓        -- one "unit" per press (the same increment
+            _prevent_scroll_hijack() above uses for the wheel), so this
+            feels exactly as smooth/incremental as the mouse wheel, not
+            a jarring page-at-a-time jump.
+          - Page Up / Page Down -- one "page" per press, for quickly
+            crossing the whole form without holding an arrow key down.
 
         Bound once, at the whole-application level, because Tk has no
         clean "only while this widget is visible" binding scope --
         instead, the handler itself checks that the invoice form is the
         page actually showing before it does anything, so this is a
-        no-op while any other page is active. It also leaves combo
-        boxes and multi-line Text fields alone entirely: those widgets
-        already use ↑ / ↓ for something real (cycling values / moving
-        the cursor a line), and overriding that here would make typing
-        in Notes or picking from a dropdown fight the page scrolling
+        no-op while any other page is active (including while a modal
+        dialog such as the PDF viewer has the keyboard grab, since that
+        never changes which page is "active" underneath it). It also
+        leaves combo boxes, multi-line Text fields, and Treeviews alone
+        entirely: those widgets already use ↑ / ↓ for something real
+        (cycling values / moving the cursor a line / changing the
+        selected row), and overriding that here would make typing in
+        Notes or picking from a dropdown fight the page scrolling
         underneath it.
         """
-        def on_arrow(event, direction: int):
+        def on_scroll_key(event, direction: int, what: str):
             if self.controller._active_frame() is not self:
                 return  # a different page is showing; don't touch this keystroke
             try:
@@ -3234,11 +3384,13 @@ class InvoiceFormFrame(ttk.Frame):
                     return  # these widgets already use Up/Down for their own purpose
             except Exception:
                 return  # can't safely resolve this event's widget; do nothing rather than risk a crash
-            self.scroller.yview_scroll(direction, "units")
+            self.scroller.yview_scroll(direction, what)
             return "break"
 
-        self.controller.bind_all("<Up>",   lambda e: on_arrow(e, -1))
-        self.controller.bind_all("<Down>", lambda e: on_arrow(e, 1))
+        self.controller.bind_all("<Up>",    lambda e: on_scroll_key(e, -1, "units"))
+        self.controller.bind_all("<Down>",  lambda e: on_scroll_key(e,  1, "units"))
+        self.controller.bind_all("<Prior>", lambda e: on_scroll_key(e, -1, "pages"))  # Page Up
+        self.controller.bind_all("<Next>",  lambda e: on_scroll_key(e,  1, "pages"))  # Page Down
 
     def _advance_focus_on_enter(self, widget):
         """Binds <Return> so pressing Enter moves focus to the next widget
@@ -4434,6 +4586,28 @@ class InvoiceApp(ttk.Window):
         if hasattr(self, "splash") and self.splash.winfo_exists():
             self.splash.destroy()
         self.deiconify() # Reveal the main application window
+        self._warn_if_fallback_font()
+    # ------------------------------------------------------------------ #
+    def _warn_if_fallback_font(self):
+        """One-time, non-blocking heads-up if PDF generation is running
+        without the bundled NotoSans font (see register_fonts()). Without
+        this, a missing/corrupt font install fails completely silently --
+        every amount on every PDF would quietly show the wrong character
+        in place of the currency symbol, with nothing telling the user or
+        support anything is wrong. Only shown when the fallback is
+        actually active, so it's invisible to the vast majority of
+        installs where the fonts loaded correctly."""
+        if PDF_FONT == "Helvetica":
+            Messagebox.show_warning(
+                "Font Files Missing",
+                "Vyaprix could not load its bundled font (NotoSans).\n\n"
+                "PDFs will still generate, but the currency symbol "
+                f"({CURRENCY_SYMBOL}) and any non-English characters may "
+                "not display correctly until this is fixed.\n\n"
+                "Try reinstalling Vyaprix. Details were written to the log:\n"
+                f"{LOG_FILE}",
+                parent=self,
+            )
     # ------------------------------------------------------------------ #
     def _build_shell(self):
         self.sidebar = Sidebar(self, self)
@@ -4501,6 +4675,8 @@ class InvoiceApp(ttk.Window):
         sc.register_contextual("<Control-d>", DashboardFrame, self._sc_duplicate_invoice,                          "Duplicate Invoice", "Navigation", display="Ctrl+D")
         sc.register_contextual("<Control-p>", DashboardFrame, self._sc_print_pdf,                                  "Print PDF",         "Navigation", display="Ctrl+P")
         sc.register_contextual("<Control-e>", DashboardFrame, self._sc_export_pdf,                                 "Export PDF",        "Navigation", display="Ctrl+E")
+        sc.register_contextual("<Control-r>", DashboardFrame, self._sc_refresh_dashboard,                          "Refresh List",      "Navigation", display="Ctrl+R")
+        sc.register_contextual("<Control-a>", DashboardFrame, self._sc_select_all_invoices,                        "Select All",         "Navigation", display="Ctrl+A")
 
         # ---- Contextual: Clients / Catalog search boxes ------------------
         sc.register_contextual("<Control-f>", ClientsFrame, lambda: self.frames[ClientsFrame].focus_search(), "Search", "Navigation", display="Ctrl+F")
@@ -4522,6 +4698,7 @@ class InvoiceApp(ttk.Window):
         # single central registration -- documented here anyway so the
         # reference card stays the one complete list of shortcuts.
         sc.register_info("Tab / Shift+Tab", "Move Between Fields", "Invoice Form")
+        sc.register_info("↑ / ↓  •  Page Up / Down", "Scroll the Form", "Invoice Form")
         sc.register_info("Enter", "Next Field", "Invoice Form")
 
         # ---- Anywhere -------------------------------------------------------
@@ -4581,6 +4758,12 @@ class InvoiceApp(ttk.Window):
 
     def _sc_duplicate_invoice(self):
         self.frames[DashboardFrame].duplicate_selected()
+
+    def _sc_refresh_dashboard(self):
+        self.frames[DashboardFrame].refresh()
+
+    def _sc_select_all_invoices(self):
+        self.frames[DashboardFrame].select_all()
 
     def _sc_backup_database(self):
         prompt_and_backup_database(self)
