@@ -436,6 +436,75 @@ def load_app_logo_image(master: tk.Misc) -> Optional[tk.PhotoImage]:
             logger.warning(f"Could not load app logo image: {exc}")
     return None
 
+def load_thumbnail_image(path: Optional[Path], master: tk.Misc, max_size: int = 44) -> Optional[tk.PhotoImage]:
+    """Loads an arbitrary image file as a small square-ish thumbnail, for
+    the asset-upload preview rows in Settings. Same Pillow-with-Tk-fallback
+    approach as load_app_logo_image() above, just generalised to any path
+    and any target size instead of being hardcoded to the app logo."""
+    if not path or not path.exists():
+        return None
+    try:
+        try:
+            from PIL import Image, ImageTk
+            img = Image.open(str(path))
+            img.thumbnail((max_size, max_size), getattr(Image, "Resampling", Image).LANCZOS)
+            return ImageTk.PhotoImage(image=img, master=master)
+        except ImportError:
+            img = tk.PhotoImage(master=master, file=str(path))
+            longest = max(img.width(), img.height())
+            if longest > max_size:
+                factor = max(1, longest // max_size)
+                img = img.subsample(factor, factor)
+            return img
+    except Exception as exc:
+        logger.warning(f"Could not load thumbnail for {path}: {exc}")
+        return None
+
+def compose_your_name(user_details: Dict[str, Any]) -> str:
+    """Turns the structured 'Your Details' fields into the single bold
+    headline used at the top of an invoice's FROM block. The firm name
+    takes priority (that's usually what a client expects to see first);
+    the person's name is the fallback so a solo/freelance user without a
+    separate firm name still gets a sensible headline."""
+    firm = (user_details.get("firm_name") or "").strip()
+    name = (user_details.get("name") or "").strip()
+    return firm or name or "Your Name/Company"
+
+def compose_your_contact(user_details: Dict[str, Any]) -> str:
+    """Turns the structured 'Your Details' fields into the multi-line
+    contact block shown under the FROM headline on an invoice. Only
+    fields that are actually filled in are included, so an incomplete
+    profile doesn't leave blank lines on the PDF.
+
+    Falls back to the legacy free-text contact_info field when none of
+    the structured fields have been filled in yet -- this only matters
+    right after upgrading from an older build that only had that one
+    field, so existing invoices/config don't suddenly show blank contact
+    details until the user revisits Settings and re-enters them here."""
+    firm = (user_details.get("firm_name") or "").strip()
+    name = (user_details.get("name") or "").strip()
+    lines = []
+    if firm and name:
+        lines.append(name)  # name already used as the headline when there's no firm name
+    for key in ("phone", "email", "website"):
+        if val := (user_details.get(key) or "").strip():
+            lines.append(val)
+    if gst := (user_details.get("gst_number") or "").strip():
+        lines.append(f"GSTIN: {gst}")
+    if address := (user_details.get("address") or "").strip():
+        lines.append(address)
+    city  = (user_details.get("city") or "").strip()
+    state = (user_details.get("state") or "").strip()
+    pin   = (user_details.get("pin_code") or "").strip()
+    city_state = ", ".join(p for p in (city, state) if p)
+    if city_state and pin:
+        lines.append(f"{city_state} - {pin}")
+    elif city_state or pin:
+        lines.append(city_state or pin)
+    if lines:
+        return "\n".join(lines)
+    return (user_details.get("contact_info") or "").strip()
+
 def configure_windows_app_identity() -> None:
     if sys.platform != "win32":
         return
@@ -1683,15 +1752,37 @@ class PDFGenerator:
             return True
         return self.data.get("status") in (InvoiceStatus.DUE.value, InvoiceStatus.PARTIAL.value)
 
+    def _build_payment_lines(self) -> Optional[str]:
+        """Composes the configured bank/UPI/payment-notes details (Settings
+        > Payment & PDF) into PDF markup, or None if nothing is configured.
+        Deliberately independent of _should_show_qr(): a business that
+        only takes bank transfers (no QR/UPI) should still see its bank
+        details printed. Skipped entirely for complimentary invoices,
+        since there's nothing to pay on those."""
+        if self.data.get("is_complimentary"):
+            return None
+        pd = self.config.get("payment_details", {})
+        lines = []
+        for label, key in (("Bank", "bank_name"), ("A/C Holder", "account_holder_name"),
+                            ("A/C No", "account_number"), ("IFSC", "ifsc_code"),
+                            ("UPI ID", "upi_id")):
+            if val := pd.get(key):
+                lines.append(f"{label}: {safe_markup(val)}")
+        if notes := pd.get("payment_notes"):
+            lines.append(safe_markup(notes).replace("\n", "<br/>"))
+        return "<br/>".join(lines) if lines else None
+
     def _build_footer_section(self) -> Table:
         qr_cell = sig_cell = Spacer(0, 0)
-        if self._should_show_qr():
-            if qr := self._asset("upi_qr_code"):
-                upi = safe_markup(self.config.get("payment_details", {}).get("upi_id", ""))
-                detail = Paragraph(f"<b>PAYMENT DETAILS</b><br/>Scan to pay.<br/>UPI ID: {upi}", self.styles["NC"])
-                qr_cell = Table([[Image(str(qr), 2.2*cm, 2.2*cm, kind="proportional"), detail]],
-                                colWidths=[2.5*cm,"100%"], style=[("VALIGN",(0,0),(-1,-1),"TOP")])
-                               
+        payment_lines = self._build_payment_lines()
+
+        if self._should_show_qr() and (qr := self._asset("upi_qr_code")):
+            body = payment_lines or "Scan to pay."
+            detail = Paragraph(f"<b>PAYMENT DETAILS</b><br/>{body}", self.styles["NC"])
+            qr_cell = Table([[Image(str(qr), 2.2*cm, 2.2*cm, kind="proportional"), detail]],
+                            colWidths=[2.5*cm,"100%"], style=[("VALIGN",(0,0),(-1,-1),"TOP")])
+        elif payment_lines:
+            qr_cell = Paragraph(f"<b>PAYMENT DETAILS</b><br/>{payment_lines}", self.styles["NC"])
 
         if sig := self._asset("signature"):
             name = safe_markup(self.data.get("your_name"))
@@ -1742,20 +1833,52 @@ def merge_pdfs(paths: List[Path], out_path: Path) -> Path:
 #  SETTINGS DIALOG
 # =============================================================================
 class SettingsDialog(tk.Toplevel):
+    CURRENCY_OPTIONS: List[Tuple[str, str, str]] = [
+        ("₹",   "INR", "Indian Rupee"),
+        ("$",   "USD", "US Dollar"),
+        ("€",   "EUR", "Euro"),
+        ("£",   "GBP", "British Pound"),
+        ("¥",   "JPY", "Japanese Yen"),
+        ("A$",  "AUD", "Australian Dollar"),
+        ("C$",  "CAD", "Canadian Dollar"),
+        ("S$",  "SGD", "Singapore Dollar"),
+        ("CN¥", "CNY", "Chinese Yuan"),
+        ("Fr",  "CHF", "Swiss Franc"),
+        ("د.إ", "AED", "UAE Dirham"),
+        ("R$",  "BRL", "Brazilian Real"),
+        ("₽",   "RUB", "Russian Ruble"),
+        ("₩",   "KRW", "South Korean Won"),
+        ("฿",   "THB", "Thai Baht"),
+        ("R",   "ZAR", "South African Rand"),
+        ("₺",   "TRY", "Turkish Lira"),
+        ("kr",  "SEK", "Swedish Krona"),
+        ("zł",  "PLN", "Polish Złoty"),
+        ("₫",   "VND", "Vietnamese Dong"),
+    ]
+    CUSTOM_CURRENCY = "Custom Symbol…"
+
     def __init__(self, parent, callback):
         super().__init__(parent)
         self.callback  = callback
         self.title(f"{APP_NAME} Settings")
-        self.geometry("640x760")
-        self.minsize(580, 680)
+        self.geometry("680x780")
+        self.minsize(620, 700)
         self.resizable(True, True)
         self.transient(parent)
         self.grab_set()
         self._cfg = load_config()
+        self._asset_rows: Dict[str, Tuple[tk.StringVar, ttk.Label, ttk.Label]] = {}
+        self._currency_label_by_symbol = {o[0]: self._currency_option_label(o) for o in self.CURRENCY_OPTIONS}
+        self._currency_symbol_by_label = {v: k for k, v in self._currency_label_by_symbol.items()}
         self._build()
         self._load()
         self.focus_force()
         self.bind("<Escape>", lambda e: self.destroy())
+
+    @classmethod
+    def _currency_option_label(cls, opt: Tuple[str, str, str]) -> str:
+        symbol, code, name = opt
+        return f"{symbol}   {code} — {name}"
 
     def _section(self, parent, title: str):
         ttk.Label(parent, text=title, font=(FONT_FAMILY, 11, "bold")).pack(anchor="w", pady=(0, 8))
@@ -1774,23 +1897,102 @@ class SettingsDialog(tk.Toplevel):
         ttk.Label(row, text=label, width=24, anchor="w").pack(side="left")
         ttk.Combobox(row, textvariable=var, values=values, state="readonly").pack(side="left", fill="x", expand=True)
 
-    def _file_picker(self, parent, label: str, var: tk.StringVar, dest: str):
-        ttk.Label(parent, text=label, font=(FONT_FAMILY, 10, "bold")).pack(anchor="w", pady=(8, 2))
-        row = ttk.Frame(parent)
+    # ------------------------------------------------------------------ #
+    #  Currency picker: a dropdown of common currencies, plus a "Custom"
+    #  escape hatch (an ordinary text entry) for anything not on the list.
+    # ------------------------------------------------------------------ #
+    def _build_currency_picker(self, parent):
+        all_labels = [self._currency_option_label(o) for o in self.CURRENCY_OPTIONS] + [self.CUSTOM_CURRENCY]
+
+        self._currency_row = ttk.Frame(parent)
+        self._currency_row.pack(fill="x", pady=4)
+        ttk.Label(self._currency_row, text="Currency:", width=24, anchor="w").pack(side="left")
+        self.currency_var = tk.StringVar()
+        self.currency_combo = ttk.Combobox(self._currency_row, textvariable=self.currency_var,
+                                            values=all_labels, state="readonly")
+        self.currency_combo.pack(side="left", fill="x", expand=True)
+        self.currency_combo.bind("<<ComboboxSelected>>", lambda e: self._on_currency_selected())
+
+        self.custom_currency_row = ttk.Frame(parent)
+        ttk.Label(self.custom_currency_row, text="Custom Symbol:", width=24, anchor="w").pack(side="left")
+        self.custom_currency_entry = PlaceholderEntry(self.custom_currency_row, placeholder="e.g. Rs., kr, ₪")
+        self.custom_currency_entry.pack(side="left", fill="x", expand=True)
+        # Packed on demand by _on_currency_selected() / _load() -- only
+        # shown once "Custom Symbol…" is actually chosen, right after the
+        # picker row above.
+
+    def _on_currency_selected(self):
+        if self.currency_var.get() == self.CUSTOM_CURRENCY:
+            self.custom_currency_row.pack(fill="x", pady=4, after=self._currency_row)
+        else:
+            self.custom_currency_row.pack_forget()
+
+    # ------------------------------------------------------------------ #
+    #  Asset upload rows: a thumbnail preview, a Browse button, and a
+    #  Clear button -- deliberately no visible file name or path. The
+    #  chosen file is still copied into Vyaprix's own data folder
+    #  immediately on Browse, exactly as before, so the app keeps working
+    #  even if the original file is later moved or deleted.
+    # ------------------------------------------------------------------ #
+    def _asset_row(self, parent, config_key: str, label: str, dest_filename: str):
+        var = tk.StringVar()
+        row = ttk.Frame(parent, padding=(0, 8))
         row.pack(fill="x")
-        ttk.Entry(row, textvariable=var, state="readonly").pack(side="left", fill="x", expand=True, padx=(0, 8))
-        ttk.Button(row, text="Browse…", bootstyle="secondary-outline",
-                   command=lambda v=var, d=dest: self._browse(v, d)).pack(side="right")
 
-    def _browse(self, var: tk.StringVar, dest: str):
-        if path := filedialog.askopenfilename(filetypes=[("Image Files", "*.png;*.jpg;*.jpeg")]):
-            try:
-                shutil.copy(path, ASSETS_DIR / dest)
-                var.set(f"assets/{dest}")
-                Messagebox.show_info("Done", "Asset saved successfully.")
-            except Exception as exc:
-                Messagebox.show_error("Error", f"Could not save file: {exc}")
+        thumb = ttk.Label(row, relief="solid", borderwidth=1, anchor="center", width=8)
+        thumb.pack(side="left", padx=(0, 12), ipady=14)
 
+        info = ttk.Frame(row)
+        info.pack(side="left", fill="x", expand=True)
+        ttk.Label(info, text=label, font=(FONT_FAMILY, 10, "bold")).pack(anchor="w")
+        status = ttk.Label(info, text="", font=(FONT_FAMILY, 9), bootstyle="secondary")
+        status.pack(anchor="w")
+
+        btns = ttk.Frame(row)
+        btns.pack(side="right")
+        ttk.Button(btns, text="Browse…", width=10, bootstyle="secondary-outline",
+                   command=lambda k=config_key, d=dest_filename: self._browse_asset(k, d)).pack(side="left", padx=(0, 4))
+        ttk.Button(btns, text="✕ Clear", width=8, bootstyle="danger-outline",
+                   command=lambda k=config_key: self._clear_asset(k)).pack(side="left")
+
+        self._asset_rows[config_key] = (var, thumb, status)
+
+    def _refresh_asset_row(self, config_key: str):
+        var, thumb, status = self._asset_rows[config_key]
+        rel_path = var.get()
+        full_path = (DATA_DIR / rel_path) if rel_path else None
+        thumb_img = load_thumbnail_image(full_path, thumb, max_size=44) if full_path else None
+        if thumb_img:
+            thumb.configure(image=thumb_img, text="")
+            thumb.image = thumb_img  # keep a reference alive, or Tk garbage-collects it
+            status.configure(text="Custom file uploaded")
+        else:
+            thumb.configure(image="", text="—")
+            thumb.image = None
+            status.configure(text="No file selected — using default")
+
+    def _browse_asset(self, config_key: str, dest_filename: str):
+        path = filedialog.askopenfilename(parent=self, title="Choose an Image",
+                                           filetypes=[("Image Files", "*.png;*.jpg;*.jpeg")])
+        if not path:
+            return
+        try:
+            shutil.copy(path, ASSETS_DIR / dest_filename)
+        except Exception as exc:
+            Messagebox.show_error("Error", f"Could not save file: {exc}", parent=self)
+            return
+        var, _, _ = self._asset_rows[config_key]
+        var.set(f"assets/{dest_filename}")
+        self._refresh_asset_row(config_key)
+
+    def _clear_asset(self, config_key: str):
+        var, _, _ = self._asset_rows[config_key]
+        var.set("")
+        self._refresh_asset_row(config_key)
+
+    # ------------------------------------------------------------------ #
+    #  Tabs
+    # ------------------------------------------------------------------ #
     def _build(self):
         main = ttk.Frame(self, padding=20)
         main.pack(fill="both", expand=True)
@@ -1798,6 +2000,18 @@ class SettingsDialog(tk.Toplevel):
         nb = ttk.Notebook(main)
         nb.pack(fill="both", expand=True, pady=(0, 16))
 
+        self._build_general_tab(nb)
+        self._build_your_details_tab(nb)
+        self._build_payment_tab(nb)
+        self._build_assets_tab(nb)
+        self._build_data_tab(nb)
+
+        btn_row = ttk.Frame(main)
+        btn_row.pack(fill="x")
+        ttk.Button(btn_row, text="Cancel",             bootstyle="secondary", command=self.destroy).pack(side="right", padx=(8, 0))
+        ttk.Button(btn_row, text="Save Configuration", bootstyle="success",   command=self._save).pack(side="right")
+
+    def _build_general_tab(self, nb):
         t1 = ttk.Frame(nb, padding=16)
         nb.add(t1, text="  General  ")
         self._section(t1, "Interface")
@@ -1806,72 +2020,182 @@ class SettingsDialog(tk.Toplevel):
                             ["litera","cosmo","flatly","darkly","cyborg","superhero","morph","pulse"])
         ttk.Separator(t1, bootstyle="secondary").pack(fill="x", pady=12)
         self._section(t1, "Company Details")
+        ttk.Label(t1, text="Shown as the letterhead at the top of every invoice.",
+                  font=(FONT_FAMILY, 9), bootstyle="secondary").pack(anchor="w", pady=(0, 6))
         self.co_name = self._labeled_entry(t1, "Company Name:",    "Your company name")
         self.co_desc = self._labeled_entry(t1, "Company Tagline:", "A short tagline, e.g. Business Made Smarter.")
         self.co_gst  = self._labeled_entry(t1, "Company GSTIN:",   "22ABCDE1234F1Z5")
-        ttk.Separator(t1, bootstyle="secondary").pack(fill="x", pady=12)
-        self._section(t1, "Your / User Details")
-        self.user_name = self._labeled_entry(t1, "Your Name / Firm:", "Your name or firm")
-        ttk.Label(t1, text="Contact Info:", font=(FONT_FAMILY, 9)).pack(anchor="w", pady=(5, 2))
-        self.contact_text = PlaceholderText(t1, placeholder="+91 98765 43210, name@email.com, City",
-                                             height=4, relief="flat", highlightthickness=1, wrap="word")
-        self.contact_text.pack(fill="x")
 
-        t2 = ttk.Frame(nb, padding=16)
-        nb.add(t2, text="  Payment & PDF  ")
-        self._section(t2, "Payment Settings")
-        self.currency   = self._labeled_entry(t2, "Currency Symbol:", "₹")
-        self.upi_id     = self._labeled_entry(t2, "UPI ID:",          "company@upi")
-        self.pay_terms  = self._labeled_entry(t2, "Default Terms:",   "Due on Receipt")
-        ttk.Separator(t2, bootstyle="secondary").pack(fill="x", pady=12)
-        self._section(t2, "PDF Footer Note")
-        self.footer_text = PlaceholderText(t2, placeholder="Thank you for your business!",
+    def _build_your_details_tab(self, nb):
+        t2 = ttk.Frame(nb, padding=(16, 16, 4, 16))
+        nb.add(t2, text="  Your Details  ")
+        scroller = ScrolledFrame(t2, autohide=True)
+        scroller.pack(fill="both", expand=True)
+
+        self._section(scroller, "Your Details")
+        ttk.Label(scroller, text="Fills in the FROM block on new invoices. Editing this doesn't "
+                                  "change any invoice you've already created.",
+                  font=(FONT_FAMILY, 9), bootstyle="secondary", wraplength=500, justify="left").pack(anchor="w", pady=(0, 10))
+        self.ud_name    = self._labeled_entry(scroller, "Your Name:",             "e.g. Priya Sharma")
+        self.ud_firm    = self._labeled_entry(scroller, "Firm Name:",             "e.g. Sharma Design Studio")
+        self.ud_phone   = self._labeled_entry(scroller, "Phone Number:",          "+91 98765 43210")
+        self.ud_email   = self._labeled_entry(scroller, "Email Address:",         "you@example.com")
+        self.ud_website = self._labeled_entry(scroller, "Website (Optional):",    "www.example.com")
+        self.ud_gst     = self._labeled_entry(scroller, "GST Number (Optional):", "22ABCDE1234F1Z5")
+        self.ud_address = self._labeled_entry(scroller, "Address:",               "Street / building / area")
+        self.ud_city    = self._labeled_entry(scroller, "City:",                  "e.g. Lucknow")
+        self.ud_state   = self._labeled_entry(scroller, "State:",                 "e.g. Uttar Pradesh")
+        self.ud_pin     = self._labeled_entry(scroller, "PIN Code:",              "e.g. 226001")
+
+    def _build_payment_tab(self, nb):
+        t3 = ttk.Frame(nb, padding=(16, 16, 4, 16))
+        nb.add(t3, text="  Payment & PDF  ")
+        scroller = ScrolledFrame(t3, autohide=True)
+        scroller.pack(fill="both", expand=True)
+
+        self._section(scroller, "Payment Settings")
+        self._build_currency_picker(scroller)
+        self.bank_name  = self._labeled_entry(scroller, "Bank Name:",           "e.g. State Bank of India")
+        self.acc_holder = self._labeled_entry(scroller, "Account Holder Name:", "e.g. Priya Sharma")
+        self.acc_number = self._labeled_entry(scroller, "Account Number:",      "e.g. 000123456789")
+        self.ifsc_code  = self._labeled_entry(scroller, "IFSC Code:",           "e.g. SBIN0001234")
+        self.upi_id     = self._labeled_entry(scroller, "UPI ID:",              "company@upi")
+        ttk.Label(scroller, text="Payment Notes:", font=(FONT_FAMILY, 9)).pack(anchor="w", pady=(9, 2))
+        self.payment_notes_text = PlaceholderText(
+            scroller, placeholder="Anything else to show on the invoice -- cheque instructions, "
+                                   "a late-fee policy, alternate payment methods, etc.",
+            height=3, relief="flat", highlightthickness=1, wrap="word")
+        self.payment_notes_text.pack(fill="x")
+        self.pay_terms = self._labeled_entry(scroller, "Default Payment Terms:", "Due on Receipt")
+
+        ttk.Separator(scroller, bootstyle="secondary").pack(fill="x", pady=12)
+        self._section(scroller, "PDF Footer Note")
+        self.footer_text = PlaceholderText(scroller, placeholder="Thank you for your business!",
                                             height=3, relief="flat", highlightthickness=1, wrap="word")
         self.footer_text.pack(fill="x")
 
-        t3 = ttk.Frame(nb, padding=16)
-        nb.add(t3, text="  Images & Assets  ")
-        self._section(t3, "Upload Assets (PNG / JPG)")
-        ttk.Label(
-            t3,
-            text=f"Files are copied to {ASSETS_DIR} and embedded in PDFs.",
-            font=(FONT_FAMILY, 9),
-            bootstyle="secondary",
-            wraplength=540,
-        ).pack(anchor="w", pady=(0, 12))
-        self.logo_var = tk.StringVar(); self._file_picker(t3, "Company Logo:",         self.logo_var, "app_logo.png")
-        self.sig_var  = tk.StringVar(); self._file_picker(t3, "Authorized Signature:", self.sig_var,  "sign.png")
-        self.qr_var   = tk.StringVar(); self._file_picker(t3, "UPI QR Code:",          self.qr_var,   "upi_qr.png")
+    def _build_assets_tab(self, nb):
+        t4 = ttk.Frame(nb, padding=16)
+        nb.add(t4, text="  Images & Assets  ")
+        self._section(t4, "Upload Assets")
+        ttk.Label(t4, text="Files you choose are copied into Vyaprix's own data folder right away, "
+                            "so the app keeps working even if you later move or delete the original.",
+                  font=(FONT_FAMILY, 9), bootstyle="secondary", wraplength=540, justify="left").pack(anchor="w", pady=(0, 2))
 
-        ttk.Separator(t3, bootstyle="secondary").pack(fill="x", pady=12)
-        self._section(t3, "QR Code Visibility")
+        self._asset_row(t4, "logo",        "Company Logo",         "app_logo.png")
+        ttk.Separator(t4, bootstyle="secondary").pack(fill="x", pady=2)
+        self._asset_row(t4, "signature",   "Authorized Signature", "sign.png")
+        ttk.Separator(t4, bootstyle="secondary").pack(fill="x", pady=2)
+        self._asset_row(t4, "upi_qr_code", "UPI QR Code",          "upi_qr.png")
+
+        ttk.Separator(t4, bootstyle="secondary").pack(fill="x", pady=12)
+        self._section(t4, "QR Code Visibility")
         self.always_show_qr_var = tk.BooleanVar()
-        qr_check = ttk.Checkbutton(t3, text="Always show the QR code, even on fully paid invoices",
+        qr_check = ttk.Checkbutton(t4, text="Always show the QR code, even on fully paid invoices",
                                     variable=self.always_show_qr_var, bootstyle="round-toggle")
         qr_check.pack(anchor="w")
-        ttk.Label(t3, text="Off by default: the QR code only prints on Unpaid or Partially Paid invoices, "
+        ttk.Label(t4, text="Off by default: the QR code only prints on Unpaid or Partially Paid invoices, "
                             "since there's nothing left to pay once an invoice is settled. Turn this on to "
                             "always include it regardless of payment status.",
                   font=(FONT_FAMILY, 9), bootstyle="secondary", wraplength=540, justify="left").pack(anchor="w", pady=(4, 0))
 
-        t4 = ttk.Frame(nb, padding=16)
-        nb.add(t4, text="  Data  ")
-        self._section(t4, "Database Location")
-        ttk.Label(t4, text=str(DB_NAME), font=(FONT_FAMILY, 9), bootstyle="secondary", wraplength=540).pack(anchor="w")
-        ttk.Separator(t4, bootstyle="secondary").pack(fill="x", pady=12)
-        self._section(t4, "Backup")
-        backup_btn = ttk.Button(t4, text="💾  Save a Backup Copy…  (Ctrl+B)", bootstyle="secondary-outline",
+    def _build_data_tab(self, nb):
+        t5 = ttk.Frame(nb, padding=16)
+        nb.add(t5, text="  Data  ")
+        self._section(t5, "Database Location")
+        ttk.Label(t5, text=str(DB_NAME), font=(FONT_FAMILY, 9), bootstyle="secondary", wraplength=540).pack(anchor="w")
+        ttk.Separator(t5, bootstyle="secondary").pack(fill="x", pady=12)
+
+        self._section(t5, "Backup & Restore")
+        backup_btn = ttk.Button(t5, text="💾  Save a Backup Copy…  (Ctrl+B)", bootstyle="secondary-outline",
                                  command=self._backup_db)
         backup_btn.pack(anchor="w")
         ToolTip(backup_btn, "Back up the database now (Ctrl+B works from anywhere in the app)")
 
-        btn_row = ttk.Frame(main)
-        btn_row.pack(fill="x")
-        ttk.Button(btn_row, text="Cancel",             bootstyle="secondary", command=self.destroy).pack(side="right", padx=(8, 0))
-        ttk.Button(btn_row, text="Save Configuration", bootstyle="success",   command=self._save).pack(side="right")
+        import_btn = ttk.Button(t5, text="📥  Import Database…", bootstyle="warning-outline",
+                                 command=self._import_db)
+        import_btn.pack(anchor="w", pady=(10, 0))
+        ttk.Label(t5, text="Replaces all invoices, clients, and catalog items with the contents of "
+                            "the file you choose. Your current database is backed up automatically "
+                            "first, and the app refreshes automatically once the import finishes.",
+                  font=(FONT_FAMILY, 9), bootstyle="secondary", wraplength=540, justify="left").pack(anchor="w", pady=(4, 0))
 
     def _backup_db(self):
         prompt_and_backup_database(self)
+
+    def _import_db(self):
+        """Lets the user replace the live database with another .db file:
+        validate it opens as SQLite, confirm with the user (this is a
+        destructive action), back up the CURRENT database first, copy the
+        new file into place, re-run schema migrations against it (so an
+        older or partial .db still works with the current app), and
+        refresh every screen. Any failure along the way restores the
+        pre-import backup automatically, so a bad file can't leave the
+        app worse off than before the import was attempted.
+        """
+        path = filedialog.askopenfilename(
+            parent=self, title="Import Database",
+            filetypes=[("SQLite Database", "*.db"), ("All Files", "*.*")],
+        )
+        if not path:
+            return
+        path = Path(path)
+
+        try:
+            with closing(sqlite3.connect(str(path))) as test_conn:
+                test_conn.execute("PRAGMA schema_version")
+        except sqlite3.Error as exc:
+            Messagebox.show_error("Invalid Database",
+                                   f"This doesn't look like a valid database file:\n{exc}", parent=self)
+            return
+
+        if not Messagebox.okcancel(
+            "Import Database",
+            "This replaces all invoices, clients, and catalog items in Vyaprix with the "
+            "contents of the selected file.\n\nYour current database will be backed up "
+            "automatically first, so you can go back if anything looks wrong.\n\nContinue?",
+            parent=self,
+        ):
+            return
+
+        backup_path = DATA_DIR / f"Vyaprix-pre-import-backup-{datetime.datetime.now().strftime('%Y%m%d-%H%M%S')}.db"
+        try:
+            if DB_NAME.exists():
+                shutil.copy2(DB_NAME, backup_path)
+        except Exception as exc:
+            Messagebox.show_error("Import Failed",
+                                   f"Could not create a safety backup, so nothing was changed:\n{exc}", parent=self)
+            return
+
+        try:
+            shutil.copy2(path, DB_NAME)
+            # Re-run schema setup/migrations against the newly-imported
+            # file (adds any missing tables/columns/indexes). Schema
+            # changes apply to the database FILE itself, and every
+            # DatabaseManager call reopens its own connection to that
+            # same path, so the app's existing db_manager picks up the
+            # migrated data automatically -- no object references to
+            # swap here.
+            DatabaseManager(DB_NAME)
+        except Exception as exc:
+            try:
+                shutil.copy2(backup_path, DB_NAME)
+            except Exception:
+                pass
+            Messagebox.show_error(
+                "Import Failed",
+                f"The selected file couldn't be used as a Vyaprix database:\n{exc}\n\n"
+                "Your previous database has been restored.",
+                parent=self,
+            )
+            return
+
+        Messagebox.show_info(
+            "Import Complete",
+            f"Database imported successfully.\n\nYour previous database was backed up to:\n{backup_path.name}",
+            parent=self,
+        )
+        self.callback(None)  # reloads CONFIG and refreshes every screen's list
 
     def _load(self):
         c = self._cfg
@@ -1879,18 +2203,52 @@ class SettingsDialog(tk.Toplevel):
         self.co_name.insert(0, c.get("company_details", {}).get("name", ""))
         self.co_desc.insert(0, c.get("company_details", {}).get("description", ""))
         self.co_gst.insert(0, c.get("company_details", {}).get("gstin", ""))
-        self.user_name.insert(0, c.get("user_details", {}).get("name", ""))
-        self.contact_text.insert("1.0", c.get("user_details", {}).get("contact_info", ""))
-        self.currency.insert(0, c.get("currency_symbol", "₹"))
-        self.upi_id.insert(0, c.get("payment_details", {}).get("upi_id", ""))
-        self.pay_terms.insert(0, c.get("payment_details", {}).get("payment_terms", ""))
+
+        ud = c.get("user_details", {})
+        self.ud_name.insert(0, ud.get("name", ""))
+        self.ud_firm.insert(0, ud.get("firm_name", ""))
+        self.ud_phone.insert(0, ud.get("phone", ""))
+        self.ud_email.insert(0, ud.get("email", ""))
+        self.ud_website.insert(0, ud.get("website", ""))
+        self.ud_gst.insert(0, ud.get("gst_number", ""))
+        self.ud_address.insert(0, ud.get("address", ""))
+        self.ud_city.insert(0, ud.get("city", ""))
+        self.ud_state.insert(0, ud.get("state", ""))
+        self.ud_pin.insert(0, ud.get("pin_code", ""))
+
+        current_symbol = c.get("currency_symbol", "₹")
+        if current_symbol in self._currency_label_by_symbol:
+            self.currency_var.set(self._currency_label_by_symbol[current_symbol])
+            self.custom_currency_row.pack_forget()
+        else:
+            self.currency_var.set(self.CUSTOM_CURRENCY)
+            self.custom_currency_entry.insert(0, current_symbol)
+            self.custom_currency_row.pack(fill="x", pady=4, after=self._currency_row)
+
+        pd = c.get("payment_details", {})
+        self.bank_name.insert(0, pd.get("bank_name", ""))
+        self.acc_holder.insert(0, pd.get("account_holder_name", ""))
+        self.acc_number.insert(0, pd.get("account_number", ""))
+        self.ifsc_code.insert(0, pd.get("ifsc_code", ""))
+        self.upi_id.insert(0, pd.get("upi_id", ""))
+        self.payment_notes_text.insert("1.0", pd.get("payment_notes", ""))
+        self.pay_terms.insert(0, pd.get("payment_terms", ""))
+
         self.footer_text.insert("1.0", c.get("pdf_settings", {}).get("footer_message", ""))
-        self.logo_var.set(c.get("asset_paths", {}).get("logo", ""))
-        self.sig_var.set(c.get("asset_paths", {}).get("signature", ""))
-        self.qr_var.set(c.get("asset_paths", {}).get("upi_qr_code", ""))
         self.always_show_qr_var.set(bool(c.get("pdf_settings", {}).get("always_show_qr_code", False)))
 
+        ap = c.get("asset_paths", {})
+        for key in ("logo", "signature", "upi_qr_code"):
+            var, _, _ = self._asset_rows[key]
+            var.set(ap.get(key, ""))
+            self._refresh_asset_row(key)
+
     def _save(self):
+        if self.currency_var.get() == self.CUSTOM_CURRENCY:
+            currency_symbol = self.custom_currency_entry.get().strip() or "₹"
+        else:
+            currency_symbol = self._currency_symbol_by_label.get(self.currency_var.get(), "₹")
+
         save_config({
             "theme": self.theme_var.get(),
             "company_details": {
@@ -1899,25 +2257,37 @@ class SettingsDialog(tk.Toplevel):
                 "gstin": self.co_gst.get().strip(),
             },
             "user_details": {
-                "name": self.user_name.get().strip(),
-                "contact_info": self.contact_text.get("1.0", "end-1c").strip(),
+                "name": self.ud_name.get().strip(),
+                "firm_name": self.ud_firm.get().strip(),
+                "phone": self.ud_phone.get().strip(),
+                "email": self.ud_email.get().strip(),
+                "website": self.ud_website.get().strip(),
+                "gst_number": self.ud_gst.get().strip(),
+                "address": self.ud_address.get().strip(),
+                "city": self.ud_city.get().strip(),
+                "state": self.ud_state.get().strip(),
+                "pin_code": self.ud_pin.get().strip(),
+                # Preserved but no longer editable here directly -- see
+                # compose_your_contact()'s upgrade-path fallback.
+                "contact_info": self._cfg.get("user_details", {}).get("contact_info", ""),
             },
             "payment_details": {
                 "upi_id": self.upi_id.get().strip(),
                 "payment_terms": self.pay_terms.get().strip(),
+                "bank_name": self.bank_name.get().strip(),
+                "account_holder_name": self.acc_holder.get().strip(),
+                "account_number": self.acc_number.get().strip(),
+                "ifsc_code": self.ifsc_code.get().strip(),
+                "payment_notes": self.payment_notes_text.get("1.0", "end-1c").strip(),
             },
             "pdf_settings": {"footer_message": self.footer_text.get("1.0", "end-1c").strip(),
                               "always_show_qr_code": self.always_show_qr_var.get()},
-            "asset_paths": {
-                "logo": self.logo_var.get(),
-                "signature": self.sig_var.get(),
-                "upi_qr_code": self.qr_var.get(),
-            },
-            "currency_symbol": self.currency.get().strip() or "₹",
+            "asset_paths": {key: self._asset_rows[key][0].get() for key in ("logo", "signature", "upi_qr_code")},
+            "currency_symbol": currency_symbol,
         })
-        
+
         # PASS THE NEW THEME TO THE CALLBACK
-        self.callback(self.theme_var.get()) 
+        self.callback(self.theme_var.get())
         self.destroy()
 
 # =============================================================================
@@ -4037,8 +4407,8 @@ class InvoiceFormFrame(ttk.Frame):
             self.invoice_date_entry.entry.delete(0, "end")
             self.invoice_date_entry.entry.insert(0, datetime.date.today().strftime(DISPLAY_DATE_FORMAT))
             self.payment_terms_entry.insert(0, CONFIG.get("payment_details", {}).get("payment_terms", ""))
-            self.your_name_entry.insert(0, CONFIG.get("user_details", {}).get("name", ""))
-            self.your_contact_text.insert("1.0", CONFIG.get("user_details", {}).get("contact_info", ""))
+            self.your_name_entry.insert(0, compose_your_name(CONFIG.get("user_details", {})))
+            self.your_contact_text.insert("1.0", compose_your_contact(CONFIG.get("user_details", {})))
             self._add_item_row()
             self._apply_field_states()
             self._recalc_totals()
