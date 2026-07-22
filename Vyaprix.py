@@ -304,8 +304,16 @@ def get_default_config() -> Dict[str, Any]:
         "theme": "litera",
         "user_details": {
             # Structured "Your Details" fields (Settings > Your Details).
-            "name": "", "firm_name": "", "phone": "", "email": "",
-            "website": "", "gst_number": "", "address": "", "city": "",
+            # Deliberately does NOT include a business/firm name or GST
+            # number: there is only one business identity, and
+            # company_details below (Settings > General) is its single
+            # source of truth -- it's what the invoice letterhead uses,
+            # so it's also what the FROM block and GSTIN line use (see
+            # compose_your_name()/compose_your_contact()). Keeping a
+            # second copy of the same two facts here is exactly what
+            # caused the same GSTIN to print twice on one invoice.
+            "name": "", "phone": "", "email": "",
+            "website": "", "address": "", "city": "",
             "state": "", "pin_code": "",
             # Legacy free-text field from older builds. No longer edited
             # by SettingsDialog, but kept (and still readable) so nobody's
@@ -324,6 +332,43 @@ def get_default_config() -> Dict[str, Any]:
         "currency_symbol": "₹",
     }
 
+def _migrate_legacy_business_identity(config: Dict[str, Any]) -> bool:
+    """One-release upgrade path. A prior build stored a business/firm
+    name and GST number under user_details ('firm_name'/'gst_number'),
+    separate from company_details.name/gstin -- the fields the invoice
+    letterhead and the dedicated GSTIN line actually use. That let
+    someone fill in only one of the two and still expect it everywhere,
+    and it printed the GSTIN twice when both happened to be filled in.
+
+    There is only one business identity. This folds any already-entered
+    legacy firm_name/gst_number into company_details, but only where
+    company_details hasn't already been customized away from the
+    built-in default -- a real, deliberately-set company name/GSTIN is
+    never overwritten. The old keys are simply left in place afterwards;
+    nothing reads them anymore, and they drop out of the file on the
+    next Settings save (SettingsDialog._save() no longer writes them).
+
+    Returns True if it changed anything, so load_config() knows to
+    persist the fix back to disk immediately rather than waiting for the
+    user to open Settings and hit Save.
+    """
+    ud   = config.get("user_details", {})
+    comp = config.setdefault("company_details", {})
+    changed = False
+
+    legacy_firm = (ud.get("firm_name") or "").strip()
+    if legacy_firm and (not comp.get("name") or comp.get("name") == APP_NAME):
+        comp["name"] = legacy_firm
+        changed = True
+
+    legacy_gst = (ud.get("gst_number") or "").strip()
+    default_gstin = get_default_config()["company_details"]["gstin"]
+    if legacy_gst and (not comp.get("gstin") or comp.get("gstin") == default_gstin):
+        comp["gstin"] = legacy_gst
+        changed = True
+
+    return changed
+
 def load_config() -> Dict[str, Any]:
     if not CONFIG_FILE.exists():
         _cfg = get_default_config()
@@ -339,6 +384,8 @@ def load_config() -> Dict[str, Any]:
                 elif isinstance(v, dict):
                     for sk, sv in v.items():
                         data[k].setdefault(sk, sv)
+            if _migrate_legacy_business_identity(data):
+                _save_config_raw(data)
             return data
     except Exception:
         return get_default_config()
@@ -460,37 +507,44 @@ def load_thumbnail_image(path: Optional[Path], master: tk.Misc, max_size: int = 
         logger.warning(f"Could not load thumbnail for {path}: {exc}")
         return None
 
-def compose_your_name(user_details: Dict[str, Any]) -> str:
-    """Turns the structured 'Your Details' fields into the single bold
-    headline used at the top of an invoice's FROM block. The firm name
-    takes priority (that's usually what a client expects to see first);
-    the person's name is the fallback so a solo/freelance user without a
-    separate firm name still gets a sensible headline."""
-    firm = (user_details.get("firm_name") or "").strip()
-    name = (user_details.get("name") or "").strip()
-    return firm or name or "Your Name/Company"
+def compose_your_name(config: Dict[str, Any]) -> str:
+    """Turns Settings into the single bold headline used at the top of an
+    invoice's FROM block. The business name (Settings > General >
+    Company Details) is the single source of truth for this -- it's the
+    exact same name shown in the invoice letterhead, so the two can
+    never drift into showing two different company names on one
+    document. Falls back to the personal "Your Name" field only if no
+    business name has been configured at all."""
+    company_name  = (config.get("company_details", {}).get("name") or "").strip()
+    personal_name = (config.get("user_details", {}).get("name") or "").strip()
+    return company_name or personal_name or "Your Name/Company"
 
-def compose_your_contact(user_details: Dict[str, Any]) -> str:
-    """Turns the structured 'Your Details' fields into the multi-line
-    contact block shown under the FROM headline on an invoice. Only
-    fields that are actually filled in are included, so an incomplete
-    profile doesn't leave blank lines on the PDF.
+def compose_your_contact(config: Dict[str, Any]) -> str:
+    """Turns Settings > Your Details into the multi-line contact block
+    shown under the FROM headline on an invoice. Only fields that are
+    actually filled in are included, so an incomplete profile doesn't
+    leave blank lines on the PDF.
+
+    Deliberately does NOT include the GSTIN: it already has its own
+    dedicated line elsewhere on the same invoice (see _build_address() /
+    company_details.gstin), and printing the same GSTIN a second time
+    here is confusing, not helpful -- that duplication was a real bug in
+    an earlier build.
 
     Falls back to the legacy free-text contact_info field when none of
     the structured fields have been filled in yet -- this only matters
     right after upgrading from an older build that only had that one
-    field, so existing invoices/config don't suddenly show blank contact
+    field, so existing config doesn't suddenly show blank contact
     details until the user revisits Settings and re-enters them here."""
-    firm = (user_details.get("firm_name") or "").strip()
-    name = (user_details.get("name") or "").strip()
+    company_name  = (config.get("company_details", {}).get("name") or "").strip()
+    user_details  = config.get("user_details", {})
+    personal_name = (user_details.get("name") or "").strip()
     lines = []
-    if firm and name:
-        lines.append(name)  # name already used as the headline when there's no firm name
+    if company_name and personal_name:
+        lines.append(personal_name)  # personal name already used as the headline when there's no business name
     for key in ("phone", "email", "website"):
         if val := (user_details.get(key) or "").strip():
             lines.append(val)
-    if gst := (user_details.get("gst_number") or "").strip():
-        lines.append(f"GSTIN: {gst}")
     if address := (user_details.get("address") or "").strip():
         lines.append(address)
     city  = (user_details.get("city") or "").strip()
@@ -1510,7 +1564,7 @@ class PDFGenerator:
 
     def _build_header(self) -> Table:
         comp  = self.config.get("company_details", {})
-        left  = [Paragraph(safe_markup(comp.get("name", "Your Company")), self.styles["CompanyName"])]
+        left  = [Paragraph(safe_markup(compose_your_name(self.config)), self.styles["CompanyName"])]
         if d := comp.get("description"):
             left += [Spacer(1, 2), Paragraph(safe_markup(d), self.styles["Tagline"])]
 
@@ -2020,9 +2074,11 @@ class SettingsDialog(tk.Toplevel):
                             ["litera","cosmo","flatly","darkly","cyborg","superhero","morph","pulse"])
         ttk.Separator(t1, bootstyle="secondary").pack(fill="x", pady=12)
         self._section(t1, "Company Details")
-        ttk.Label(t1, text="Shown as the letterhead at the top of every invoice.",
-                  font=(FONT_FAMILY, 9), bootstyle="secondary").pack(anchor="w", pady=(0, 6))
-        self.co_name = self._labeled_entry(t1, "Company Name:",    "Your company name")
+        ttk.Label(t1, text="Your one business identity: shown as the letterhead at the top of every "
+                            "invoice, and as the name and GSTIN in the FROM block below it. There's "
+                            "only one place to set these, so they can't disagree with each other.",
+                  font=(FONT_FAMILY, 9), bootstyle="secondary", wraplength=520, justify="left").pack(anchor="w", pady=(0, 6))
+        self.co_name = self._labeled_entry(t1, "Company Name:",    "Your company or firm name")
         self.co_desc = self._labeled_entry(t1, "Company Tagline:", "A short tagline, e.g. Business Made Smarter.")
         self.co_gst  = self._labeled_entry(t1, "Company GSTIN:",   "22ABCDE1234F1Z5")
 
@@ -2033,19 +2089,19 @@ class SettingsDialog(tk.Toplevel):
         scroller.pack(fill="both", expand=True)
 
         self._section(scroller, "Your Details")
-        ttk.Label(scroller, text="Fills in the FROM block on new invoices. Editing this doesn't "
-                                  "change any invoice you've already created.",
+        ttk.Label(scroller, text="Your personal contact details, shown under the business name in the "
+                                  "FROM block on new invoices. Editing this doesn't change any invoice "
+                                  "you've already created. For your business/firm name and GSTIN, see "
+                                  "Company Details on the General tab -- there's just one of each.",
                   font=(FONT_FAMILY, 9), bootstyle="secondary", wraplength=500, justify="left").pack(anchor="w", pady=(0, 10))
-        self.ud_name    = self._labeled_entry(scroller, "Your Name:",             "e.g. Priya Sharma")
-        self.ud_firm    = self._labeled_entry(scroller, "Firm Name:",             "e.g. Sharma Design Studio")
-        self.ud_phone   = self._labeled_entry(scroller, "Phone Number:",          "+91 98765 43210")
-        self.ud_email   = self._labeled_entry(scroller, "Email Address:",         "you@example.com")
-        self.ud_website = self._labeled_entry(scroller, "Website (Optional):",    "www.example.com")
-        self.ud_gst     = self._labeled_entry(scroller, "GST Number (Optional):", "22ABCDE1234F1Z5")
-        self.ud_address = self._labeled_entry(scroller, "Address:",               "Street / building / area")
-        self.ud_city    = self._labeled_entry(scroller, "City:",                  "e.g. Lucknow")
-        self.ud_state   = self._labeled_entry(scroller, "State:",                 "e.g. Uttar Pradesh")
-        self.ud_pin     = self._labeled_entry(scroller, "PIN Code:",              "e.g. 226001")
+        self.ud_name    = self._labeled_entry(scroller, "Your Name:",           "e.g. Priya Sharma")
+        self.ud_phone   = self._labeled_entry(scroller, "Phone Number:",        "+91 98765 43210")
+        self.ud_email   = self._labeled_entry(scroller, "Email Address:",       "you@example.com")
+        self.ud_website = self._labeled_entry(scroller, "Website (Optional):",  "www.example.com")
+        self.ud_address = self._labeled_entry(scroller, "Address:",             "Street / building / area")
+        self.ud_city    = self._labeled_entry(scroller, "City:",                "e.g. Lucknow")
+        self.ud_state   = self._labeled_entry(scroller, "State:",               "e.g. Uttar Pradesh")
+        self.ud_pin     = self._labeled_entry(scroller, "PIN Code:",            "e.g. 226001")
 
     def _build_payment_tab(self, nb):
         t3 = ttk.Frame(nb, padding=(16, 16, 4, 16))
@@ -2206,11 +2262,9 @@ class SettingsDialog(tk.Toplevel):
 
         ud = c.get("user_details", {})
         self.ud_name.insert(0, ud.get("name", ""))
-        self.ud_firm.insert(0, ud.get("firm_name", ""))
         self.ud_phone.insert(0, ud.get("phone", ""))
         self.ud_email.insert(0, ud.get("email", ""))
         self.ud_website.insert(0, ud.get("website", ""))
-        self.ud_gst.insert(0, ud.get("gst_number", ""))
         self.ud_address.insert(0, ud.get("address", ""))
         self.ud_city.insert(0, ud.get("city", ""))
         self.ud_state.insert(0, ud.get("state", ""))
@@ -2258,11 +2312,9 @@ class SettingsDialog(tk.Toplevel):
             },
             "user_details": {
                 "name": self.ud_name.get().strip(),
-                "firm_name": self.ud_firm.get().strip(),
                 "phone": self.ud_phone.get().strip(),
                 "email": self.ud_email.get().strip(),
                 "website": self.ud_website.get().strip(),
-                "gst_number": self.ud_gst.get().strip(),
                 "address": self.ud_address.get().strip(),
                 "city": self.ud_city.get().strip(),
                 "state": self.ud_state.get().strip(),
@@ -4407,8 +4459,8 @@ class InvoiceFormFrame(ttk.Frame):
             self.invoice_date_entry.entry.delete(0, "end")
             self.invoice_date_entry.entry.insert(0, datetime.date.today().strftime(DISPLAY_DATE_FORMAT))
             self.payment_terms_entry.insert(0, CONFIG.get("payment_details", {}).get("payment_terms", ""))
-            self.your_name_entry.insert(0, compose_your_name(CONFIG.get("user_details", {})))
-            self.your_contact_text.insert("1.0", compose_your_contact(CONFIG.get("user_details", {})))
+            self.your_name_entry.insert(0, compose_your_name(CONFIG))
+            self.your_contact_text.insert("1.0", compose_your_contact(CONFIG))
             self._add_item_row()
             self._apply_field_states()
             self._recalc_totals()
