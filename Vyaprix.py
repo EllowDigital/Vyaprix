@@ -103,6 +103,7 @@ ASSETS_DIR: Path       = DATA_DIR / "assets"
 DATA_FONTS_DIR: Path   = DATA_DIR / "fonts"     
 INVOICES_DIR: Path     = DATA_DIR / "invoices"
 BATCH_DIR: Path        = INVOICES_DIR / "_batches"
+PRINT_BATCH_SIZE: int  = 100  # bulk print merges PDFs in groups of this size -- see DashboardFrame._bulk_print_work
 LOGS_DIR: Path         = DATA_DIR / "logs"
 
 # Core Application Files
@@ -3291,7 +3292,8 @@ class DashboardFrame(ttk.Frame):
         refresh_btn = ttk.Button(right, text="🔄  Refresh  (Ctrl+R)", bootstyle="secondary-outline", command=self._act_refresh)
         refresh_btn.pack(side="left", padx=4)
         ToolTip(refresh_btn, "Reload the invoice list and stats (Ctrl+R)")
-        ttk.Button(right, text="📊  Export CSV", bootstyle="info-outline", command=self._export_csv).pack(side="left", padx=4)
+        self.export_csv_btn = ttk.Button(right, text="📊  Export CSV", bootstyle="info-outline", command=self._export_csv)
+        self.export_csv_btn.pack(side="left", padx=4)
         new_inv_btn = ttk.Button(right, text="＋  New Invoice  (Ctrl+N)", bootstyle="primary",
                                   command=lambda: self.controller.show_frame(InvoiceFormFrame))
         new_inv_btn.pack(side="left", padx=(4, 0))
@@ -3489,11 +3491,17 @@ class DashboardFrame(ttk.Frame):
         ToolTip(self.pdf_btn,  "Open this invoice's PDF, ready to print or export (Ctrl+P / Ctrl+E)")
 
         # -- Bulk-selection actions --
-        self.bulk_del_btn    = ttk.Button(row, text="🗑  Bulk Delete", bootstyle="danger-outline",    command=self._act_delete)
+        self.bulk_del_btn    = ttk.Button(row, text="🗑  Bulk Delete", bootstyle="danger-outline",    command=self._act_bulk_delete)
         self.bulk_export_btn = ttk.Button(row, text="📊  Bulk Export", bootstyle="secondary-outline",  command=self._act_bulk_export)
         self.bulk_print_btn  = ttk.Button(row, text="🖨  Bulk Print",  bootstyle="primary",            command=self._act_bulk_print)
         ToolTip(self.bulk_del_btn,   "Delete the selected invoices (Delete key)")
         ToolTip(self.bulk_print_btn, "Merge & open the selected invoices' PDFs, ready to print or export (Ctrl+P / Ctrl+E)")
+
+        # Every button that can kick off a bulk-scale operation -- disabled
+        # together while one is running (see _start_bulk_op()/_end_bulk_op()),
+        # so the user can never have two running at once and always has a
+        # clear, consistent signal that one currently is.
+        self._bulk_buttons = [self.bulk_del_btn, self.bulk_export_btn, self.bulk_print_btn, self.export_csv_btn]
 
         self._show_single_actions()
 
@@ -3637,15 +3645,20 @@ class DashboardFrame(ttk.Frame):
         NoteDialog(self.controller, self.db_manager, inv_id, current, self._populate)
 
     def _act_delete(self):
+        """Single-invoice delete (the small Delete button / Delete key on
+        the action bar). If the Delete key fires while multiple rows
+        happen to be selected, this redirects to the bulk-safe path --
+        deleting a handful of invoices synchronously is instant and
+        doesn't need a progress dialog, but a large multi-select
+        deletion benefits from the same progress/abort treatment as any
+        other bulk operation (see _act_bulk_delete)."""
         ids = self._selected_ids()
         if not ids:
             return
-        if len(ids) == 1:
-            msg = f"Permanently delete Invoice #{ids[0]}?\nThis cannot be undone."
-        else:
-            msg = f"Permanently delete {len(ids)} invoices?\nThis cannot be undone."
-            
-        if Messagebox.okcancel("Delete Invoice" if len(ids) == 1 else "Bulk Delete", msg):
+        if len(ids) > 1:
+            self._act_bulk_delete()
+            return
+        if Messagebox.okcancel("Delete Invoice", f"Permanently delete Invoice #{ids[0]}?\nThis cannot be undone."):
             self.db_manager.delete_invoices(ids)
             self.on_show()
 
@@ -3672,23 +3685,211 @@ class DashboardFrame(ttk.Frame):
             Messagebox.show_error("Error", f"Could not duplicate:\n{err}")
 
     # ------------------------------------------------------------------ #
+    #  Bulk operation concurrency guard
+    # ------------------------------------------------------------------ #
+    # Every button that kicks off a bulk-scale operation lives in this
+    # list, populated as each one is built (see _action_bar()/_header()).
+    # _start_bulk_op()/_end_bulk_op() disable/re-enable all of them
+    # together, so only one bulk operation can ever be in flight and the
+    # user always has a clear, consistent signal that one is running.
+    def _set_bulk_buttons_enabled(self, enabled: bool):
+        state = "normal" if enabled else "disabled"
+        for btn in getattr(self, "_bulk_buttons", ()):
+            btn.config(state=state)
+
+    def _start_bulk_op(self):
+        self._bulk_op_running = True
+        self._set_bulk_buttons_enabled(False)
+
+    def _end_bulk_op(self):
+        self._bulk_op_running = False
+        self._set_bulk_buttons_enabled(True)
+
+    # ------------------------------------------------------------------ #
     #  Bulk actions
     # ------------------------------------------------------------------ #
-    def _act_bulk_export(self):
+    def _act_bulk_delete(self):
+        if self._bulk_op_running:
+            return
         ids = self._selected_ids()
         if not ids:
             return
-        if path := filedialog.asksaveasfilename(defaultextension=".csv", filetypes=[("CSV Files", "*.csv")],
-                                                 title="Export Selected Invoices"):
-            ok, msg = self.db_manager.export_to_csv(path, invoice_ids=ids)
-            Messagebox.show_info("Exported", f"Saved {len(ids)} invoice(s) to:\n{path}") if ok else Messagebox.show_error("Failed", msg)
+        if not Messagebox.okcancel("Bulk Delete", f"Permanently delete {len(ids)} invoices?\nThis cannot be undone."):
+            return
+        self._start_bulk_op()
+        BulkProgressDialog(self.controller, f"Deleting {len(ids)} Invoice(s)", ids,
+                            work_fn=self._bulk_delete_work, on_done=self._on_bulk_delete_done)
+
+    def _bulk_delete_work(self, ids: List[str], report, is_aborted) -> dict:
+        CHUNK = 200
+        total = len(ids)
+        success = failed = 0
+        for i in range(0, total, CHUNK):
+            if is_aborted():
+                break
+            chunk = ids[i:i + CHUNK]
+            done = min(i + len(chunk), total)
+            try:
+                self.db_manager.delete_invoices(chunk, chunk_size=CHUNK)
+                success += len(chunk)
+                report(done, total, f"Deleting invoices… ({done} of {total})",
+                       log_line=f"Deleted {len(chunk)} invoice(s) [batch {i // CHUNK + 1}]",
+                       success_delta=len(chunk))
+            except Exception as exc:
+                failed += len(chunk)
+                report(done, total, f"Error deleting batch {i // CHUNK + 1}",
+                       log_line=f"FAILED batch {i // CHUNK + 1}: {exc}", failed_delta=len(chunk))
+        aborted = is_aborted() and (success + failed) < total
+        return {"success": success, "failed": failed, "aborted": aborted, "result": None}
+
+    def _on_bulk_delete_done(self, result: dict):
+        self.on_show()      # refresh the list/stats first...
+        self._end_bulk_op() # ...then restore button state, so a stray _on_select() in between can't leave it stale
+
+    def _bulk_export_work_factory(self, file_path: str, ids: Optional[List[str]]) -> Callable:
+        """Builds a work_fn that streams matching invoices straight into
+        a CSV file in chunks, writing incrementally instead of loading
+        the whole result set into memory first -- the difference between
+        "fine at a few hundred invoices" and "fine at 100,000+". Handles
+        both an explicit selection (ids given) and "export everything"
+        (ids=None, fed from DatabaseManager.iter_all_invoices_chunked)
+        with the same progress-reporting shape either way."""
+        def work(items, report, is_aborted):
+            total = len(items)
+            written = 0
+            try:
+                with open(file_path, "w", newline="", encoding="utf-8") as fh:
+                    writer = None
+                    if ids is not None:
+                        CHUNK = 500
+                        for i in range(0, len(ids), CHUNK):
+                            if is_aborted():
+                                break
+                            chunk_rows = self.db_manager.get_invoices_by_ids(ids[i:i + CHUNK])
+                            if writer is None and chunk_rows:
+                                writer = csv.writer(fh)
+                                writer.writerow(chunk_rows[0].keys())
+                            if writer:
+                                writer.writerows(chunk_rows)
+                            written += len(chunk_rows)
+                            report(written, total, f"Exporting… ({written} of {total})",
+                                   log_line=f"Wrote {len(chunk_rows)} row(s)", success_delta=len(chunk_rows))
+                    else:
+                        keys = None
+                        for chunk_rows in self.db_manager.iter_all_invoices_chunked():
+                            if is_aborted():
+                                break
+                            if writer is None:
+                                keys = [k for k in chunk_rows[0].keys() if k != "_rowid"]
+                                writer = csv.writer(fh)
+                                writer.writerow(keys)
+                            writer.writerows([tuple(r[k] for k in keys) for r in chunk_rows])
+                            written += len(chunk_rows)
+                            report(written, total, f"Exporting… ({written} of {total})",
+                                   log_line=f"Wrote {len(chunk_rows)} row(s)", success_delta=len(chunk_rows))
+                aborted = is_aborted() and written < total
+                if written == 0 and not aborted:
+                    return {"success": 0, "failed": 0, "aborted": False, "result": None,
+                            "error": "No invoices to export."}
+                return {"success": written, "failed": 0, "aborted": aborted,
+                        "result": None if aborted else file_path}
+            except Exception as exc:
+                return {"success": written, "failed": max(0, total - written), "aborted": False,
+                        "result": None, "error": str(exc)}
+        return work
+
+    def _on_bulk_export_done(self, result: dict):
+        self._end_bulk_op()
+        if result.get("error"):
+            Messagebox.show_error("Export Failed", result["error"])
+        elif result.get("result"):
+            Messagebox.show_info("Exported", f"Saved {result['success']} invoice(s) to:\n{result['result']}")
+
+    def _act_bulk_export(self):
+        if self._bulk_op_running:
+            return
+        ids = self._selected_ids()
+        if not ids:
+            return
+        path = filedialog.asksaveasfilename(defaultextension=".csv", filetypes=[("CSV Files", "*.csv")],
+                                             title="Export Selected Invoices")
+        if not path:
+            return
+        self._start_bulk_op()
+        BulkProgressDialog(self.controller, f"Exporting {len(ids)} Invoice(s)", ids,
+                            work_fn=self._bulk_export_work_factory(path, ids),
+                            on_done=self._on_bulk_export_done)
+
+    def _bulk_print_work(self, ids: List[str], report, is_aborted) -> dict:
+        """Generates a PDF per invoice and merges them into batches of at
+        most PRINT_BATCH_SIZE each -- printing 100 invoices produces one
+        manageable merged PDF; printing 1,000 produces ten of them
+        instead of a single unwieldy multi-thousand-page file. Each
+        completed batch is flushed to disk as soon as it fills, so
+        cancelling partway through still leaves whatever batches finished
+        usable rather than discarding all progress."""
+        total = len(ids)
+        cfg = load_config()
+        success = failed = 0
+        current_batch: List[Path] = []
+        batch_paths: List[Path] = []
+        batch_num = 0
+        stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+
+        def flush_batch():
+            nonlocal batch_num
+            if not current_batch:
+                return
+            batch_num += 1
+            suffix = f"-batch{batch_num}" if total > PRINT_BATCH_SIZE else ""
+            merged = merge_pdfs(current_batch, BATCH_DIR / f"Batch-Print-{stamp}{suffix}.pdf")
+            batch_paths.append(merged)
+            current_batch.clear()
+
+        for idx, inv_id in enumerate(ids, start=1):
+            if is_aborted():
+                break
+            try:
+                row = self.db_manager.get_invoice_by_id(inv_id)
+                if row is None:
+                    raise ValueError("invoice no longer exists")
+                payments = self.db_manager.get_payments(inv_id)
+                pdf_path = PDFGenerator(dict(row), cfg, payments=payments).generate()
+                current_batch.append(pdf_path)
+                success += 1
+                report(idx, total, f"Generating PDF {idx} of {total}…",
+                       log_line=f"Generated {inv_id}", success_delta=1)
+            except Exception as exc:
+                failed += 1
+                report(idx, total, f"Error generating {inv_id}",
+                       log_line=f"FAILED {inv_id}: {exc}", failed_delta=1)
+            if len(current_batch) >= PRINT_BATCH_SIZE:
+                flush_batch()
+
+        flush_batch()  # whatever's left: a partial final batch, or everything if <= PRINT_BATCH_SIZE total
+        aborted = is_aborted() and (success + failed) < total
+        return {"success": success, "failed": failed, "aborted": aborted, "result": batch_paths}
+
+    def _on_bulk_print_done(self, result: dict):
+        self._end_bulk_op()
+        paths = result.get("result") or []
+        if len(paths) == 1:
+            PDFViewer(self.controller, paths[0])
+        elif len(paths) > 1:
+            Messagebox.show_info(
+                "Batches Ready",
+                f"Generated {len(paths)} batch PDF file(s) (up to {PRINT_BATCH_SIZE} invoices each) in:\n{BATCH_DIR}",
+            )
 
     def _act_bulk_print(self):
+        if self._bulk_op_running:
+            return
         ids = self._selected_ids()
         if not ids:
             return
-        self.controller.show_progress(True, f"Generating {len(ids)} PDFs…")
-        threading.Thread(target=self._bulk_pdf_worker, args=(ids, self.controller.task_queue), daemon=True).start()
+        self._start_bulk_op()
+        BulkProgressDialog(self.controller, f"Generating {len(ids)} PDF(s)", ids,
+                            work_fn=self._bulk_print_work, on_done=self._on_bulk_print_done)
 
     def _show_ctx_menu(self, event):
         row = self.tree.identify_row(event.y)
@@ -3700,9 +3901,25 @@ class DashboardFrame(ttk.Frame):
             self._ctx_single.post(event.x_root, event.y_root)
 
     def _export_csv(self):
-        if path := filedialog.asksaveasfilename(defaultextension=".csv", filetypes=[("CSV Files", "*.csv")], title="Export All Invoices"):
-            ok, msg = self.db_manager.export_to_csv(path)
-            Messagebox.show_info("Exported", f"Saved to:\n{path}") if ok else Messagebox.show_error("Failed", msg)
+        """Header 'Export CSV' button -- exports every invoice, not just
+        a selection. Routed through the same streaming/progress-dialog
+        path as the bulk actions below (and gated by the same mutex)
+        since at 100,000+ invoices this is exactly as bulk-scale an
+        operation as an explicit multi-select export."""
+        if self._bulk_op_running:
+            return
+        path = filedialog.asksaveasfilename(defaultextension=".csv", filetypes=[("CSV Files", "*.csv")],
+                                             title="Export All Invoices")
+        if not path:
+            return
+        total_count = self.db_manager.get_dashboard_stats().get("total", 0)
+        if not total_count:
+            Messagebox.show_error("Nothing to Export", "There are no invoices to export yet.")
+            return
+        self._start_bulk_op()
+        BulkProgressDialog(self.controller, f"Exporting All {total_count} Invoices", list(range(total_count)),
+                            work_fn=self._bulk_export_work_factory(path, None),
+                            on_done=self._on_bulk_export_done)
 
     def _act_refresh(self):
         """Reloads the invoice list and summary stats from the database --
@@ -3764,21 +3981,6 @@ class DashboardFrame(ttk.Frame):
             q.put({"status": "success", "kind": "single", "path": path})
         except Exception as exc:
             logger.error(f"PDF generation failed ({invoice_id}): {exc}", exc_info=True)
-            q.put({"status": "error", "message": str(exc)})
-
-    def _bulk_pdf_worker(self, invoice_ids: List[str], q: queue.Queue):
-        try:
-            cfg = load_config()
-            paths = []
-            for inv_id in invoice_ids:
-                row = dict(self.db_manager.get_invoice_by_id(inv_id))
-                payments = self.db_manager.get_payments(inv_id)
-                paths.append(PDFGenerator(row, cfg, payments=payments).generate())
-            stamp  = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-            merged = merge_pdfs(paths, BATCH_DIR / f"Batch-Print-{stamp}.pdf")
-            q.put({"status": "success", "kind": "batch", "path": merged, "count": len(paths)})
-        except Exception as exc:
-            logger.error(f"Bulk PDF generation failed: {exc}", exc_info=True)
             q.put({"status": "error", "message": str(exc)})
 
 # =============================================================================
@@ -5618,13 +5820,17 @@ class InvoiceApp(ttk.Window):
             self.progress_lbl.pack_forget()
 
     def _poll_queue(self):
+        """Drains messages from the single-PDF-view worker (_pdf_worker).
+        Bulk operations (delete/export/print) run through their own
+        BulkProgressDialog, each with its own dedicated queue, rather
+        than this shared one -- keeping a bulk operation's much higher
+        message volume from ever competing with, or being confused for,
+        an unrelated single-PDF-view result."""
         try:
             while True:
                 msg = self.task_queue.get_nowait()
                 self.show_progress(False)
                 if msg["status"] == "success":
-                    if msg.get("kind") == "batch":
-                        Messagebox.show_info("Batch Ready", f"Generated {msg['count']} invoice PDF(s).")
                     PDFViewer(self, msg["path"])
                     self.frames[DashboardFrame].on_show()
                 else:
