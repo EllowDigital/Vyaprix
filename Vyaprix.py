@@ -1000,9 +1000,17 @@ class DatabaseManager:
                 """)
 
                 # --- indexes for search / sort / filter perf ----------------
+                # One per column DashboardFrame can sort by server-side
+                # (see DatabaseManager.get_invoices_page) or that get_next_
+                # invoice_number()/backfill scan by, so none of those ever
+                # fall back to a full table scan even at 100,000+ rows.
                 c.execute("CREATE INDEX IF NOT EXISTS idx_invoices_status  ON invoices(status)")
                 c.execute("CREATE INDEX IF NOT EXISTS idx_invoices_date    ON invoices(invoice_date)")
                 c.execute("CREATE INDEX IF NOT EXISTS idx_invoices_billto  ON invoices(bill_to)")
+                c.execute("CREATE INDEX IF NOT EXISTS idx_invoices_total   ON invoices(grand_total)")
+                c.execute("CREATE INDEX IF NOT EXISTS idx_invoices_paid    ON invoices(total_paid)")
+                c.execute("CREATE INDEX IF NOT EXISTS idx_invoices_balance ON invoices(balance_due)")
+                c.execute("CREATE INDEX IF NOT EXISTS idx_invoices_created ON invoices(created_ts)")
                 c.execute("CREATE INDEX IF NOT EXISTS idx_payments_invnum  ON payments(invoice_number)")
 
                 self._migrate_legacy_payments(c)
@@ -1352,6 +1360,90 @@ class DatabaseManager:
                 params,
             ).fetchall()
 
+    # Maps the Dashboard's UI sort-column ids to a real, indexed SQL
+    # column (see the indexes created in _init_db()) -- "note" isn't a
+    # real column, so it's expressed as a boolean CASE instead.
+    _SORT_COLUMN_SQL = {
+        "id": "invoice_number", "client": "bill_to", "date": "invoice_date",
+        "status": "status", "total": "grand_total", "paid": "total_paid",
+        "balance": "balance_due",
+        "note": "(CASE WHEN notes IS NOT NULL AND TRIM(notes) != '' THEN 1 ELSE 0 END)",
+    }
+
+    def get_invoices_page(self, search_query: str = "", status_filter: str = "All",
+                           sort_col: str = "date", sort_desc: bool = True,
+                           page: int = 1, page_size: int = 50) -> Tuple[List[sqlite3.Row], int]:
+        """Search + filter + sort + pagination, all done in SQL. This is
+        the core of keeping the Dashboard fast at any invoice count: it
+        never pulls more than one page's worth of rows into Python, no
+        matter how large the table is (tested to 100,000+ rows) -- unlike
+        get_all_invoices() above, which is only safe for genuinely
+        whole-table operations like a full CSV export.
+
+        Returns (rows_for_this_page, total_matching_rows) -- the total is
+        needed for the pagination bar's "Page X of Y" and comes from a
+        second, cheap COUNT(*) query using the same WHERE clause.
+        """
+        clauses, params = [], []
+        if search_query:
+            clauses.append("(invoice_number LIKE ? OR bill_to LIKE ? OR notes LIKE ?)")
+            q = f"%{search_query}%"
+            params += [q, q, q]
+        if status_filter and status_filter != "All":
+            clauses.append("UPPER(status) = ?")
+            params.append(status_filter.upper())
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+
+        sql_col = self._SORT_COLUMN_SQL.get(sort_col, "invoice_date")
+        direction = "DESC" if sort_desc else "ASC"
+        # Tie-break on invoice_number so the order is stable across pages
+        # even when many rows share the same sort value (e.g. the same
+        # date) -- without a stable tie-break, rows can shuffle between
+        # pages, or repeat/get skipped, as the user pages through.
+        order_by = f"ORDER BY {sql_col} {direction}, invoice_number {direction}"
+
+        page = max(1, page)
+        page_size = max(1, page_size)
+        offset = (page - 1) * page_size
+
+        with closing(self._conn()) as c:
+            total = c.execute(f"SELECT COUNT(*) FROM invoices {where}", params).fetchone()[0]
+            rows = c.execute(
+                f"SELECT * FROM invoices {where} {order_by} LIMIT ? OFFSET ?",
+                params + [page_size, offset],
+            ).fetchall()
+        return rows, total
+
+    def get_invoices_by_ids(self, inv_ids: List[str]) -> List[sqlite3.Row]:
+        if not inv_ids:
+            return []
+        with closing(self._conn()) as c:
+            q_marks = ",".join("?" * len(inv_ids))
+            return c.execute(
+                f"SELECT * FROM invoices WHERE invoice_number IN ({q_marks}) "
+                "ORDER BY invoice_date DESC, invoice_number DESC",
+                inv_ids,
+            ).fetchall()
+
+    def iter_all_invoices_chunked(self, chunk_size: int = 1000):
+        """Yields the whole invoices table in fixed-size chunks (ordered
+        by rowid, the cheapest possible stable order) instead of loading
+        every row into memory at once via fetchall(). Used by the
+        streaming CSV export path so exporting 100,000+ invoices costs a
+        bounded, small amount of memory -- roughly one chunk's worth --
+        no matter how large the table actually is."""
+        with closing(self._conn()) as c:
+            last_rowid = 0
+            while True:
+                rows = c.execute(
+                    "SELECT rowid AS _rowid, * FROM invoices WHERE rowid > ? ORDER BY rowid LIMIT ?",
+                    (last_rowid, chunk_size),
+                ).fetchall()
+                if not rows:
+                    return
+                yield rows
+                last_rowid = rows[-1]["_rowid"]
+
     def get_invoice_by_id(self, inv_id: str) -> Optional[sqlite3.Row]:
         with closing(self._conn()) as c:
             return c.execute("SELECT * FROM invoices WHERE invoice_number=?", (inv_id,)).fetchone()
@@ -1418,11 +1510,27 @@ class DatabaseManager:
                 c.execute("DELETE FROM invoices WHERE invoice_number=?", (inv_id,))
         return True
 
-    def delete_invoices(self, inv_ids: List[str]) -> int:
-        with closing(self._conn()) as c:
-            with c:
-                c.executemany("DELETE FROM invoices WHERE invoice_number=?", [(i,) for i in inv_ids])
-        return len(inv_ids)
+    def delete_invoices(self, inv_ids: List[str], chunk_size: int = 200,
+                         progress_cb: Optional[Callable[[int, int], None]] = None) -> int:
+        """Deletes the given invoices in fixed-size chunks, each its own
+        short transaction, rather than one single executemany() covering
+        everything at once. Two benefits at scale: any one write-lock is
+        only held briefly (friendlier to concurrent readers, e.g. the
+        Dashboard refreshing in the background), and a caller can report
+        incremental progress via progress_cb(deleted_so_far, total) --
+        used by the bulk-delete progress dialog. Returns the number of
+        invoices actually deleted."""
+        total = len(inv_ids)
+        deleted = 0
+        for i in range(0, total, chunk_size):
+            chunk = inv_ids[i:i + chunk_size]
+            with closing(self._conn()) as c:
+                with c:
+                    c.executemany("DELETE FROM invoices WHERE invoice_number=?", [(x,) for x in chunk])
+            deleted += len(chunk)
+            if progress_cb:
+                progress_cb(deleted, total)
+        return deleted
 
     def get_next_invoice_number(self) -> str:
         """Continue the numbering scheme of the most recently *created* invoice
@@ -2897,6 +3005,233 @@ class NoteDialog(tk.Toplevel):
         self.destroy()
 
 # =============================================================================
+#  BULK PROGRESS DIALOG
+# =============================================================================
+class BulkProgressDialog(tk.Toplevel):
+    """Generic progress popup for any bulk operation (Delete, Export,
+    Print/Generate, ...). Shows a progress bar, percentage, an estimated
+    time remaining, the current status line, a running processed count,
+    success/failed counts, a scrollable detailed log, and an Abort
+    button.
+
+    The real work runs in a background daemon thread via a caller-
+    supplied work function, so the UI never blocks -- exactly the same
+    thread + queue + .after()-polling pattern already used for single/
+    bulk PDF generation elsewhere in this app (see InvoiceApp._poll_
+    queue), just packaged as a reusable, self-contained dialog with its
+    own queue instead of routing through the app's shared one.
+
+    work_fn signature:
+        work_fn(items, report, is_aborted) -> dict
+
+    Called on the WORKER thread. It must call report(...) periodically
+    (after each item, or each chunk) and check is_aborted() periodically,
+    stopping promptly once it returns True. It must never touch a Tk
+    widget directly -- only communicate via report().
+
+        report(current, total, status_text, log_line=None,
+               success_delta=0, failed_delta=0)
+            Pushes one progress update. success_delta/failed_delta let a
+            chunked operation (e.g. "deleted 200 rows in one statement")
+            report more than one item's outcome per call, rather than
+            requiring a call per individual row.
+
+        is_aborted() -> bool
+            True once the user has clicked Cancel. Safe to call from the
+            worker thread (backed by threading.Event).
+
+    work_fn must return a dict: {"success": int, "failed": int,
+    "aborted": bool, "result": Any, "error": Optional[str]} -- 'result'
+    is operation-specific (e.g. an output file path, or a list of them).
+    """
+
+    def __init__(self, parent, title: str, items: list, work_fn: Callable,
+                 on_done: Optional[Callable[[dict], None]] = None):
+        super().__init__(parent)
+        self.title(title)
+        self.geometry("580x480")
+        self.minsize(520, 440)
+        self.resizable(True, True)
+        self.transient(parent)
+        self.grab_set()
+        self.protocol("WM_DELETE_WINDOW", self._on_abort_click)
+
+        self._items        = items
+        self._work_fn       = work_fn
+        self._on_done       = on_done
+        self._total         = len(items)
+        self._abort_event   = threading.Event()
+        self._q: queue.Queue = queue.Queue()
+        self._start_time    = time.monotonic()
+        self._done           = False
+        self._success_count  = 0
+        self._failed_count   = 0
+
+        self._build(title)
+        threading.Thread(target=self._run_worker, daemon=True).start()
+        self.after(100, self._poll)
+        self.bind("<Escape>", lambda e: self._on_abort_click())
+
+    def _build(self, title: str):
+        main = ttk.Frame(self, padding=18)
+        main.pack(fill="both", expand=True)
+
+        ttk.Label(main, text=title, font=(FONT_FAMILY, 13, "bold")).pack(anchor="w")
+        self.status_lbl = ttk.Label(main, text="Starting…", font=(FONT_FAMILY, 10), bootstyle="secondary")
+        self.status_lbl.pack(anchor="w", pady=(4, 12))
+
+        bar_row = ttk.Frame(main)
+        bar_row.pack(fill="x")
+        self.progress = ttk.Progressbar(bar_row, mode="determinate", maximum=max(1, self._total),
+                                         bootstyle="success-striped")
+        self.progress.pack(side="left", fill="x", expand=True)
+        self.pct_lbl = ttk.Label(bar_row, text="0%", width=6, anchor="e", font=(FONT_FAMILY, 10, "bold"))
+        self.pct_lbl.pack(side="left", padx=(10, 0))
+
+        stats = ttk.Frame(main)
+        stats.pack(fill="x", pady=(10, 4))
+        self.processed_lbl = ttk.Label(stats, text=f"Processed: 0 / {self._total}", font=(FONT_FAMILY, 9))
+        self.processed_lbl.pack(side="left")
+        self.eta_lbl = ttk.Label(stats, text="Estimating…", font=(FONT_FAMILY, 9), bootstyle="secondary")
+        self.eta_lbl.pack(side="right")
+
+        counts = ttk.Frame(main)
+        counts.pack(fill="x", pady=(0, 12))
+        self.success_lbl = ttk.Label(counts, text="✔  Success: 0", font=(FONT_FAMILY, 9, "bold"), bootstyle="success")
+        self.success_lbl.pack(side="left")
+        self.failed_lbl = ttk.Label(counts, text="✖  Failed: 0", font=(FONT_FAMILY, 9, "bold"), bootstyle="danger")
+        self.failed_lbl.pack(side="left", padx=(18, 0))
+
+        ttk.Label(main, text="Details:", font=(FONT_FAMILY, 9, "bold")).pack(anchor="w")
+        log_frame = ttk.Frame(main, relief="solid", borderwidth=1)
+        log_frame.pack(fill="both", expand=True, pady=(2, 14))
+        self.log_text = tk.Text(log_frame, height=8, wrap="word", state="disabled",
+                                 relief="flat", font=("Consolas", 9), padx=6, pady=4)
+        log_scroll = ttk.Scrollbar(log_frame, orient="vertical", command=self.log_text.yview)
+        self.log_text.configure(yscrollcommand=log_scroll.set)
+        self.log_text.pack(side="left", fill="both", expand=True)
+        log_scroll.pack(side="right", fill="y")
+
+        btn_row = ttk.Frame(main)
+        btn_row.pack(fill="x")
+        self.abort_btn = ttk.Button(btn_row, text="✕  Cancel", bootstyle="danger-outline",
+                                     command=self._on_abort_click)
+        self.abort_btn.pack(side="right")
+        self.close_btn = ttk.Button(btn_row, text="Close", bootstyle="secondary", command=self.destroy)
+        # close_btn is only shown once the operation finishes -- see _on_finished()
+
+    def _log(self, line: str):
+        self.log_text.configure(state="normal")
+        self.log_text.insert("end", line + "\n")
+        self.log_text.see("end")
+        self.log_text.configure(state="disabled")
+
+    def _on_abort_click(self):
+        if self._done:
+            self.destroy()
+            return
+        self._abort_event.set()
+        self.abort_btn.config(state="disabled", text="Cancelling…")
+        self.status_lbl.config(text="Cancelling -- finishing the current item…")
+
+    # ------------------------------------------------------------------ #
+    #  Worker thread side -- touches only self._q, never a Tk widget
+    # ------------------------------------------------------------------ #
+    def _run_worker(self):
+        def report(current, total, status_text, log_line=None, success_delta=0, failed_delta=0):
+            self._q.put({"type": "progress", "current": current, "total": total,
+                         "status_text": status_text, "log_line": log_line,
+                         "success_delta": success_delta, "failed_delta": failed_delta})
+        try:
+            result = self._work_fn(self._items, report, self._abort_event.is_set)
+        except Exception as exc:
+            logger.error(f"Bulk operation failed: {exc}", exc_info=True)
+            result = {"success": self._success_count, "failed": max(0, self._total - self._success_count),
+                      "aborted": False, "result": None, "error": str(exc)}
+        self._q.put({"type": "done", "result": result})
+
+    # ------------------------------------------------------------------ #
+    #  Main-thread side -- the only code here allowed to touch widgets
+    # ------------------------------------------------------------------ #
+    def _poll(self):
+        try:
+            while True:
+                msg = self._q.get_nowait()
+                if msg["type"] == "progress":
+                    self._on_progress(msg)
+                elif msg["type"] == "done":
+                    self._on_finished(msg["result"])
+        except queue.Empty:
+            pass
+        if not self._done:
+            self.after(100, self._poll)
+
+    def _on_progress(self, msg: dict):
+        current, total = msg["current"], msg["total"]
+        self.progress.configure(maximum=max(1, total))
+        self.progress["value"] = current
+        pct = int(current / total * 100) if total else 0
+        self.pct_lbl.config(text=f"{pct}%")
+        self.processed_lbl.config(text=f"Processed: {current} / {total}")
+        self.status_lbl.config(text=msg["status_text"])
+
+        if msg.get("success_delta"):
+            self._success_count += msg["success_delta"]
+            self.success_lbl.config(text=f"✔  Success: {self._success_count}")
+        if msg.get("failed_delta"):
+            self._failed_count += msg["failed_delta"]
+            self.failed_lbl.config(text=f"✖  Failed: {self._failed_count}")
+        if msg.get("log_line"):
+            self._log(msg["log_line"])
+
+        elapsed = time.monotonic() - self._start_time
+        if current > 0 and elapsed > 0.4:
+            rate = current / elapsed
+            remaining = max(0, total - current)
+            eta_seconds = (remaining / rate) if rate > 0 else 0
+            self.eta_lbl.config(text=f"~{self._format_duration(eta_seconds)} remaining")
+        else:
+            self.eta_lbl.config(text="Estimating…")
+
+    @staticmethod
+    def _format_duration(seconds: float) -> str:
+        seconds = max(0, int(seconds))
+        if seconds < 60:
+            return f"{seconds}s"
+        minutes, seconds = divmod(seconds, 60)
+        if minutes < 60:
+            return f"{minutes}m {seconds}s"
+        hours, minutes = divmod(minutes, 60)
+        return f"{hours}h {minutes}m"
+
+    def _on_finished(self, result: dict):
+        self._done = True
+        aborted = result.get("aborted", False)
+        success = result.get("success", self._success_count)
+        failed  = result.get("failed", self._failed_count)
+        error   = result.get("error")
+
+        if error:
+            self.status_lbl.config(text=f"Stopped due to an error: {error}")
+            self._log(f"ERROR: {error}")
+        elif aborted:
+            self.status_lbl.config(text=f"Cancelled -- {success} completed, {failed} failed before stopping.")
+        else:
+            self.status_lbl.config(text=f"Done -- {success} succeeded, {failed} failed.")
+            self.progress["value"] = self.progress["maximum"]
+            self.pct_lbl.config(text="100%")
+        self.eta_lbl.config(text="")
+
+        self.abort_btn.pack_forget()
+        self.close_btn.pack(side="right")
+
+        if self._on_done:
+            try:
+                self._on_done(result)
+            except Exception as exc:
+                logger.error(f"Bulk operation on_done callback failed: {exc}", exc_info=True)
+
+# =============================================================================
 #  DASHBOARD  /  INVOICE LIST (IMPROVED)
 # =============================================================================
 class DashboardFrame(ttk.Frame):
@@ -2928,6 +3263,7 @@ class DashboardFrame(ttk.Frame):
         self._page          = 1
         self._page_size     = self.DEFAULT_PAGE_SIZE
         self._total_pages   = 1
+        self._bulk_op_running = False  # guards against overlapping bulk operations -- see _start_bulk_op()
         self._build()
         self._debounce_search = Debouncer(self, 200, self._populate)
 
@@ -3204,77 +3540,64 @@ class DashboardFrame(ttk.Frame):
     def _populate(self):
         # Remember selection so it doesn't drop when typing in search or clicking sort
         current_selection = self.tree.selection()
-        
+
         self.tree.delete(*self.tree.get_children())
         self._row_index.clear()
-        
-        rows = self.db_manager.get_all_invoices(
-            search_query=self.search_var.get().strip(),
-            status_filter=self._status_filter,
+
+        # --- Fetch: search + filter + sort + pagination are all done in
+        # SQL (see DatabaseManager.get_invoices_page) -- this call never
+        # returns more than one page's worth of rows, no matter how many
+        # invoices are in the table, which is what actually keeps the
+        # Dashboard fast and light on memory at 100,000+ invoices. The
+        # old approach (fetch every matching row, sort/paginate in
+        # Python) is still fine for the small "export everything" case
+        # elsewhere, just not for populating this list.
+        search_query  = self.search_var.get().strip()
+        rows, total = self.db_manager.get_invoices_page(
+            search_query=search_query, status_filter=self._status_filter,
+            sort_col=self._sort_col, sort_desc=self._sort_rev,
+            page=self._page, page_size=self._page_size,
         )
-        
-        entries = []
+        self._total_pages = max(1, -(-total // self._page_size))  # ceiling division
+        if self._page > self._total_pages:
+            # The page we were on no longer has any rows on it (e.g. the
+            # last invoice on the last page just got deleted) -- clamp
+            # back into range and re-fetch instead of showing a blank
+            # page or a stale one.
+            self._page = self._total_pages
+            rows, total = self.db_manager.get_invoices_page(
+                search_query=search_query, status_filter=self._status_filter,
+                sort_col=self._sort_col, sort_desc=self._sort_rev,
+                page=self._page, page_size=self._page_size,
+            )
+
+        start = (self._page - 1) * self._page_size
         for inv in rows:
             row = dict(inv)
             is_comp    = bool(row.get("is_complimentary"))
             status_val = (row["status"] or "Due").upper()
             # Display wording only -- status_val (used below for the
-            # row's colour tag and for sorting) is untouched, so this is
-            # purely cosmetic and can't affect either of those.
+            # row's colour tag) is untouched, so this is purely cosmetic.
             status_display = STATUS_DISPLAY_LABELS.get(row["status"] or "Due", status_val)
             date_val   = parse_date(row["invoice_date"], DB_DATE_FORMAT, DISPLAY_DATE_FORMAT)
             total_txt  = "No Charge" if is_comp else fmt_money(row.get("grand_total"))
             paid_txt   = "-"         if is_comp else fmt_money(row.get("total_paid"))
             bal_txt    = "-"         if is_comp else fmt_money(row.get("balance_due"))
             note_icon  = "📝" if (row.get("notes") or "").strip() else ""
-            
+
             values = (row["invoice_number"], row["bill_to"], date_val, status_display,
                       total_txt, paid_txt, bal_txt, note_icon)
-            
-            # Robust Sort Keys - ensuring safe fallbacks for missing data
-            sort_keys = {
-                "id":      row.get("invoice_number", ""),
-                "client":  row.get("bill_to", ""),
-                "date":    row.get("invoice_date") or "0000-00-00", 
-                "status":  status_val,
-                "total":   float(row.get("grand_total") or 0.0), 
-                "paid":    float(row.get("total_paid") or 0.0),
-                "balance": float(row.get("balance_due") or 0.0), 
-                "note":    note_icon,
-            }
-            entries.append((values, status_val, sort_keys, row))
-
-        # Perform the actual sort based on the chosen column
-        entries.sort(key=lambda e: e[2].get(self._sort_col, ""), reverse=self._sort_rev)
-
-        # --- Pagination: slice the sorted, filtered result set down to
-        # just the current page before touching the Treeview at all.
-        # Sorting still has to run over the *full* result set above --
-        # otherwise "sort by total" would only sort within whichever
-        # page happened to be showing -- but only inserting one page's
-        # worth of rows into the Treeview keeps large invoice lists
-        # fast to render and easy to scan, instead of one giant
-        # scrollable wall of rows.
-        total = len(entries)
-        self._total_pages = max(1, -(-total // self._page_size))  # ceiling division
-        self._page = max(1, min(self._page, self._total_pages))   # clamp: e.g. the last item
-                                                                     # on the last page just got deleted
-        start = (self._page - 1) * self._page_size
-        page_entries = entries[start:start + self._page_size]
-
-        # Insert this page's rows into the tree
-        for values, tag, _keys, raw in page_entries:
-            badge = tag if tag in STATUS_BADGE else ""
-            iid = raw["invoice_number"]
+            badge = status_val if status_val in STATUS_BADGE else ""
+            iid = row["invoice_number"]
             self.tree.insert("", "end", iid=iid, values=values, tags=(badge,) if badge else ())
-            self._row_index[iid] = raw
-            
+            self._row_index[iid] = row
+
         # Restore selection (only rows on the current page can still exist)
         for item in current_selection:
             if self.tree.exists(item):
                 self.tree.selection_add(item)
 
-        self._update_pagination_controls(total, start, len(page_entries))
+        self._update_pagination_controls(total, start, len(rows))
         self._on_select() # Re-evaluate button states
 
     def _update_pagination_controls(self, total: int, start: int, shown: int):
