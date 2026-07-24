@@ -484,6 +484,46 @@ def load_app_logo_image(master: tk.Misc) -> Optional[tk.PhotoImage]:
             logger.warning(f"Could not load app logo image: {exc}")
     return None
 
+def apply_theme_to_text_widget(widget: tk.Text, colors=None) -> None:
+    """Applies the active ttkbootstrap theme's input colors to a raw
+    tk.Text widget.
+
+    ttkbootstrap only themes ttk.* widgets automatically -- a plain
+    tk.Text (which PlaceholderText is built on, and which nothing else
+    in ttk provides a multi-line-editable equivalent of) is invisible to
+    that machinery and just keeps Tk's system-default white background
+    with black text forever, regardless of which theme is active. On a
+    dark theme that's a jarring white box in an otherwise dark window;
+    combined with the placeholder mixin's muted grey hint text, it's
+    also the most likely source of the "some text becomes hard to read"
+    symptom, since a light grey hint on white is much lower-contrast
+    than the same grey was ever designed to be shown against.
+
+    Safe to call on any tk.Text, and safe to call repeatedly -- used
+    both at widget-creation time and again on every live theme switch
+    (see InvoiceApp._on_settings_saved), since switching themes doesn't
+    retroactively fix widgets that already exist.
+    """
+    try:
+        if colors is None:
+            colors = ttk.Style().colors
+        fg = colors.inputfg
+        widget.configure(
+            background=colors.inputbg, foreground=fg,
+            insertbackground=fg,  # the text cursor/caret -- defaults to black, invisible on a dark background
+            selectbackground=colors.selectbg, selectforeground=colors.selectfg,
+            highlightbackground=colors.border, highlightcolor=colors.primary,
+        )
+        # A placeholder-enabled Text currently showing its hint must keep
+        # the muted placeholder colour, not the "real text" colour just
+        # applied above.
+        if getattr(widget, "_showing_placeholder", False):
+            widget.configure(foreground=getattr(widget, "_PLACEHOLDER_COLOR", "#9CA3AF"))
+        if hasattr(widget, "_real_fg"):
+            widget._real_fg = fg  # keep in sync so a later focus-out uses the CURRENT theme's colour, not a stale one from creation time
+    except Exception as exc:
+        logger.warning(f"Could not theme a text widget: {exc}")
+
 def load_thumbnail_image(path: Optional[Path], master: tk.Misc, max_size: int = 44) -> Optional[tk.PhotoImage]:
     """Loads an arbitrary image file as a small square-ish thumbnail, for
     the asset-upload preview rows in Settings. Same Pillow-with-Tk-fallback
@@ -642,7 +682,7 @@ class ToolTip:
         self._win = win = tk.Toplevel(self.widget)
         win.wm_overrideredirect(True)
         win.wm_geometry(f"+{x}+{y}")
-        tk.Label(win, text=self.text, background="#FFFDE7", relief="flat",
+        tk.Label(win, text=self.text, background="#FFFDE7", foreground="#212121", relief="flat",
                  borderwidth=1, padx=7, pady=4, font=(FONT_FAMILY, 9),
                  justify="left", wraplength=280).pack()
 
@@ -832,6 +872,7 @@ class PlaceholderText(tk.Text):
         tk.Text.__init__(self, master, **kw)
         self._placeholder = placeholder
         self._showing_placeholder = False
+        apply_theme_to_text_widget(self)
         try:
             fg = self.cget("foreground")
             self._real_fg = str(fg) if fg else "black"
@@ -3108,6 +3149,7 @@ class BulkProgressDialog(tk.Toplevel):
         log_frame.pack(fill="both", expand=True, pady=(2, 14))
         self.log_text = tk.Text(log_frame, height=8, wrap="word", state="disabled",
                                  relief="flat", font=("Consolas", 9), padx=6, pady=4)
+        apply_theme_to_text_widget(self.log_text)
         log_scroll = ttk.Scrollbar(log_frame, orient="vertical", command=self.log_text.yview)
         self.log_text.configure(yscrollcommand=log_scroll.set)
         self.log_text.pack(side="left", fill="both", expand=True)
@@ -5272,7 +5314,11 @@ class SplashScreen(tk.Toplevel):
         # --- Modern Pseudo-Border ---
         # Because we removed the OS window, we lose drop shadows. 
         # A 1-2px border frame keeps the app from bleeding into white backgrounds.
-        self.border_frame = tk.Frame(self, bg="#3b82f6", bd=0) # Match to your primary theme color
+        try:
+            border_color = ttk.Style().colors.primary
+        except Exception:
+            border_color = "#3b82f6"  # fallback if the style isn't resolvable yet
+        self.border_frame = tk.Frame(self, bg=border_color, bd=0)
         self.border_frame.pack(fill="both", expand=True)
         
         # --- Main UI Container ---
@@ -5784,7 +5830,14 @@ class InvoiceApp(ttk.Window):
         # 1. LIVE THEME SWITCHING ENGINE
         if new_theme:
             self.style.theme_use(new_theme)
-        
+            # ttkbootstrap's theme_use() only re-colors ttk.* widgets --
+            # plain tk.Text boxes (Notes, Contact, Payment Notes, Footer,
+            # ...) are invisible to that and would otherwise be stuck
+            # showing whatever theme was active when they were first
+            # built until the app restarts. Walk every already-built
+            # screen and fix that up right now instead.
+            self._retheme_text_widgets(self)
+
         # 2. Refresh globals so the currency symbol updates live
         global CONFIG, CURRENCY_SYMBOL
         CONFIG = load_config()
@@ -5804,6 +5857,17 @@ class InvoiceApp(ttk.Window):
                     frame.on_show()
                 except TypeError:
                     pass
+
+    def _retheme_text_widgets(self, root_widget: tk.Misc):
+        """Recursively finds every tk.Text descendant of root_widget
+        (PlaceholderText or otherwise -- e.g. a BulkProgressDialog log,
+        if one happens to be open) and re-applies the now-current
+        theme's colors to it. See apply_theme_to_text_widget() for why
+        this is needed at all."""
+        for child in root_widget.winfo_children():
+            if isinstance(child, tk.Text):
+                apply_theme_to_text_widget(child)
+            self._retheme_text_widgets(child)
 
     # ------------------------------------------------------------------ #
     #  Progress / background task plumbing
