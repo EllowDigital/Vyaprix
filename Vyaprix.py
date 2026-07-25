@@ -255,24 +255,15 @@ logger = logging.getLogger(__name__)
 #  FONTS
 # =============================================================================
 def register_fonts() -> str:
-    """Registers the bundled NotoSans font (needed for the currency symbol
-    and any non-Latin characters) with ReportLab.
+    """Registers the bundled NotoSans font (needed for the currency
+    symbol and non-Latin characters). Tries the writable ProgramData
+    copy first, then the read-only copy bundled in the EXE, so a failed
+    first-run copy doesn't take the real font down with it.
 
-    Tries the writable ProgramData copy first (DATA_FONTS_DIR), then falls
-    back to the read-only copy bundled directly in the EXE (FONTS_DIR) --
-    that second location still works fine as a font source even if the
-    first-run copy into ProgramData failed for some reason (permissions,
-    a partial install, etc.), so trying it here means a copy hiccup
-    doesn't have to take the real font down with it.
-
-    Falling all the way back to the built-in "Helvetica" is a real,
-    user-visible correctness problem, not a cosmetic one: Helvetica's
-    encoding has no glyph for "₹" (or most non-Latin characters), and
-    ReportLab silently substitutes an unrelated character instead of
-    raising an error -- every amount on every generated PDF would be
-    wrong with no indication anything failed. See InvoiceApp's
-    _warn_if_fallback_font(), which surfaces this to the user once at
-    startup so it can't fail completely silently.
+    Falling back to "Helvetica" is a real correctness problem: it has no
+    glyph for "₹", and ReportLab silently substitutes an unrelated
+    character with no error -- see InvoiceApp._warn_if_fallback_font(),
+    which surfaces this to the user once at startup.
     """
     for font_dir in (DATA_FONTS_DIR, FONTS_DIR):
         reg  = font_dir / "NotoSans-Regular.ttf"
@@ -1273,6 +1264,11 @@ class DatabaseManager:
                 rows = c.execute("SELECT * FROM clients ORDER BY name").fetchall()
             return [dict(r) for r in rows]
 
+    def get_client_by_id(self, client_id: int) -> Optional[Dict]:
+        with closing(self._conn()) as c:
+            row = c.execute("SELECT * FROM clients WHERE id=?", (client_id,)).fetchone()
+            return dict(row) if row else None
+
     def save_client(self, name: str, contact: str, gstin: str):
         """Upsert-by-name -- used for the quick auto-save-from-invoice-form path."""
         if not name:
@@ -1332,6 +1328,11 @@ class DatabaseManager:
             else:
                 rows = c.execute("SELECT * FROM catalog ORDER BY title").fetchall()
             return [dict(r) for r in rows]
+
+    def get_catalog_item_by_id(self, item_id: int) -> Optional[Dict]:
+        with closing(self._conn()) as c:
+            row = c.execute("SELECT * FROM catalog WHERE id=?", (item_id,)).fetchone()
+            return dict(row) if row else None
 
     def save_catalog_item(self, title: str, description: str, amount: float):
         if not title:
@@ -3073,40 +3074,18 @@ class NoteDialog(tk.Toplevel):
 # =============================================================================
 class BulkProgressDialog(tk.Toplevel):
     """Generic progress popup for any bulk operation (Delete, Export,
-    Print/Generate, ...). Shows a progress bar, percentage, an estimated
-    time remaining, the current status line, a running processed count,
-    success/failed counts, a scrollable detailed log, and an Abort
-    button.
+    Print/Generate). Runs work_fn in a background thread and polls its
+    own queue via .after(), so the UI never blocks.
 
-    The real work runs in a background daemon thread via a caller-
-    supplied work function, so the UI never blocks -- exactly the same
-    thread + queue + .after()-polling pattern already used for single/
-    bulk PDF generation elsewhere in this app (see InvoiceApp._poll_
-    queue), just packaged as a reusable, self-contained dialog with its
-    own queue instead of routing through the app's shared one.
-
-    work_fn signature:
-        work_fn(items, report, is_aborted) -> dict
-
-    Called on the WORKER thread. It must call report(...) periodically
-    (after each item, or each chunk) and check is_aborted() periodically,
-    stopping promptly once it returns True. It must never touch a Tk
-    widget directly -- only communicate via report().
-
-        report(current, total, status_text, log_line=None,
-               success_delta=0, failed_delta=0)
-            Pushes one progress update. success_delta/failed_delta let a
-            chunked operation (e.g. "deleted 200 rows in one statement")
-            report more than one item's outcome per call, rather than
-            requiring a call per individual row.
-
-        is_aborted() -> bool
-            True once the user has clicked Cancel. Safe to call from the
-            worker thread (backed by threading.Event).
-
-    work_fn must return a dict: {"success": int, "failed": int,
-    "aborted": bool, "result": Any, "error": Optional[str]} -- 'result'
-    is operation-specific (e.g. an output file path, or a list of them).
+    work_fn(items, report, is_aborted) -> dict, called on the worker
+    thread:
+      report(current, total, status_text, log_line=None,
+             success_delta=0, failed_delta=0) -- one progress update;
+             deltas let a chunked operation report >1 item per call.
+      is_aborted() -- True once Cancel was clicked; check periodically
+             and stop promptly.
+      Returns {"success": int, "failed": int, "aborted": bool,
+               "result": Any, "error": Optional[str]}.
     """
 
     def __init__(self, parent, title: str, items: list, work_fn: Callable,
@@ -4133,11 +4112,7 @@ class ClientsFrame(ttk.Frame):
         sel = self.tree.selection()
         if len(sel) != 1:
             return None
-        cid = int(sel[0])
-        for c in self.db_manager.get_all_clients():
-            if c["id"] == cid:
-                return c
-        return None
+        return self.db_manager.get_client_by_id(int(sel[0]))
 
     def _open_editor(self, client: Optional[Dict]):
         ClientDialog(self.controller, self.db_manager, client, self._populate)
@@ -4259,11 +4234,7 @@ class CatalogFrame(ttk.Frame):
         sel = self.tree.selection()
         if len(sel) != 1:
             return None
-        iid = int(sel[0])
-        for it in self.db_manager.get_all_catalog_items():
-            if it["id"] == iid:
-                return it
-        return None
+        return self.db_manager.get_catalog_item_by_id(int(sel[0]))
 
     def _open_editor(self, item: Optional[Dict]):
         CatalogItemDialog(self.controller, self.db_manager, item, self._populate)
@@ -4378,28 +4349,13 @@ class InvoiceFormFrame(ttk.Frame):
         widget.bind("<Button-5>", on_linux_scroll_down)
 
     def _bind_arrow_scrolling(self):
-        """Lets the keyboard scroll the invoice form the same way the
-        mouse wheel already does:
-          - ↑ / ↓        -- one "unit" per press (the same increment
-            _prevent_scroll_hijack() above uses for the wheel), so this
-            feels exactly as smooth/incremental as the mouse wheel, not
-            a jarring page-at-a-time jump.
-          - Page Up / Page Down -- one "page" per press, for quickly
-            crossing the whole form without holding an arrow key down.
-
-        Bound once, at the whole-application level, because Tk has no
-        clean "only while this widget is visible" binding scope --
-        instead, the handler itself checks that the invoice form is the
-        page actually showing before it does anything, so this is a
-        no-op while any other page is active (including while a modal
-        dialog such as the PDF viewer has the keyboard grab, since that
-        never changes which page is "active" underneath it). It also
-        leaves combo boxes, multi-line Text fields, and Treeviews alone
-        entirely: those widgets already use ↑ / ↓ for something real
-        (cycling values / moving the cursor a line / changing the
-        selected row), and overriding that here would make typing in
-        Notes or picking from a dropdown fight the page scrolling
-        underneath it.
+        """↑/↓ scroll by one "unit" (matching the mouse wheel), Page Up/
+        Down by one "page". Bound at the app level since Tk has no
+        "only while visible" binding scope -- the handler itself checks
+        the invoice form is the active page before acting. Leaves combo
+        boxes, Text fields, and Treeviews alone since they already use
+        ↑/↓ for their own purpose (cycling values / cursor movement /
+        row selection).
         """
         def on_scroll_key(event, direction: int, what: str):
             if self.controller._active_frame() is not self:
@@ -5418,22 +5374,16 @@ class ShortcutManager:
     launches, rather than silently shadowing an existing shortcut and
     only being noticed later as "that key stopped working".
 
-    Every dispatch -- however it was triggered -- gets two safety
-    behaviours for free, so individual handlers never have to remember
-    them:
-      1. **No firing under an open dialog.** If a modal dialog (Settings,
-         the PDF viewer, Add Client, ...) currently has focus, page-level
-         shortcuts are suppressed. The dialog owns the keyboard while
-         it's open; without this, Ctrl+N while the "Add Client" dialog is
-         open would pop a *second* dialog behind the first one -- exactly
-         the kind of glitch this manager exists to prevent.
-      2. **No fighting Tk's own bindings.** Two of Tk's built-in
-         text-widget bindings collide with shortcuts this app wants for
-         itself: Ctrl+D normally deletes the character after the cursor
-         in Entry/Text widgets, and Ctrl+O normally inserts a newline in
-         a Text widget. install_class_overrides() re-binds those two
-         exact (widget class, sequence) pairs at the class level, through
-         this same dispatcher, so typing in a field never fights with the
+    Every dispatch gets two safety behaviours for free:
+      1. **No firing under an open dialog.** A modal dialog (Settings,
+         PDF viewer, Add Client, ...) owns the keyboard while it's open;
+         otherwise Ctrl+N while "Add Client" is open would pop a second
+         dialog behind the first.
+      2. **No fighting Tk's own bindings.** Ctrl+D normally deletes a
+         character in Entry/Text widgets, and Ctrl+O inserts a newline in
+         Text -- both collide with shortcuts this app wants. install_
+         class_overrides() re-binds those two (widget class, sequence)
+         pairs through this same dispatcher so typing never fights the
          shortcut sharing its key.
     """
 
