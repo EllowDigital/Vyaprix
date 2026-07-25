@@ -518,11 +518,33 @@ def apply_theme_to_text_widget(widget: tk.Text, colors=None) -> None:
         # the muted placeholder colour, not the "real text" colour just
         # applied above.
         if getattr(widget, "_showing_placeholder", False):
-            widget.configure(foreground=getattr(widget, "_PLACEHOLDER_COLOR", "#9CA3AF"))
+            widget.configure(foreground=themed_placeholder_color(widget))
         if hasattr(widget, "_real_fg"):
             widget._real_fg = fg  # keep in sync so a later focus-out uses the CURRENT theme's colour, not a stale one from creation time
     except Exception as exc:
         logger.warning(f"Could not theme a text widget: {exc}")
+
+def themed_placeholder_color(widget: tk.Misc) -> str:
+    """Picks a muted 'hint text' grey with guaranteed-readable contrast
+    against the CURRENT theme's actual input background, rather than one
+    fixed grey for every theme: a fixed medium grey looks fine against
+    most bundled themes' near-white or near-black input fields, but is
+    hard to read against at least one (a pale, not-quite-white input
+    background blends a medium grey in too much). Looked up fresh on
+    every call, not cached, so it stays correct across live theme
+    switches too -- the same reasoning as _PlaceholderMixin._lookup_
+    normal_fg() just above, applied to the hint color instead of the
+    real one."""
+    try:
+        colors = ttk.Style().colors
+        r, g, b = widget.winfo_rgb(colors.inputbg)
+        def lin(c):
+            c = c / 65535.0
+            return c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4
+        rel_luminance = 0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b)
+        return "#6b7280" if rel_luminance >= 0.5 else "#9ca3af"
+    except Exception:
+        return "#9CA3AF"
 
 def load_thumbnail_image(path: Optional[Path], master: tk.Misc, max_size: int = 44) -> Optional[tk.PhotoImage]:
     """Loads an arbitrary image file as a small square-ish thumbnail, for
@@ -726,7 +748,7 @@ class _PlaceholderMixin:
     rather than the widget must not do that for a placeholder-enabled field --
     this file always reads such fields via the widget itself.
     """
-    _PLACEHOLDER_COLOR = "#9CA3AF"  # muted grey; readable on every bundled theme
+    _PLACEHOLDER_COLOR = "#9CA3AF"  # fallback only -- see themed_placeholder_color()
 
     def _init_placeholder(self, placeholder: str):
         self._placeholder = placeholder
@@ -752,7 +774,7 @@ class _PlaceholderMixin:
             return
         self._showing_placeholder = True
         try:
-            self.configure(foreground=self._PLACEHOLDER_COLOR)
+            self.configure(foreground=themed_placeholder_color(self))
         except tk.TclError:
             pass
         self._raw_insert(self._placeholder)
@@ -866,7 +888,7 @@ class PlaceholderText(tk.Text):
     """A tk.Text box with the same placeholder behaviour, adapted to Text's
     "1.0" / "end-1c" indexing instead of Entry's integer indexing."""
 
-    _PLACEHOLDER_COLOR = "#9CA3AF"
+    _PLACEHOLDER_COLOR = "#9CA3AF"  # fallback only -- see themed_placeholder_color()
 
     def __init__(self, master=None, placeholder: str = "", **kw):
         tk.Text.__init__(self, master, **kw)
@@ -890,7 +912,7 @@ class PlaceholderText(tk.Text):
         if not self._placeholder or self._raw_get():
             return
         self._showing_placeholder = True
-        self.configure(foreground=self._PLACEHOLDER_COLOR)
+        self.configure(foreground=themed_placeholder_color(self))
         tk.Text.insert(self, "1.0", self._placeholder)
 
     def _ph_clear(self):
