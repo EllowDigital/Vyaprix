@@ -434,6 +434,60 @@ def safe_float(value: Any, fallback: float = 0.0) -> float:
     except (TypeError, ValueError):
         return fallback
 
+DECIMAL_INPUT_PATTERN = re.compile(r"^\d*\.?\d*$")
+INTEGER_INPUT_PATTERN = re.compile(r"^\d*$")
+EMAIL_FORMAT_PATTERN  = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]{2,}$")
+GSTIN_FORMAT_PATTERN  = re.compile(r"^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][1-9A-Z]Z[0-9A-Z]$")
+PHONE_FORMAT_PATTERN  = re.compile(r"^[+]?[\d\s().-]+$")
+
+def restrict_entry_to_decimal(entry: tk.Widget, max_decimal_places: int = 2) -> tk.Widget:
+    def validate(proposed: str) -> bool:
+        if proposed == "":
+            return True
+        if not DECIMAL_INPUT_PATTERN.match(proposed):
+            return False
+        return len(proposed.partition(".")[2]) <= max_decimal_places
+    command = entry.register(validate)
+    entry.configure(validate="key", validatecommand=(command, "%P"))
+    return entry
+
+def restrict_entry_to_digits(entry: tk.Widget, max_length: Optional[int] = None) -> tk.Widget:
+    def validate(proposed: str) -> bool:
+        if proposed == "":
+            return True
+        if not INTEGER_INPUT_PATTERN.match(proposed):
+            return False
+        return max_length is None or len(proposed) <= max_length
+    command = entry.register(validate)
+    entry.configure(validate="key", validatecommand=(command, "%P"))
+    return entry
+
+def format_entry_as_decimal_on_blur(entry: tk.Widget, places: int = 2) -> tk.Widget:
+    def on_focus_out(_event=None):
+        try:
+            current = entry.get()
+        except tk.TclError:
+            return
+        formatted = f"{safe_float(current):.{places}f}"
+        if formatted != current:
+            entry.delete(0, "end")
+            entry.insert(0, formatted)
+    entry.bind("<FocusOut>", on_focus_out, add="+")
+    return entry
+
+def is_valid_email(value: str) -> bool:
+    return bool(EMAIL_FORMAT_PATTERN.match(value.strip()))
+
+def is_valid_gstin(value: str) -> bool:
+    return bool(GSTIN_FORMAT_PATTERN.match(value.strip().upper()))
+
+def is_valid_phone(value: str) -> bool:
+    value = value.strip()
+    if not PHONE_FORMAT_PATTERN.match(value):
+        return False
+    digit_count = sum(ch.isdigit() for ch in value)
+    return 7 <= digit_count <= 15
+
 def safe_markup(value: Any) -> str:
     """Escape user-supplied text before it's embedded in ReportLab Paragraph
     strings, which parse a small XML/HTML-like markup subset. Without this,
@@ -4546,36 +4600,52 @@ class InvoiceFormFrame(ttk.Frame):
     # ---- Items ---------------------------------------------------------- #
     def _section_items(self, parent):
         wrap = self._card(parent, "Items")
+        header = ttk.Frame(wrap)
+        header.pack(fill="x", pady=(0, 6))
+        ttk.Label(header, text="ITEM / SERVICE", font=(FONT_FAMILY, 8, "bold"),
+                  bootstyle="secondary").pack(side="left", fill="x", expand=True)
+        ttk.Label(header, text="AMOUNT", font=(FONT_FAMILY, 8, "bold"), bootstyle="secondary",
+                  width=12, anchor="center").pack(side="left", padx=6)
+        ttk.Label(header, text="DISCOUNT", font=(FONT_FAMILY, 8, "bold"), bootstyle="secondary",
+                  width=10, anchor="center").pack(side="left", padx=(0, 6))
+        ttk.Label(header, text="", width=3).pack(side="left")
+        ttk.Separator(wrap, bootstyle="secondary").pack(fill="x", pady=(0, 4))
+
         self.items_container = ttk.Frame(wrap)
         self.items_container.pack(fill="x")
         add_item_btn = ttk.Button(wrap, text="＋  Add Item  (Ctrl+Shift+A)", bootstyle="secondary-outline",
                                    command=lambda: self._add_item_row())
-        add_item_btn.pack(anchor="w", pady=(8, 0))
+        add_item_btn.pack(anchor="w", pady=(10, 0))
         ToolTip(add_item_btn, "Add a blank item row (Ctrl+Shift+A or Ctrl+Plus)")
 
     def _add_item_row(self, title: str = "", description: str = "", amount: float = 0.0, discount: float = 0.0):
-        row_frame = ttk.Frame(self.items_container, padding=(0, 6))
+        row_frame = ttk.Frame(self.items_container, padding=(0, 7))
         row_frame.pack(fill="x")
 
         top = ttk.Frame(row_frame); top.pack(fill="x")
         title_var = tk.StringVar(value=title)
         title_combo = PlaceholderCombobox(top, placeholder="Item / service name", textvariable=title_var,
                                            values=[c["title"] for c in self._catalog_cache], height=6)
-        title_combo.pack(side="left", fill="x", expand=True)
+        title_combo.pack(side="left", fill="x", expand=True, ipady=2)
         self._prevent_scroll_hijack(title_combo)
         title_combo.bind("<<ComboboxSelected>>", lambda e, tc=title_combo: self._on_catalog_picked(tc))
         title_combo.bind("<KeyRelease>", lambda e, tc=title_combo: self._filter_catalog_suggestions(tc))
         self._advance_focus_on_enter(title_combo)
 
-        amount_entry = ttk.Entry(top, width=12)
+        amount_entry = ttk.Entry(top, width=12, justify="right")
         amount_entry.insert(0, f"{amount:.2f}")
-        amount_entry.pack(side="left", padx=6)
+        amount_entry.pack(side="left", padx=6, ipady=2)
+        restrict_entry_to_decimal(amount_entry)
+        format_entry_as_decimal_on_blur(amount_entry)
         amount_entry.bind("<KeyRelease>", lambda _: self._recalc_totals())
         self._advance_focus_on_enter(amount_entry)
+        ToolTip(amount_entry, "Item amount, before any discount")
 
-        disc_entry = ttk.Entry(top, width=10)
+        disc_entry = ttk.Entry(top, width=10, justify="right")
         disc_entry.insert(0, f"{discount:.2f}")
-        disc_entry.pack(side="left", padx=(0, 6))
+        disc_entry.pack(side="left", padx=(0, 6), ipady=2)
+        restrict_entry_to_decimal(disc_entry)
+        format_entry_as_decimal_on_blur(disc_entry)
         disc_entry.bind("<KeyRelease>", lambda _: self._recalc_totals())
         self._advance_focus_on_enter(disc_entry)
         ToolTip(disc_entry, "Per-item discount amount")
@@ -4586,10 +4656,10 @@ class InvoiceFormFrame(ttk.Frame):
 
         desc_entry = PlaceholderEntry(row_frame, placeholder="Description (optional)")
         desc_entry.insert(0, description)
-        desc_entry.pack(fill="x", pady=(4, 0))
+        desc_entry.pack(fill="x", pady=(5, 0), ipady=1)
         self._advance_focus_on_enter(desc_entry)
 
-        ttk.Separator(row_frame, bootstyle="secondary").pack(fill="x", pady=(8, 0))
+        ttk.Separator(row_frame, bootstyle="secondary").pack(fill="x", pady=(9, 0))
 
         entry = {
             "frame": row_frame, "title_var": title_var, "title_combo": title_combo,
@@ -4631,15 +4701,27 @@ class InvoiceFormFrame(ttk.Frame):
         wrap = self._card(parent, "Payment History")
         ttk.Label(wrap, text="Log each payment received. Status updates automatically.",
                   font=(FONT_FAMILY, 9), bootstyle="secondary").pack(anchor="w", pady=(0, 8))
+        header = ttk.Frame(wrap)
+        header.pack(fill="x", pady=(0, 4))
+        ttk.Label(header, text="DATE", font=(FONT_FAMILY, 8, "bold"), bootstyle="secondary",
+                  width=12, anchor="w").pack(side="left", padx=(0, 6))
+        ttk.Label(header, text="AMOUNT", font=(FONT_FAMILY, 8, "bold"), bootstyle="secondary",
+                  width=12, anchor="center").pack(side="left", padx=(0, 6))
+        ttk.Label(header, text="MODE", font=(FONT_FAMILY, 8, "bold"), bootstyle="secondary",
+                  width=13, anchor="w").pack(side="left", padx=(0, 6))
+        ttk.Label(header, text="NOTE", font=(FONT_FAMILY, 8, "bold"),
+                  bootstyle="secondary").pack(side="left", fill="x", expand=True, padx=(0, 6))
+        ttk.Label(header, text="", width=3).pack(side="left")
+        ttk.Separator(wrap, bootstyle="secondary").pack(fill="x", pady=(0, 2))
         self.payments_container = ttk.Frame(wrap)
         self.payments_container.pack(fill="x")
         self.add_payment_btn = ttk.Button(wrap, text="＋  Add Payment", bootstyle="secondary-outline",
                                           command=lambda: self._add_payment_row())
-        self.add_payment_btn.pack(anchor="w", pady=(8, 0))
+        self.add_payment_btn.pack(anchor="w", pady=(10, 0))
 
     def _add_payment_row(self, amount: float = 0.0, payment_date: Optional[str] = None,
                           mode: str = "Cash", note: str = "", payment_id: Optional[int] = None):
-        row_frame = ttk.Frame(self.payments_container, padding=(0, 5))
+        row_frame = ttk.Frame(self.payments_container, padding=(0, 6))
         row_frame.pack(fill="x")
 
         date_entry = DateEntry(row_frame, dateformat=DISPLAY_DATE_FORMAT, width=12)
@@ -4649,23 +4731,25 @@ class InvoiceFormFrame(ttk.Frame):
                 date_entry.entry.insert(0, parse_date(payment_date, DB_DATE_FORMAT, DISPLAY_DATE_FORMAT))
             except Exception:
                 pass
-        date_entry.pack(side="left", padx=(0, 6))
+        date_entry.pack(side="left", padx=(0, 6), ipady=1)
         self._advance_focus_on_enter(date_entry.entry)
 
-        amount_entry = ttk.Entry(row_frame, width=12)
+        amount_entry = ttk.Entry(row_frame, width=12, justify="right")
         amount_entry.insert(0, f"{amount:.2f}")
-        amount_entry.pack(side="left", padx=(0, 6))
+        amount_entry.pack(side="left", padx=(0, 6), ipady=2)
+        restrict_entry_to_decimal(amount_entry)
+        format_entry_as_decimal_on_blur(amount_entry)
         amount_entry.bind("<KeyRelease>", lambda _: self._recalc_totals())
         self._advance_focus_on_enter(amount_entry)
 
         mode_combo = ttk.Combobox(row_frame, values=PAYMENT_MODES, state="readonly", width=13)
         mode_combo.set(mode if mode in PAYMENT_MODES else "Cash")
-        mode_combo.pack(side="left", padx=(0, 6))
+        mode_combo.pack(side="left", padx=(0, 6), ipady=1)
         self._prevent_scroll_hijack(mode_combo)
 
         note_entry = PlaceholderEntry(row_frame, placeholder="Note (optional)")
         note_entry.insert(0, note)
-        note_entry.pack(side="left", fill="x", expand=True, padx=(0, 6))
+        note_entry.pack(side="left", fill="x", expand=True, padx=(0, 6), ipady=1)
         self._advance_focus_on_enter(note_entry)
 
         remove_btn = ttk.Button(row_frame, text="✕", width=3, bootstyle="danger-outline", takefocus=False)
