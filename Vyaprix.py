@@ -2329,6 +2329,7 @@ class SettingsDialog(tk.Toplevel):
         self.ud_city    = self._labeled_entry(scroller, "City:",                "e.g. Lucknow")
         self.ud_state   = self._labeled_entry(scroller, "State:",               "e.g. Uttar Pradesh")
         self.ud_pin     = self._labeled_entry(scroller, "PIN Code:",            "e.g. 226001")
+        restrict_entry_to_digits(self.ud_pin, max_length=6)
 
     def _build_payment_tab(self, nb):
         t3 = ttk.Frame(nb, padding=(16, 16, 4, 16))
@@ -2525,6 +2526,25 @@ class SettingsDialog(tk.Toplevel):
             self._refresh_asset_row(key)
 
     def _save(self):
+        email = self.ud_email.get().strip()
+        if email and not is_valid_email(email):
+            return Messagebox.show_error(
+                "Invalid Email", f'"{email}" doesn\'t look like a valid email address.', parent=self)
+
+        phone = self.ud_phone.get().strip()
+        if phone and not is_valid_phone(phone):
+            return Messagebox.show_error(
+                "Invalid Phone Number",
+                f'"{phone}" doesn\'t look like a valid phone number.\n'
+                "Use digits only, optionally with +, spaces, or dashes.", parent=self)
+
+        company_gstin = self.co_gst.get().strip()
+        if company_gstin and not is_valid_gstin(company_gstin):
+            return Messagebox.show_error(
+                "Invalid GST Number",
+                f'"{company_gstin}" is not a valid GSTIN.\n'
+                "A GSTIN is 15 characters, for example 22ABCDE1234F1Z5.", parent=self)
+
         if self.currency_var.get() == self.CUSTOM_CURRENCY:
             currency_symbol = self.custom_currency_entry.get().strip() or "₹"
         else:
@@ -4536,6 +4556,8 @@ class InvoiceFormFrame(ttk.Frame):
         self.tax_rate_entry = ttk.Entry(rt)
         self.tax_rate_entry.insert(0, "18")
         self.tax_rate_entry.pack(side="left", fill="x", expand=True)
+        restrict_entry_to_decimal(self.tax_rate_entry, max_decimal_places=2)
+        format_entry_as_decimal_on_blur(self.tax_rate_entry)
         self.tax_rate_entry.bind("<KeyRelease>", lambda _: self._recalc_totals())
         self._advance_focus_on_enter(self.tax_rate_entry)
 
@@ -4555,6 +4577,8 @@ class InvoiceFormFrame(ttk.Frame):
         self.global_discount_entry = ttk.Entry(disc_wrap)
         self.global_discount_entry.insert(0, "0")
         self.global_discount_entry.pack(side="left", fill="x", expand=True)
+        restrict_entry_to_decimal(self.global_discount_entry, max_decimal_places=2)
+        format_entry_as_decimal_on_blur(self.global_discount_entry)
         self.global_discount_entry.bind("<KeyRelease>", lambda _: self._recalc_totals())
         self._advance_focus_on_enter(self.global_discount_entry)
         
@@ -5177,6 +5201,20 @@ class InvoiceFormFrame(ttk.Frame):
                 'Invoice Number cannot contain any of:  \\  /  :  * ?  "  <  >  |\n'
                 "(these characters break the PDF file that gets generated from it).",
             )
+        if inv_num != self.editing_id and self.db_manager.get_invoice_by_id(inv_num) is not None:
+            return Messagebox.show_error(
+                "Duplicate Invoice Number",
+                f'Invoice number "{inv_num}" is already used by another invoice.\n'
+                "Please choose a different invoice number.",
+            )
+
+        client_gstin = self.client_gstin_entry.get().strip()
+        if client_gstin and not is_valid_gstin(client_gstin):
+            return Messagebox.show_error(
+                "Invalid GST Number",
+                f'"{client_gstin}" is not a valid GSTIN.\n'
+                "A GSTIN is 15 characters, for example 22ABCDE1234F1Z5.",
+            )
 
         date_txt = self.invoice_date_entry.entry.get().strip()
         if not date_txt:
@@ -5206,6 +5244,11 @@ class InvoiceFormFrame(ttk.Frame):
         for i in items:
             if i["amount"] < 0 or i["discount"] < 0:
                 return Messagebox.show_error("Validation", "Item amounts and discounts cannot be negative.")
+            if i["discount"] > i["amount"]:
+                return Messagebox.show_error(
+                    "Validation",
+                    f'The discount on "{i["title"] or "an item"}" cannot be larger than its amount.',
+                )
 
         payments = []
         if not no_charge:
@@ -5219,7 +5262,7 @@ class InvoiceFormFrame(ttk.Frame):
         data = {
             "invoice_number": inv_num, "bill_to": bill_to,
             "client_contact": self.client_contact_text.get("1.0", "end-1c").strip(),
-            "client_gstin": self.client_gstin_entry.get().strip(),
+            "client_gstin": client_gstin,
             "your_name": your_name,
             "your_contact": self.your_contact_text.get("1.0", "end-1c").strip(),
             "items": json.dumps(items), "amount_paid": 0.0, "tax_rate": tax_rate,
