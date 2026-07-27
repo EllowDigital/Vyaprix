@@ -1,5 +1,5 @@
 # =============================================================================
-#  Vyaprix By EllowLabs  –  Professional Edition v3.0
+#  Vyaprix By EllowLabs  –  Professional Edition v1.5
 #  Complete rewrite: faster data layer, redesigned navigation, payment
 #  history, dedicated client/catalog managers, bulk actions, invoice notes.
 # =============================================================================
@@ -70,9 +70,9 @@ except ImportError:
 #  1. APPLICATION METADATA
 # =============================================================================
 APP_NAME: str          = "Vyaprix"
-APP_VERSION: str       = "v1.2"
-APP_BUILD_VERSION: str = "1.2.2"
-APP_RELEASE_DATE: str  = "15 July 2026"
+APP_VERSION: str       = "v1.5"
+APP_BUILD_VERSION: str = "1.5.0"
+APP_RELEASE_DATE: str  = "28 July 2026"
 APP_TAGLINE: str       = "Business Made Smarter."
 
 APP_ATTRIBUTION: str = (
@@ -172,19 +172,14 @@ STATUS_BADGE: dict[str, dict[str, str]] = {
     "COMPLIMENTARY": {"foreground": "#3B82F6", "background": ""}, # Blue
 }
 
-# User-facing wording for the "Status" column/badge. Kept separate from
-# InvoiceStatus's own values (which are what's actually stored in the
-# database and must not change, or every invoice saved before this
-# update would suddenly show a status the code no longer recognises).
-# This dict is the ONLY place the display wording lives, so the
-# Dashboard list, the live invoice-form badge, and the PDF status line
+
 # can never say three different things for the same status.
 STATUS_DISPLAY_LABELS: Dict[str, str] = {
     "Due": "UNPAID", "Partial": "PARTIALLY PAID", "Paid": "PAID",
     "Overpaid": "OVERPAID", "Complimentary": "COMPLIMENTARY",
 }
 
-# ttkbootstrap style for the live invoice-form status badge (a different
+
 # widget/mechanism than the Treeview's STATUS_BADGE hex colors above).
 STATUS_BOOTSTYLE: Dict[str, str] = {
     "Paid": "success-inverse", "Due": "danger-inverse", "Partial": "warning-inverse",
@@ -244,7 +239,6 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
-        # Rotate at 5MB, keep 5 backups -- prevents the log from growing
         # forever on a machine that runs Vyaprix for years.
         RotatingFileHandler(LOG_FILE, mode='a', maxBytes=5 * 1024 * 1024,
                             backupCount=5, encoding='utf-8'),
@@ -257,16 +251,6 @@ logger = logging.getLogger(__name__)
 #  FONTS
 # =============================================================================
 def register_fonts() -> str:
-    """Registers the bundled NotoSans font (needed for the currency
-    symbol and non-Latin characters). Tries the writable ProgramData
-    copy first, then the read-only copy bundled in the EXE, so a failed
-    first-run copy doesn't take the real font down with it.
-
-    Falling back to "Helvetica" is a real correctness problem: it has no
-    glyph for "₹", and ReportLab silently substitutes an unrelated
-    character with no error -- see InvoiceApp._warn_if_fallback_font(),
-    which surfaces this to the user once at startup.
-    """
     for font_dir in (DATA_FONTS_DIR, FONTS_DIR):
         reg  = font_dir / "NotoSans-Regular.ttf"
         bold = font_dir / "NotoSans-Bold.ttf"
@@ -327,25 +311,7 @@ def get_default_config() -> Dict[str, Any]:
     }
 
 def _migrate_legacy_business_identity(config: Dict[str, Any]) -> bool:
-    """One-release upgrade path. A prior build stored a business/firm
-    name and GST number under user_details ('firm_name'/'gst_number'),
-    separate from company_details.name/gstin -- the fields the invoice
-    letterhead and the dedicated GSTIN line actually use. That let
-    someone fill in only one of the two and still expect it everywhere,
-    and it printed the GSTIN twice when both happened to be filled in.
-
-    There is only one business identity. This folds any already-entered
-    legacy firm_name/gst_number into company_details, but only where
-    company_details hasn't already been customized away from the
-    built-in default -- a real, deliberately-set company name/GSTIN is
-    never overwritten. The old keys are simply left in place afterwards;
-    nothing reads them anymore, and they drop out of the file on the
-    next Settings save (SettingsDialog._save() no longer writes them).
-
-    Returns True if it changed anything, so load_config() knows to
-    persist the fix back to disk immediately rather than waiting for the
-    user to open Settings and hit Save.
-    """
+  
     ud   = config.get("user_details", {})
     comp = config.setdefault("company_details", {})
     changed = False
@@ -420,12 +386,6 @@ def fmt_money(value: Any) -> str:
 _CENTS = Decimal("0.01")
 
 def _round2(value: Any) -> Decimal:
-    """Rounds a number to 2 decimal places using ROUND_HALF_UP -- the
-    convention accountants and tax software expect (0.005 always rounds
-    up to 0.01, not down to 0.00 the way banker's rounding would, and
-    not left to whatever a raw float happens to do). Converts through
-    str() first: Decimal(0.1) reproduces float's imprecise binary
-    representation, while Decimal(str(0.1)) does not."""
     if isinstance(value, Decimal):
         return value.quantize(_CENTS, rounding=ROUND_HALF_UP)
     return Decimal(str(value or 0)).quantize(_CENTS, rounding=ROUND_HALF_UP)
@@ -2144,8 +2104,20 @@ class SettingsDialog(tk.Toplevel):
         super().__init__(parent)
         self.callback  = callback
         self.title(f"{APP_NAME} Settings")
-        self.geometry("680x780")
+        
+        # --- Size and Centering ---
+        width, height = 680, 780
+        sw = self.winfo_screenwidth()
+        sh = self.winfo_screenheight()
+        
+        # Calculate the exact center coordinates
+        x = (sw - width) // 2
+        y = (sh - height) // 2
+        
+        self.geometry(f"{width}x{height}+{x}+{y}")
         self.minsize(620, 700)
+        # --------------------------
+        
         self.resizable(True, True)
         self.transient(parent)
         self.grab_set()
@@ -2410,15 +2382,6 @@ class SettingsDialog(tk.Toplevel):
         prompt_and_backup_database(self)
 
     def _import_db(self):
-        """Lets the user replace the live database with another .db file:
-        validate it opens as SQLite, confirm with the user (this is a
-        destructive action), back up the CURRENT database first, copy the
-        new file into place, re-run schema migrations against it (so an
-        older or partial .db still works with the current app), and
-        refresh every screen. Any failure along the way restores the
-        pre-import backup automatically, so a bad file can't leave the
-        app worse off than before the import was attempted.
-        """
         path = filedialog.askopenfilename(
             parent=self, title="Import Database",
             filetypes=[("SQLite Database", "*.db"), ("All Files", "*.*")],
@@ -2455,13 +2418,6 @@ class SettingsDialog(tk.Toplevel):
 
         try:
             shutil.copy2(path, DB_NAME)
-            # Re-run schema setup/migrations against the newly-imported
-            # file (adds any missing tables/columns/indexes). Schema
-            # changes apply to the database FILE itself, and every
-            # DatabaseManager call reopens its own connection to that
-            # same path, so the app's existing db_manager picks up the
-            # migrated data automatically -- no object references to
-            # swap here.
             DatabaseManager(DB_NAME)
         except Exception as exc:
             try:
@@ -2598,7 +2554,19 @@ class AboutDialog(tk.Toplevel):
     def __init__(self, parent):
         super().__init__(parent)
         self.title(f"About {APP_NAME}")
-        self.geometry("400x420")
+        
+        # --- Size and Centering ---
+        width, height = 400, 420
+        sw = self.winfo_screenwidth()
+        sh = self.winfo_screenheight()
+        
+        # Calculate the exact center coordinates
+        x = (sw - width) // 2
+        y = (sh - height) // 2
+        
+        self.geometry(f"{width}x{height}+{x}+{y}")
+        # --------------------------
+        
         self.resizable(False, False)
         self.transient(parent)
         self.grab_set()
@@ -2635,19 +2603,22 @@ class AboutDialog(tk.Toplevel):
 #  KEYBOARD SHORTCUTS REFERENCE
 # =============================================================================
 class ShortcutsDialog(tk.Toplevel):
-    """A reference card listing every keyboard shortcut the app responds
-    to. Reads directly from the app's ShortcutManager (self.shortcuts)
-    rather than a hardcoded list, so this dialog can never drift out of
-    sync with what a key combo actually does -- add or change a
-    shortcut in InvoiceApp._setup_keyboard_shortcuts and this dialog
-    updates itself automatically. Opened from the sidebar's
-    "⌨  Shortcuts" button or by pressing F1 anywhere."""
-
     def __init__(self, parent):
         super().__init__(parent)
         self.title("Keyboard Shortcuts")
-        self.geometry("440x600")
-        self.minsize(400, 420)
+        
+        # --- Size and Centering ---
+        width, height = 520, 640
+        sw = self.winfo_screenwidth()
+        sh = self.winfo_screenheight()
+        
+        x = (sw - width) // 2
+        y = (sh - height) // 2
+        
+        self.geometry(f"{width}x{height}+{x}+{y}")
+        self.minsize(460, 500)
+        # --------------------------
+
         self.transient(parent)
         self.grab_set()
         self._build(parent.shortcuts.grouped_reference())
@@ -2657,30 +2628,55 @@ class ShortcutsDialog(tk.Toplevel):
     def _build(self, groups: Dict[str, List[Tuple[str, str]]]):
         style = ttk.Style()
         self.configure(bg=style.colors.bg)
-        container = ttk.Frame(self, padding=15)
+        
+        # --- Main Container ---
+        container = ttk.Frame(self, padding=20)
         container.pack(fill="both", expand=True)
 
-        hero = ttk.Frame(container, padding=15, bootstyle="primary")
-        hero.pack(fill="x")
-        ttk.Label(hero, text="⌨  Keyboard Shortcuts", font=(FONT_FAMILY, 15, "bold"),
-                  bootstyle="inverse-primary", anchor="center", justify="center").pack(fill="x")
-        ttk.Label(hero, text="Everything below works without touching the mouse",
-                  font=(FONT_FAMILY, 9), bootstyle="inverse-primary", anchor="center", justify="center").pack(fill="x", pady=(4, 0))
+        # --- Hero Header ---
+        hero = ttk.Frame(container, padding=20, bootstyle="primary")
+        hero.pack(fill="x", pady=(0, 10))
+        ttk.Label(hero, text="⌨  Keyboard Shortcuts", font=(FONT_FAMILY, 16, "bold"),
+                  bootstyle="inverse-primary", anchor="center").pack(fill="x")
+        ttk.Label(hero, text="Master Vyaprix without touching your mouse.",
+                  font=(FONT_FAMILY, 10), bootstyle="inverse-primary", anchor="center").pack(fill="x", pady=(5, 0))
 
+        # --- Scrollable List ---
         scroller = ScrolledFrame(container, autohide=True)
-        scroller.pack(fill="both", expand=True, pady=(15, 0))
+        scroller.pack(fill="both", expand=True, pady=(10, 15))
 
+        # --- Populate Groups ---
         for group_title, items in groups.items():
-            ttk.Label(scroller, text=group_title, font=(FONT_FAMILY, 11, "bold"),
-                      bootstyle="secondary").pack(anchor="w", pady=(12, 6))
+            
+            # Group Header with stretching separator line
+            gh_frame = ttk.Frame(scroller)
+            gh_frame.pack(fill="x", pady=(20, 10), padx=5)
+            ttk.Label(gh_frame, text=group_title.upper(), font=(FONT_FAMILY, 10, "bold"),
+                      bootstyle="info").pack(side="left", padx=(0, 10))
+            ttk.Separator(gh_frame, bootstyle="secondary").pack(side="left", fill="x", expand=True)
+
+            # Items
             for keys, desc in items:
                 row = ttk.Frame(scroller)
-                row.pack(fill="x", pady=3)
-                ttk.Label(row, text=keys, font=(FONT_FAMILY, 9, "bold"), width=16,
-                          bootstyle="inverse-secondary", anchor="center", padding=(4, 3)).pack(side="left")
-                ttk.Label(row, text=desc, font=(FONT_FAMILY, 10)).pack(side="left", padx=(10, 0))
+                row.pack(fill="x", pady=5, padx=5)
+                
+                # Use grid to create a perfect 150px column without crushing the height
+                row.columnconfigure(0, minsize=150)
 
-        ttk.Button(container, text="Close", width=14, bootstyle="primary", command=self.destroy).pack(side="bottom", pady=(15, 0))
+                # Keycap visual styling
+                key_lbl = ttk.Label(row, text=keys, font=(FONT_FAMILY, 9, "bold"),
+                                    bootstyle="secondary", padding=(8, 4), anchor="center",
+                                    relief="solid", borderwidth=1)
+                
+                # Pin the keycap to the right side (East) of column 0
+                key_lbl.grid(row=0, column=0, sticky="e")
+
+                # Description goes into column 1
+                ttk.Label(row, text=desc, font=(FONT_FAMILY, 10)).grid(row=0, column=1, sticky="w", padx=(15, 0))
+
+        # --- Footer Action ---
+        ttk.Button(container, text="Got It", width=14, bootstyle="primary", 
+                   command=self.destroy).pack(side="bottom", pady=(5, 0))
 
 # =============================================================================
 #  PDF VIEWER
@@ -2693,14 +2689,22 @@ class PDFViewer(tk.Toplevel):
         super().__init__(parent)
         self.pdf_path   = pdf_path
         self.invoice_data = invoice_data
+
         self.title(f"Preview  —  {pdf_path.name}")
         
-        # --- Increase width to 900 to prevent button clipping ---
-        self.geometry("900x720")
-        self.minsize(900, 720)
+        # --- Size and Centering ---
+        width, height = 900, 720
+        sw = self.winfo_screenwidth()
+        sh = self.winfo_screenheight()
+        
+        # Calculate the exact center coordinates
+        x = (sw - width) // 2
+        y = (sh - height) // 2
+        
+        self.geometry(f"{width}x{height}+{x}+{y}")
+        self.minsize(width, height)
         self.maxsize(1920, 1080)
         # --------------------------------------------------------
-
         try:
             self.doc = fitz.open(pdf_path)
         except Exception as exc:
@@ -2799,7 +2803,7 @@ class PDFViewer(tk.Toplevel):
         
         # --- THE FIX: Force background color and draw a shadow/border ---
         # 1. Force the canvas to a neutral dark gray so ttkbootstrap doesn't make it white
-        self.canvas.configure(bg="#52525B") 
+        self.canvas.configure(bg="#DDD") 
         
         x = max((cw - pix.width) / 2, 0)
         y = max((ch - pix.height) / 2, 0)
@@ -2867,7 +2871,19 @@ class PDFViewer(tk.Toplevel):
         # --- Create Custom Tkinter/ttkbootstrap Printer Dialog ---
         dialog = tk.Toplevel(self)
         dialog.title("Select Printer")
-        dialog.geometry("400x260")
+        
+        # --- Size and Centering ---
+        width, height = 400, 260
+        sw = dialog.winfo_screenwidth()
+        sh = dialog.winfo_screenheight()
+        
+        # Calculate the exact center coordinates
+        x = (sw - width) // 2
+        y = (sh - height) // 2
+        
+        dialog.geometry(f"{width}x{height}+{x}+{y}")
+        # --------------------------
+        
         dialog.resizable(False, False)
         dialog.transient(self)
         dialog.grab_set()
@@ -3010,8 +3026,17 @@ class ShareDialog(tk.Toplevel):
         
         self.title("Share Invoice")
         
-        # --- THE FIX ---
-        self.geometry("420x340")  # Increased width and height to prevent clipping
+        # --- Size and Centering ---
+        width, height = 420, 340
+        sw = self.winfo_screenwidth()
+        sh = self.winfo_screenheight()
+        
+        # Calculate the exact center coordinates
+        x = (sw - width) // 2
+        y = (sh - height) // 2
+        
+        self.geometry(f"{width}x{height}+{x}+{y}")
+        # --------------------------
         
         self.resizable(False, False)
         self.transient(parent)
@@ -3103,6 +3128,7 @@ class ShareDialog(tk.Toplevel):
         
         webbrowser.open(f"mailto:{email}?subject={subject}&body={body}")
         self.destroy()
+
 # =============================================================================
 #  SMALL RECORD DIALOGS  (Client / Catalog Item / Invoice Note)
 # =============================================================================
@@ -3114,51 +3140,62 @@ class ClientDialog(tk.Toplevel):
         self.client     = client
         self.on_saved   = on_saved
         self.title("Edit Client" if client else "Add Client")
-        self.geometry("420x380")
+        
+        # --- Size and Centering ---
+        width, height = 440, 440
+        sw = self.winfo_screenwidth()
+        sh = self.winfo_screenheight()
+        x = (sw - width) // 2
+        y = (sh - height) // 2
+        self.geometry(f"{width}x{height}+{x}+{y}")
+        # --------------------------
+        
         self.resizable(False, False)
         self.transient(parent)
         self.grab_set()
 
-        pad = ttk.Frame(self, padding=18)
+        pad = ttk.Frame(self, padding=20)
         pad.pack(fill="both", expand=True)
 
-        ttk.Label(pad, text="Client / Company Name *", font=(FONT_FAMILY, 9)).pack(anchor="w")
+        header_text = "Edit Client Details" if client else "New Client Details"
+        ttk.Label(pad, text=header_text, font=(FONT_FAMILY, 14, "bold")).pack(anchor="w", pady=(0, 15))
+
+        ttk.Label(pad, text="Client / Company Name *", font=(FONT_FAMILY, 9, "bold")).pack(anchor="w")
         self.name_entry = PlaceholderEntry(pad, placeholder="Enter client name")
-        self.name_entry.pack(fill="x", pady=(2, 10))
+        self.name_entry.pack(fill="x", pady=(4, 12), ipady=2)
 
-        ttk.Label(pad, text="Contact Info", font=(FONT_FAMILY, 9)).pack(anchor="w")
-        self.contact_text = PlaceholderText(pad, placeholder="+91 98765 43210, name@email.com, City",
-                                             height=5, relief="flat", highlightthickness=1, wrap="word")
-        self.contact_text.pack(fill="x", pady=(2, 10))
+        ttk.Label(pad, text="Contact Info", font=(FONT_FAMILY, 9, "bold")).pack(anchor="w")
+        self.contact_text = PlaceholderText(pad, placeholder="+91 98765 43210\nname@email.com\nCity, State",
+                                             height=4, relief="flat", highlightthickness=1, wrap="word")
+        self.contact_text.pack(fill="x", pady=(4, 12))
 
-        ttk.Label(pad, text="GSTIN (Optional)", font=(FONT_FAMILY, 9)).pack(anchor="w")
-        self.gstin_entry = PlaceholderEntry(pad, placeholder="22ABCDE1234F1Z5")
-        self.gstin_entry.pack(fill="x", pady=(2, 10))
+        ttk.Label(pad, text="GSTIN (Optional)", font=(FONT_FAMILY, 9, "bold")).pack(anchor="w")
+        self.gstin_entry = PlaceholderEntry(pad, placeholder="e.g., 22ABCDE1234F1Z5")
+        self.gstin_entry.pack(fill="x", pady=(4, 15), ipady=2)
 
         if client:
             self.name_entry.insert(0, client.get("name", ""))
             self.contact_text.insert("1.0", client.get("contact", "") or "")
             self.gstin_entry.insert(0, client.get("gstin", "") or "")
 
+        ttk.Separator(pad, bootstyle="secondary").pack(fill="x", pady=(0, 10))
+
         btns = ttk.Frame(pad)
-        btns.pack(fill="x", pady=(10, 0), side="bottom")
-        ttk.Button(btns, text="Cancel", bootstyle="secondary", command=self.destroy).pack(side="right", padx=(8, 0))
-        ttk.Button(btns, text="Save", bootstyle="success", command=self._save).pack(side="right")
+        btns.pack(fill="x", side="bottom")
+        ttk.Button(btns, text="✕ Cancel", bootstyle="secondary-outline", command=self.destroy).pack(side="right", padx=(8, 0))
+        ttk.Button(btns, text="💾 Save", bootstyle="success", command=self._save).pack(side="right")
+        
         self.name_entry.focus_set()
         
-        # --- THE FIX IS HERE ---
-        # Instead of calling _save() directly, we call a new handler
+        # Handle Enter key smartly
         self.bind("<Return>", self._on_enter_pressed)
         self.bind("<Escape>", lambda _: self.destroy())
 
-    # --- ADD THIS NEW METHOD ---
     def _on_enter_pressed(self, event):
         """Handle the Enter key smartly based on what the user is doing."""
         # If the user is inside the multi-line text box, let them make a new line!
         if self.focus_get() == self.contact_text:
             return 
-        
-        # Otherwise, save the form.
         self._save()
 
     def _save(self):
@@ -3183,41 +3220,67 @@ class CatalogItemDialog(tk.Toplevel):
         self.item       = item
         self.on_saved   = on_saved
         self.title("Edit Catalog Item" if item else "Add Catalog Item")
-        self.geometry("420x360")
+        
+        # --- Size and Centering ---
+        width, height = 440, 440
+        sw = self.winfo_screenwidth()
+        sh = self.winfo_screenheight()
+        x = (sw - width) // 2
+        y = (sh - height) // 2
+        self.geometry(f"{width}x{height}+{x}+{y}")
+        # --------------------------
+        
         self.resizable(False, False)
         self.transient(parent)
         self.grab_set()
 
-        pad = ttk.Frame(self, padding=18)
+        pad = ttk.Frame(self, padding=20)
         pad.pack(fill="both", expand=True)
 
-        ttk.Label(pad, text="Item / Service Title *", font=(FONT_FAMILY, 9)).pack(anchor="w")
+        header_text = "Edit Catalog Item" if item else "New Catalog Item"
+        ttk.Label(pad, text=header_text, font=(FONT_FAMILY, 14, "bold")).pack(anchor="w", pady=(0, 15))
+
+        ttk.Label(pad, text="Item / Service Title *", font=(FONT_FAMILY, 9, "bold")).pack(anchor="w")
         self.title_entry = PlaceholderEntry(pad, placeholder="Enter item / service name")
-        self.title_entry.pack(fill="x", pady=(2, 10))
+        self.title_entry.pack(fill="x", pady=(4, 12), ipady=2)
 
-        ttk.Label(pad, text="Description", font=(FONT_FAMILY, 9)).pack(anchor="w")
+        ttk.Label(pad, text="Description", font=(FONT_FAMILY, 9, "bold")).pack(anchor="w")
         self.desc_text = PlaceholderText(pad, placeholder="Description (optional)",
-                                          height=5, relief="flat", highlightthickness=1, wrap="word")
-        self.desc_text.pack(fill="x", pady=(2, 10))
+                                          height=4, relief="flat", highlightthickness=1, wrap="word")
+        self.desc_text.pack(fill="x", pady=(4, 12))
 
-        ttk.Label(pad, text=f"Default Amount ({CURRENCY_SYMBOL})", font=(FONT_FAMILY, 9)).pack(anchor="w")
+        ttk.Label(pad, text=f"Default Amount ({CURRENCY_SYMBOL})", font=(FONT_FAMILY, 9, "bold")).pack(anchor="w")
         self.amount_entry = ttk.Entry(pad)
-        self.amount_entry.pack(fill="x", pady=(2, 10))
+        self.amount_entry.pack(fill="x", pady=(4, 15), ipady=2)
+        
+        # UX Polish: Strict numeric controls
+        restrict_entry_to_decimal(self.amount_entry)
+        format_entry_as_decimal_on_blur(self.amount_entry)
 
         if item:
             self.title_entry.insert(0, item.get("title", ""))
             self.desc_text.insert("1.0", item.get("description", "") or "")
-            self.amount_entry.insert(0, str(item.get("amount", 0) or 0))
+            self.amount_entry.insert(0, f"{float(item.get('amount', 0) or 0):.2f}")
         else:
-            self.amount_entry.insert(0, "0")
+            self.amount_entry.insert(0, "0.00")
+
+        ttk.Separator(pad, bootstyle="secondary").pack(fill="x", pady=(0, 10))
 
         btns = ttk.Frame(pad)
-        btns.pack(fill="x", pady=(10, 0), side="bottom")
-        ttk.Button(btns, text="Cancel", bootstyle="secondary", command=self.destroy).pack(side="right", padx=(8, 0))
-        ttk.Button(btns, text="Save", bootstyle="success", command=self._save).pack(side="right")
+        btns.pack(fill="x", side="bottom")
+        ttk.Button(btns, text="✕ Cancel", bootstyle="secondary-outline", command=self.destroy).pack(side="right", padx=(8, 0))
+        ttk.Button(btns, text="💾 Save", bootstyle="success", command=self._save).pack(side="right")
+        
         self.title_entry.focus_set()
-        self.bind("<Return>", lambda _: self._save())
+        
+        self.bind("<Return>", self._on_enter_pressed)
         self.bind("<Escape>", lambda _: self.destroy())
+
+    def _on_enter_pressed(self, event):
+        """Handle the Enter key smartly based on what the user is doing."""
+        if self.focus_get() == self.desc_text:
+            return 
+        self._save()
 
     def _save(self):
         title = self.title_entry.get().strip()
@@ -3226,7 +3289,7 @@ class CatalogItemDialog(tk.Toplevel):
         try:
             amount = float(self.amount_entry.get() or 0)
         except ValueError:
-            return Messagebox.show_error("Validation", "Amount must be a number.", parent=self)
+            return Messagebox.show_error("Validation", "Amount must be a valid number.", parent=self)
         desc = self.desc_text.get("1.0", "end-1c").strip()
         iid = self.item.get("id") if self.item else None
         ok, err = self.db_manager.upsert_catalog_item_by_id(iid, title, desc, amount)
@@ -3246,24 +3309,39 @@ class NoteDialog(tk.Toplevel):
         self.invoice_number = invoice_number
         self.on_saved       = on_saved
         self.title(f"Note  —  Invoice #{invoice_number}")
-        self.geometry("420x260")
+        
+        # --- Size and Centering ---
+        width, height = 440, 320
+        sw = self.winfo_screenwidth()
+        sh = self.winfo_screenheight()
+        x = (sw - width) // 2
+        y = (sh - height) // 2
+        self.geometry(f"{width}x{height}+{x}+{y}")
+        # --------------------------
+        
         self.resizable(False, False)
         self.transient(parent)
         self.grab_set()
 
-        pad = ttk.Frame(self, padding=18)
+        pad = ttk.Frame(self, padding=20)
         pad.pack(fill="both", expand=True)
-        ttk.Label(pad, text="Internal note (not printed on the invoice PDF)",
-                  font=(FONT_FAMILY, 9), bootstyle="secondary").pack(anchor="w", pady=(0, 6))
+        
+        ttk.Label(pad, text=f"Invoice #{invoice_number}", font=(FONT_FAMILY, 14, "bold")).pack(anchor="w")
+        ttk.Label(pad, text="Internal note (not printed on the customer's PDF)",
+                  font=(FONT_FAMILY, 9), bootstyle="secondary").pack(anchor="w", pady=(2, 10))
+                  
         self.text = PlaceholderText(pad, placeholder="Add an internal note...",
-                                     height=7, relief="flat", highlightthickness=1, wrap="word")
-        self.text.pack(fill="both", expand=True)
+                                     height=6, relief="flat", highlightthickness=1, wrap="word")
+        self.text.pack(fill="both", expand=True, pady=(0, 15))
         self.text.insert("1.0", current_note or "")
 
+        ttk.Separator(pad, bootstyle="secondary").pack(fill="x", pady=(0, 10))
+
         btns = ttk.Frame(pad)
-        btns.pack(fill="x", pady=(10, 0))
-        ttk.Button(btns, text="Cancel", bootstyle="secondary", command=self.destroy).pack(side="right", padx=(8, 0))
-        ttk.Button(btns, text="Save Note", bootstyle="success", command=self._save).pack(side="right")
+        btns.pack(fill="x", side="bottom")
+        ttk.Button(btns, text="✕ Cancel", bootstyle="secondary-outline", command=self.destroy).pack(side="right", padx=(8, 0))
+        ttk.Button(btns, text="💾 Save Note", bootstyle="success", command=self._save).pack(side="right")
+        
         self.text.focus_set()
         self.bind("<Escape>", lambda _: self.destroy())
 
@@ -3277,27 +3355,24 @@ class NoteDialog(tk.Toplevel):
 #  BULK PROGRESS DIALOG
 # =============================================================================
 class BulkProgressDialog(tk.Toplevel):
-    """Generic progress popup for any bulk operation (Delete, Export,
-    Print/Generate). Runs work_fn in a background thread and polls its
-    own queue via .after(), so the UI never blocks.
-
-    work_fn(items, report, is_aborted) -> dict, called on the worker
-    thread:
-      report(current, total, status_text, log_line=None,
-             success_delta=0, failed_delta=0) -- one progress update;
-             deltas let a chunked operation report >1 item per call.
-      is_aborted() -- True once Cancel was clicked; check periodically
-             and stop promptly.
-      Returns {"success": int, "failed": int, "aborted": bool,
-               "result": Any, "error": Optional[str]}.
-    """
-
     def __init__(self, parent, title: str, items: list, work_fn: Callable,
                  on_done: Optional[Callable[[dict], None]] = None):
         super().__init__(parent)
         self.title(title)
-        self.geometry("580x480")
+        
+        # --- Size and Centering ---
+        width, height = 580, 480
+        sw = self.winfo_screenwidth()
+        sh = self.winfo_screenheight()
+        
+        # Calculate the exact center coordinates
+        x = (sw - width) // 2
+        y = (sh - height) // 2
+        
+        self.geometry(f"{width}x{height}+{x}+{y}")
         self.minsize(520, 440)
+        # --------------------------
+        
         self.resizable(True, True)
         self.transient(parent)
         self.grab_set()
@@ -4968,8 +5043,7 @@ class InvoiceFormFrame(ttk.Frame):
         self.var_balance_lbl = tk.StringVar(value="Balance Due:")   # flips to "Advance / Credit:" when overpaid
         self.var_balance     = tk.StringVar(value="0.00")
 
-        # Helper to create consistent rows with a fixed label. Returns
-        # (row, value_label) -- callers that never need to recolour the
+       
         # value at runtime can just ignore the second item.
         def add_row(lbl_text, var_val, is_bold=False, is_color=None):
             row = ttk.Frame(self.summary_box)
@@ -4983,8 +5057,6 @@ class InvoiceFormFrame(ttk.Frame):
             if is_color: val_lbl.configure(bootstyle=is_color)
             return row, val_lbl
 
-        # Same as add_row, but for rows whose *label* also changes at
-        # runtime -- the GST rows (percentage depends on the tax rate)
         # and Balance Due (becomes "Advance / Credit" when overpaid).
         def add_dynamic_row(lbl_var, var_val, is_bold=False, is_color=None):
             row = ttk.Frame(self.summary_box)
@@ -4995,16 +5067,6 @@ class InvoiceFormFrame(ttk.Frame):
             if is_color: val_lbl.configure(bootstyle=is_color)
             return row, val_lbl
 
-        # Rows are created here but deliberately left unpacked.
-        # _recalc_totals() rebuilds the stacking order from scratch on
-        # every call -- unpacking every row, then re-packing only the
-        # ones currently relevant, in this fixed order:
-        #   Subtotal -> Discount -> Taxable Amount -> Tax (CGST+SGST or
-        #   IGST) -> Grand Total -> Total Paid -> Balance Due
-        # A row that toggles from hidden to visible after later rows are
-        # already packed would otherwise land at the *end* of the stack
-        # instead of its correct place -- that's what used to put
-        # Discount below Balance Due.
         self.row_subtotal,    _                  = add_row("Subtotal:", self.var_subtotal)
         self.row_disc,        _                  = add_row("Discount:", self.var_discount)
         self.row_taxable,     _                  = add_row("Taxable Amount:", self.var_taxable)
@@ -5497,67 +5559,115 @@ class InvoiceFormFrame(ttk.Frame):
         if row is not None:
             row["title_combo"].focus_set()
 
-
 # =============================================================================
 #  APPLICATION SHELL  (sidebar navigation + page container)
 # =============================================================================
 class Sidebar(ttk.Frame):
+    # Notice we removed all the weird empty spaces from the strings!
     NAV_ITEMS = [
-        ("📊  Dashboard", "DashboardFrame"),
-        ("👥  Clients",   "ClientsFrame"),
-        ("📦  Catalog",   "CatalogFrame"),
+        ("⊞   Dashboard", "DashboardFrame"),
+        ("👥   Clients",   "ClientsFrame"),
+        ("📑   Catalog",   "CatalogFrame"),
     ]
 
     def __init__(self, parent, controller):
-        # Pure ttk.Frame automatically listens to LIVE theme changes
-        super().__init__(parent, width=220) 
+        super().__init__(parent, width=240) 
         self.controller = controller
         self.pack_propagate(False)
         self._nav_btns: Dict[str, ttk.Button] = {}
         self._build()
 
+    def _align_button_left(self, btn: ttk.Button):
+        """Hacks ttk style inheritance to left-align a button without breaking theme colors."""
+        current_style = btn.cget("style")
+        # If it's already our custom style, don't double-prefix it
+        if not current_style.startswith("LeftAligned."):
+            # Create a cloned style name (e.g. "LeftAligned.primary.TButton")
+            left_style = f"LeftAligned.{current_style}"
+            # Inject the anchor="w" rule into the new style
+            ttk.Style().configure(left_style, anchor="w")
+            # Apply it back to the button
+            btn.configure(style=left_style)
+
     def _build(self):
-        top = ttk.Frame(self, padding=(18, 22, 18, 12))
+        # --- BRANDING HEADER ---
+        top = ttk.Frame(self, padding=(20, 25, 20, 10))
         top.pack(fill="x")
         
-        # Centering the logo and text looks much cleaner
         if logo := load_app_logo_image(self):
             lbl = ttk.Label(top, image=logo)
             lbl.image = logo
-            lbl.pack(anchor="center", pady=(0, 8))
+            lbl.pack(anchor="center", pady=(0, 10))
             
-        ttk.Label(top, text="Vyaprix", font=(FONT_FAMILY, 16, "bold")).pack(anchor="center")
-        ttk.Label(top, text="by EllowLabs", font=(FONT_FAMILY, 8), bootstyle="secondary").pack(anchor="center")
+        ttk.Label(top, text="Vyaprix", font=(FONT_FAMILY, 18, "bold")).pack(anchor="center")
+        ttk.Label(top, text="by EllowLabs", font=(FONT_FAMILY, 8, "bold"), bootstyle="secondary").pack(anchor="center")
 
-        ttk.Separator(self, bootstyle="secondary").pack(fill="x", padx=18, pady=(4, 12))
+        ttk.Separator(self, bootstyle="secondary").pack(fill="x", padx=20, pady=(15, 15))
 
-        nav = ttk.Frame(self, padding=(10, 0))
-        nav.pack(fill="x")
+        # --- QUICK ACTION (Huge UX Win) ---
+        qa_frame = ttk.Frame(self, padding=(20, 0, 20, 15))
+        qa_frame.pack(fill="x")
+        
+        # We leave the CTA button centered to draw the eye
+        new_inv_btn = ttk.Button(
+            qa_frame, 
+            text="＋  New Invoice", 
+            bootstyle="success", 
+            padding=(0, 12),
+            command=lambda: self.controller.show_frame_by_name("InvoiceFormFrame")
+        )
+        new_inv_btn.pack(fill="x")
+        ToolTip(new_inv_btn, "Instantly start a new invoice (Ctrl+N)")
+
+        # --- MAIN NAVIGATION ---
+        nav = ttk.Frame(self, padding=(20, 0))
+        nav.pack(fill="x", expand=False)
+        
+        ttk.Label(nav, text="MAIN MENU", font=(FONT_FAMILY, 8, "bold"), bootstyle="secondary").pack(anchor="w", pady=(0, 8), padx=4)
         
         for label, frame_name in self.NAV_ITEMS:
-            # Outline buttons adapt flawlessly to both light and dark backgrounds
-            btn = ttk.Button(nav, text=label, bootstyle="secondary-outline", padding=(10, 10),
-                             command=lambda n=frame_name: self.controller.show_frame_by_name(n))
-            btn.pack(fill="x", pady=4)
+            btn = ttk.Button(
+                nav, text=label, bootstyle="secondary-outline", padding=(15, 12),
+                command=lambda n=frame_name: self.controller.show_frame_by_name(n)
+            )
+            btn.pack(fill="x", pady=3)
             self._nav_btns[frame_name] = btn
 
-        bottom = ttk.Frame(self, padding=(10, 14))
+        # --- UTILITIES / BOTTOM ---
+        bottom = ttk.Frame(self, padding=(20, 15))
         bottom.pack(side="bottom", fill="x")
         
-        ttk.Button(bottom, text="⚙️  Settings", bootstyle="info-outline", padding=(10, 8),
-                  command=self.controller.open_settings).pack(fill="x", pady=4)
-        ttk.Button(bottom, text="⌨️  Shortcuts", bootstyle="info-outline", padding=(10, 8),
-                  command=self.controller.open_shortcuts).pack(fill="x", pady=4)
-        ttk.Button(bottom, text="ℹ️  About", bootstyle="info-outline", padding=(10, 8),
-                  command=self.controller.open_about).pack(fill="x", pady=4)
+        ttk.Label(bottom, text="SYSTEM", font=(FONT_FAMILY, 8, "bold"), bootstyle="secondary").pack(anchor="w", pady=(0, 8), padx=4)
+        
+        settings_btn = ttk.Button(bottom, text="⚙️  Settings", bootstyle="info-outline", padding=(15, 10),
+                                  command=self.controller.open_settings)
+        settings_btn.pack(fill="x", pady=2)
+        self._align_button_left(settings_btn)
+
+        shortcuts_btn = ttk.Button(bottom, text="⌨️  Shortcuts", bootstyle="info-outline", padding=(15, 10),
+                                   command=self.controller.open_shortcuts)
+        shortcuts_btn.pack(fill="x", pady=2)
+        self._align_button_left(shortcuts_btn)
+
+        about_btn = ttk.Button(bottom, text="ℹ️  About", bootstyle="info-outline", padding=(15, 10),
+                               command=self.controller.open_about)
+        about_btn.pack(fill="x", pady=2)
+        self._align_button_left(about_btn)
                   
-        ttk.Label(bottom, text=APP_VERSION, font=(FONT_FAMILY, 8), bootstyle="secondary",
-                 anchor="center").pack(fill="x", padx=10, pady=(6, 0))
+        ttk.Label(bottom, text=f"Version {APP_VERSION}", font=(FONT_FAMILY, 8), bootstyle="secondary",
+                 anchor="center").pack(fill="x", padx=10, pady=(15, 0))
 
     def set_active(self, frame_name: str):
         for name, btn in self._nav_btns.items():
-            # Solid primary blue for active tab, outline for inactive tabs
-            btn.configure(bootstyle="primary" if name == frame_name else "secondary-outline")
+            if name == frame_name:
+                # Active tab gets solid primary color
+                btn.configure(bootstyle="primary")
+            else:
+                # Inactive tabs fade back to outlines
+                btn.configure(bootstyle="secondary-outline")
+                
+            # Re-apply the left-alignment hack immediately after bootstyle changes it
+            self._align_button_left(btn)
 
 # =============================================================================
 #  SPLASH SCREEN (MODERNIZED)
@@ -5614,15 +5724,30 @@ class SplashScreen(tk.Toplevel):
         bottom_bar = ttk.Frame(self.main_frame, padding=(20, 15))
         bottom_bar.pack(side="bottom", fill="x")
         
-        ttk.Label(bottom_bar, text="Starting up...", font=(FONT_FAMILY, 8, "bold"), bootstyle="secondary").pack(side="left")
+        # Save the label to an instance variable so we can update it dynamically
+        self.status_lbl = ttk.Label(bottom_bar, text="Starting up...", font=(FONT_FAMILY, 8, "bold"), bootstyle="secondary")
+        self.status_lbl.pack(side="left")
+        
         ttk.Label(bottom_bar, text=APP_VERSION, font=(FONT_FAMILY, 8), bootstyle="secondary").pack(side="right")
         
         pb = ttk.Progressbar(self.main_frame, mode="indeterminate", bootstyle="primary")
         pb.pack(side="bottom", fill="x")
         pb.start(15)
 
-        # Trigger the fade-in animation
+        # Sequence of friendly loading states
+        self.loading_messages = [
+            "Waking up the database...",
+            "Calculating dashboard stats...",
+            "Preparing invoice registry...",
+            "Loading your address book...",
+            "Polishing the interface...",
+            "Almost ready..."
+        ]
+        self.msg_index = 0
+
+        # Trigger the animations
         self._fade_in()
+        self._cycle_messages()
 
     def _fade_in(self):
         """Creates a smooth fade-in effect."""
@@ -5632,6 +5757,13 @@ class SplashScreen(tk.Toplevel):
             self.attributes("-alpha", current_alpha)
             self.after(15, self._fade_in)
 
+    def _cycle_messages(self):
+        """Cycles through the loading messages to make the app feel active."""
+        if self.msg_index < len(self.loading_messages):
+            self.status_lbl.config(text=self.loading_messages[self.msg_index])
+            self.msg_index += 1
+            # Update the text every 400ms so it finishes right as the main window opens (2.5 seconds)
+            self.after(400, self._cycle_messages)
 # =============================================================================
 #  CENTRALIZED KEYBOARD SHORTCUT MANAGER
 # =============================================================================
@@ -5645,40 +5777,7 @@ def _humanize_sequence(sequence: str) -> str:
     words = {"Control": "Ctrl", "Shift": "Shift", "Delete": "Del", "Escape": "Esc"}
     return "+".join(words.get(p, p.upper() if len(p) == 1 else p) for p in parts)
 
-
 class ShortcutManager:
-    """Single source of truth for every keyboard shortcut in the app --
-    what key combo does what, and in which context.
-
-    Two kinds of registrations:
-      - **global**: the action is identical no matter which page is
-        showing (Ctrl+Q, Ctrl+O, Ctrl+B, F1, ...).
-      - **contextual**: the action depends on which frame is currently
-        active -- this is what makes Ctrl+N mean "New Invoice" on the
-        Dashboard, "New Client" on Clients, and "New Catalog Item" on
-        Catalog, all from one registry instead of scattered isinstance
-        checks.
-
-    Conflict prevention: registering the same key sequence twice for
-    the same scope (two globals, or the same sequence+frame combo
-    twice) raises ValueError immediately, at startup -- so a copy-paste
-    mistake while adding a shortcut fails loudly the moment the app
-    launches, rather than silently shadowing an existing shortcut and
-    only being noticed later as "that key stopped working".
-
-    Every dispatch gets two safety behaviours for free:
-      1. **No firing under an open dialog.** A modal dialog (Settings,
-         PDF viewer, Add Client, ...) owns the keyboard while it's open;
-         otherwise Ctrl+N while "Add Client" is open would pop a second
-         dialog behind the first.
-      2. **No fighting Tk's own bindings.** Ctrl+D normally deletes a
-         character in Entry/Text widgets, and Ctrl+O inserts a newline in
-         Text -- both collide with shortcuts this app wants. install_
-         class_overrides() re-binds those two (widget class, sequence)
-         pairs through this same dispatcher so typing never fights the
-         shortcut sharing its key.
-    """
-
     #: Tk class bindings that would otherwise silently compete with one
     #: of our shortcuts. Only entries that are actually registered below
     #: get overridden -- see install_class_overrides().
@@ -5740,15 +5839,6 @@ class ShortcutManager:
                                      "description": f"{description} ({page})", "group": group})
 
     def register_info(self, display: str, description: str, group: str):
-        """Adds a Shortcuts-reference line for real behaviour that isn't
-        implemented as a single bind_all/bind_class registration --
-        Tab/Shift+Tab field order and Enter-advances-focus are native Tk
-        traversal, and "Esc closes this dialog" is bound locally on each
-        individual dialog rather than centrally. Keeping them in the
-        same reference list (instead of a second hardcoded list inside
-        ShortcutsDialog) means there's still exactly one place that
-        describes every documented shortcut, real bindings and native
-        behaviour alike."""
         self._reference.append({"keys": display, "description": description, "group": group})
 
     def _bind(self, sequence: str):
@@ -5773,16 +5863,6 @@ class ShortcutManager:
 
     # ---- dispatch -------------------------------------------------------- #
     def _dispatch(self, sequence: str, event) -> str:
-        # Safety rule 1: a modal dialog owns the keyboard while it's open.
-        # event.widget is normally a live widget object, but Tk can hand
-        # back something that fails to resolve cleanly in a few edge
-        # cases -- a bare path string if the widget is mid-destroy
-        # (TclError/AttributeError), or, as testing turned up, a
-        # reference into a combobox's internal dropdown popup that
-        # Python's binding can't map back to a widget object (KeyError).
-        # None of that is worth crashing over: if we can't confidently
-        # tell where this event came from, the safe answer is to do
-        # nothing, the same as if a dialog were genuinely focused.
         try:
             if isinstance(event.widget, str) or event.widget.winfo_toplevel() is not self.app:
                 return "break"
@@ -5809,7 +5889,6 @@ class ShortcutManager:
             groups.setdefault(entry["group"], []).append((entry["keys"], entry["description"]))
         return groups
 
-
 class InvoiceApp(ttk.Window):
     def __init__(self):
         cfg = load_config()
@@ -5831,8 +5910,20 @@ class InvoiceApp(ttk.Window):
         self.update() # Force Tkinter to draw the splash screen immediately
 
         self.title(f"{APP_NAME} • {APP_TAGLINE}")
-        self.geometry("1280x800")
+        
+        # --- Size and Centering ---
+        width, height = 1280, 800
+        sw = self.winfo_screenwidth()
+        sh = self.winfo_screenheight()
+        
+        # Calculate the exact center coordinates
+        x = (sw - width) // 2
+        y = (sh - height) // 2
+        
+        self.geometry(f"{width}x{height}+{x}+{y}")
         self.minsize(1080, 680)
+        # --------------------------
+
         try:
             if APP_LOGO_ICO.exists() and sys.platform == "win32":
                 self.iconbitmap(str(APP_LOGO_ICO))
@@ -5858,16 +5949,9 @@ class InvoiceApp(ttk.Window):
             self.splash.destroy()
         self.deiconify() # Reveal the main application window
         self._warn_if_fallback_font()
+
     # ------------------------------------------------------------------ #
     def _warn_if_fallback_font(self):
-        """One-time, non-blocking heads-up if PDF generation is running
-        without the bundled NotoSans font (see register_fonts()). Without
-        this, a missing/corrupt font install fails completely silently --
-        every amount on every PDF would quietly show the wrong character
-        in place of the currency symbol, with nothing telling the user or
-        support anything is wrong. Only shown when the fallback is
-        actually active, so it's invisible to the vast majority of
-        installs where the fonts loaded correctly."""
         if PDF_FONT == "Helvetica":
             Messagebox.show_warning(
                 "Font Files Missing",
@@ -5880,6 +5964,7 @@ class InvoiceApp(ttk.Window):
                 parent=self,
             )
     # ------------------------------------------------------------------ #
+    
     def _build_shell(self):
         self.sidebar = Sidebar(self, self)
         self.sidebar.pack(side="left", fill="y")
@@ -6078,7 +6163,13 @@ class InvoiceApp(ttk.Window):
             frame.on_show(*args)
 
     def show_frame_by_name(self, name: str):
-        mapping = {"DashboardFrame": DashboardFrame, "ClientsFrame": ClientsFrame, "CatalogFrame": CatalogFrame}
+        # Added InvoiceFormFrame to the routing dictionary
+        mapping = {
+            "DashboardFrame": DashboardFrame, 
+            "ClientsFrame": ClientsFrame, 
+            "CatalogFrame": CatalogFrame,
+            "InvoiceFormFrame": InvoiceFormFrame
+        }
         self.show_frame(mapping[name])
 
     def open_settings(self):
