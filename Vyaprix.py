@@ -47,6 +47,8 @@ from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.platypus import Image, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
 # --- 4. Optional & Critical Dependencies ---
+import urllib.parse
+import webbrowser
 
 # PyMuPDF (Required for PDF viewing/manipulation)
 try:
@@ -2687,13 +2689,17 @@ class PDFViewer(tk.Toplevel):
     MIN_ZOOM = 0.4
     MAX_ZOOM = 3.5
 
-    def __init__(self, parent, pdf_path: Path):
+    def __init__(self, parent, pdf_path: Path, invoice_data: Optional[Dict] = None):
         super().__init__(parent)
         self.pdf_path   = pdf_path
+        self.invoice_data = invoice_data
         self.title(f"Preview  —  {pdf_path.name}")
-        self.geometry("740x720")
-        self.minsize(740, 720)
+        
+        # --- Increase width to 900 to prevent button clipping ---
+        self.geometry("900x720")
+        self.minsize(900, 720)
         self.maxsize(1920, 1080)
+        # --------------------------------------------------------
 
         try:
             self.doc = fitz.open(pdf_path)
@@ -2742,11 +2748,17 @@ class PDFViewer(tk.Toplevel):
         self.page_lbl.pack(side="left")
 
         close_btn = ttk.Button(tb, text="✕  Close",  bootstyle="danger",    command=self._close,      width=9)
+        share_btn = ttk.Button(tb, text="📤 Share", bootstyle="info", command=self._open_share, width=9)
         save_btn  = ttk.Button(tb, text="💾  Save",   bootstyle="secondary", command=self._save_copy,  width=9)
         print_btn = ttk.Button(tb, text="🖨  Print",  bootstyle="success",   command=self._print,      width=9)
+
+        # --- PACK ORDER (Right to Left) ---
+        # Packing Close first puts it on the far right edge.
         close_btn.pack(side="right", padx=(4, 0))
+        share_btn.pack(side="right", padx=4)
         save_btn.pack(side="right", padx=4)
         print_btn.pack(side="right", padx=4)
+
         ToolTip(close_btn, "Close this viewer (Esc)")
         ToolTip(save_btn,  "Save a copy of this PDF (Ctrl+E)")
         ToolTip(print_btn, "Print this PDF (Ctrl+P)")
@@ -2765,6 +2777,8 @@ class PDFViewer(tk.Toplevel):
         ttk.Label(self, text="← → or Page Up/Down to navigate  •  Ctrl + / − zoom  •  Ctrl+0 fit  •  "
                              "Ctrl+P print  •  Ctrl+E save  •  Esc close",
                   font=(FONT_FAMILY, 8), bootstyle="secondary").pack(side="bottom", pady=3)
+    def _open_share(self):
+        ShareDialog(self, self.pdf_path, self.invoice_data)
 
     def _on_resize(self, _=None):
         if self._resize_id:
@@ -2782,8 +2796,21 @@ class PDFViewer(tk.Toplevel):
         pix     = page.get_pixmap(matrix=fitz.Matrix(z, z))
         self._img = tk.PhotoImage(data=pix.tobytes("ppm"))
         self.canvas.delete("all")
+        
+        # --- THE FIX: Force background color and draw a shadow/border ---
+        # 1. Force the canvas to a neutral dark gray so ttkbootstrap doesn't make it white
+        self.canvas.configure(bg="#52525B") 
+        
         x = max((cw - pix.width) / 2, 0)
         y = max((ch - pix.height) / 2, 0)
+        
+        # 2. Draw a subtle drop shadow slightly offset to the bottom right
+        self.canvas.create_rectangle(x, y, x + pix.width + 4, y + pix.height + 4, fill="#3f3f46", outline="")
+        
+        # 3. Draw a crisp 1px dark border exactly around where the PDF will go
+        self.canvas.create_rectangle(x-1, y-1, x + pix.width, y + pix.height, outline="#18181b")
+        # ----------------------------------------------------------------
+
         self.canvas.create_image(x, y, anchor="nw", image=self._img)
         self.page_lbl.config(text=f"Page {self.page_idx + 1} / {self.total}")
         self.zoom_lbl.config(text=f"{int(self.zoom * 100)}%")
@@ -2973,6 +3000,109 @@ class PDFViewer(tk.Toplevel):
         self.doc.close()
         self.destroy()
 
+class ShareDialog(tk.Toplevel):
+    """Mini dialog to share the invoice via WhatsApp or default Email client."""
+    
+    def __init__(self, parent, pdf_path: Path, invoice_data: Optional[Dict]):
+        super().__init__(parent)
+        self.pdf_path = pdf_path
+        self.invoice_data = invoice_data or {}
+        
+        self.title("Share Invoice")
+        
+        # --- THE FIX ---
+        self.geometry("420x340")  # Increased width and height to prevent clipping
+        
+        self.resizable(False, False)
+        self.transient(parent)
+        self.grab_set()
+        
+        self._build()
+        self._prefill_data()
+        self.focus_force()
+        self.bind("<Escape>", lambda e: self.destroy())
+
+    def _build(self):
+        pad = ttk.Frame(self, padding=20)
+        pad.pack(fill="both", expand=True)
+
+        ttk.Label(pad, text="📤 Share Invoice", font=(FONT_FAMILY, 14, "bold")).pack(anchor="w", pady=(0, 15))
+
+        # Phone Input
+        ttk.Label(pad, text="WhatsApp Number (with Country Code):", font=(FONT_FAMILY, 9)).pack(anchor="w")
+        self.phone_entry = ttk.Entry(pad)
+        self.phone_entry.pack(fill="x", pady=(2, 10))
+
+        # Email Input
+        ttk.Label(pad, text="Client Email Address:", font=(FONT_FAMILY, 9)).pack(anchor="w")
+        self.email_entry = ttk.Entry(pad)
+        self.email_entry.pack(fill="x", pady=(2, 15))
+
+        # Buttons
+        btn_frame = ttk.Frame(pad)
+        btn_frame.pack(fill="x")
+        
+        wa_btn = ttk.Button(btn_frame, text="💬 WhatsApp", bootstyle="success", command=self._send_whatsapp)
+        wa_btn.pack(side="left", fill="x", expand=True, padx=(0, 5))
+        
+        email_btn = ttk.Button(btn_frame, text="✉️ Email", bootstyle="primary", command=self._send_email)
+        email_btn.pack(side="left", fill="x", expand=True, padx=(5, 0))
+
+        ttk.Label(pad, text="Note: The PDF file path will be copied to your clipboard.\nSimply paste (Ctrl+V) when attaching the file.", 
+                  font=(FONT_FAMILY, 8), bootstyle="secondary", justify="center").pack(pady=(15, 0))
+
+    def _prefill_data(self):
+        contact_info = self.invoice_data.get("client_contact", "")
+        if not contact_info:
+            return
+            
+        # Basic Regex to extract email and phone from free-text contact info
+        email_match = re.search(r'[\w\.-]+@[\w\.-]+', contact_info)
+        if email_match:
+            self.email_entry.insert(0, email_match.group(0))
+            
+        phone_match = re.search(r'\+?\d[\d\s-]{8,}\d', contact_info)
+        if phone_match:
+            # Clean non-digits except +
+            clean_phone = re.sub(r'[^\d+]', '', phone_match.group(0))
+            self.phone_entry.insert(0, clean_phone)
+
+    def _copy_path_to_clipboard(self):
+        self.clipboard_clear()
+        self.clipboard_append(str(self.pdf_path))
+        self.update() # Required for Tkinter clipboard to register
+
+    def _send_whatsapp(self):
+        phone = self.phone_entry.get().strip()
+        if not phone:
+            Messagebox.show_warning("Missing Info", "Please enter a WhatsApp number.", parent=self)
+            return
+            
+        self._copy_path_to_clipboard()
+        
+        inv_num = self.invoice_data.get('invoice_number', 'Invoice')
+        msg = f"Hello! Please find attached {inv_num}. Thank you for your business."
+        safe_msg = urllib.parse.quote(msg)
+        
+        # Clean phone number for URL
+        clean_phone = re.sub(r'[^\d]', '', phone)
+        webbrowser.open(f"https://wa.me/{clean_phone}?text={safe_msg}")
+        self.destroy()
+
+    def _send_email(self):
+        email = self.email_entry.get().strip()
+        if not email:
+            Messagebox.show_warning("Missing Info", "Please enter an email address.", parent=self)
+            return
+            
+        self._copy_path_to_clipboard()
+        
+        inv_num = self.invoice_data.get('invoice_number', 'Invoice')
+        subject = urllib.parse.quote(f"Invoice {inv_num} from {self.invoice_data.get('your_name', 'Us')}")
+        body = urllib.parse.quote(f"Hello,\n\nPlease find attached {inv_num}.\n\nThank you!")
+        
+        webbrowser.open(f"mailto:{email}?subject={subject}&body={body}")
+        self.destroy()
 # =============================================================================
 #  SMALL RECORD DIALOGS  (Client / Catalog Item / Invoice Note)
 # =============================================================================
@@ -3990,8 +4120,18 @@ class DashboardFrame(ttk.Frame):
     def _on_bulk_print_done(self, result: dict):
         self._end_bulk_op()
         paths = result.get("result") or []
+        
         if len(paths) == 1:
-            PDFViewer(self.controller, paths[0])
+            # If exactly one invoice was printed, try to fetch its data for the Share dialog
+            invoice_data = None
+            ids = self._selected_ids()
+            if len(ids) == 1:
+                row = self.db_manager.get_invoice_by_id(ids[0])
+                if row:
+                    invoice_data = dict(row)
+            
+            PDFViewer(self.controller, paths[0], invoice_data=invoice_data)
+            
         elif len(paths) > 1:
             Messagebox.show_info(
                 "Batches Ready",
@@ -4095,7 +4235,10 @@ class DashboardFrame(ttk.Frame):
             row = dict(self.db_manager.get_invoice_by_id(invoice_id))
             payments = self.db_manager.get_payments(invoice_id)
             path = PDFGenerator(row, load_config(), payments=payments).generate()
-            q.put({"status": "success", "kind": "single", "path": path})
+            
+            # --- MODIFY THIS LINE to include "invoice_data": row ---
+            q.put({"status": "success", "kind": "single", "path": path, "invoice_data": row})
+            
         except Exception as exc:
             logger.error(f"PDF generation failed ({invoice_id}): {exc}", exc_info=True)
             q.put({"status": "error", "message": str(exc)})
@@ -4900,10 +5043,32 @@ class InvoiceFormFrame(ttk.Frame):
         chosen = self.client_combo.get()
         for c in self._client_cache:
             if c["name"] == chosen:
+                current_contact = self.client_contact_text.get("1.0", "end-1c").strip()
+                current_gstin = self.client_gstin_entry.get().strip()
+                
+                new_contact = c.get("contact") or ""
+                new_gstin = c.get("gstin") or ""
+                
+                # Check if fields already contain custom data
+                needs_prompt = False
+                if current_contact and current_contact != new_contact:
+                    needs_prompt = True
+                if current_gstin and current_gstin != new_gstin:
+                    needs_prompt = True
+                    
+                # If they do, ask before wiping their manual entry
+                if needs_prompt:
+                    if not Messagebox.yesno(
+                        "Overwrite Contact Info?",
+                        f"Do you want to replace the current contact info and GSTIN with the saved details for {chosen}?",
+                        parent=self.controller
+                    ):
+                        break # User clicked No, leave their typed text alone
+                        
                 self.client_contact_text.delete("1.0", "end")
-                self.client_contact_text.insert("1.0", c.get("contact") or "")
+                self.client_contact_text.insert("1.0", new_contact)
                 self.client_gstin_entry.delete(0, "end")
-                self.client_gstin_entry.insert(0, c.get("gstin") or "")
+                self.client_gstin_entry.insert(0, new_gstin)
                 break
 
     # ------------------------------------------------------------------ #
@@ -5983,18 +6148,15 @@ class InvoiceApp(ttk.Window):
             self.progress_lbl.pack_forget()
 
     def _poll_queue(self):
-        """Drains messages from the single-PDF-view worker (_pdf_worker).
-        Bulk operations (delete/export/print) run through their own
-        BulkProgressDialog, each with its own dedicated queue, rather
-        than this shared one -- keeping a bulk operation's much higher
-        message volume from ever competing with, or being confused for,
-        an unrelated single-PDF-view result."""
         try:
             while True:
                 msg = self.task_queue.get_nowait()
                 self.show_progress(False)
                 if msg["status"] == "success":
-                    PDFViewer(self, msg["path"])
+                    
+                    # --- MODIFY THIS LINE ---
+                    PDFViewer(self, msg["path"], invoice_data=msg.get("invoice_data"))
+                    
                     self.frames[DashboardFrame].on_show()
                 else:
                     Messagebox.show_error("Error", msg.get("message", "An unknown error occurred."))
