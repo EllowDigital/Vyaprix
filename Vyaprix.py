@@ -52,7 +52,7 @@ import webbrowser
 
 # PyMuPDF (Required for PDF viewing/manipulation)
 try:
-    import fitz
+    import pymupdf as fitz
 except ImportError:
     print("CRITICAL: PyMuPDF not installed. Run: pip install PyMuPDF")
     sys.exit(1)
