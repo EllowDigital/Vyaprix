@@ -148,7 +148,8 @@ def _initialize_environment() -> None:
         directory.mkdir(parents=True, exist_ok=True)
 
     # Extract defaults from EXE to Writable paths using strict whitelists
-    expected_assets = ("app_logo.png", "app_logo.ico", "sign.png", "upi_qr.png")
+    # FIXED: Added "logo.png" so the default invoice logo extracts successfully
+    expected_assets = ("app_logo.png", "app_logo.ico", "logo.png", "sign.png", "upi_qr.png")
     _copy_bundled_files(RESOURCE_ASSETS_DIR, ASSETS_DIR, allowed_files=expected_assets)
     
     expected_fonts = ("NotoSans-Regular.ttf", "NotoSans-Bold.ttf")
