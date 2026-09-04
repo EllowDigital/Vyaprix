@@ -1977,6 +1977,16 @@ class PDFGenerator:
             ("LEFTPADDING",(0,0),(-1,-1),6),  ("RIGHTPADDING",(0,0),(-1,-1),6),
         ]))
 
+    def _invoice_needs_payment(self) -> bool:
+        """Whether there's still money owed on this invoice -- the shared
+        "nothing left to pay" gate for every payment-collection element
+        below (QR code, bank/UPI details). True for Unpaid/Partially Paid
+        invoices, or for anything once Settings > Images & Assets' "Always
+        show payment details" override is turned on."""
+        if self.config.get("pdf_settings", {}).get("always_show_qr_code", False):
+            return True
+        return self.data.get("status") in (InvoiceStatus.DUE.value, InvoiceStatus.PARTIAL.value)
+
     def _should_show_qr(self) -> bool:
         """Whether the QR code prints on this invoice.
 
@@ -1986,23 +1996,24 @@ class PDFGenerator:
         appears on invoices that still owe money (Unpaid/Partially
         Paid): there's nothing left to pay on a fully settled invoice,
         so a "scan to pay" code there is just noise. Settings > Images
-        & Assets has an "Always show the QR code" override for anyone
+        & Assets has an "Always show payment details" override for anyone
         who wants it printed regardless of payment status.
         """
         if not self.data.get("show_qr_code") or self.data.get("is_complimentary"):
             return False
-        if self.config.get("pdf_settings", {}).get("always_show_qr_code", False):
-            return True
-        return self.data.get("status") in (InvoiceStatus.DUE.value, InvoiceStatus.PARTIAL.value)
+        return self._invoice_needs_payment()
 
     def _build_payment_lines(self) -> Optional[str]:
         """Composes the configured bank/UPI/payment-notes details (Settings
         > Payment & PDF) into PDF markup, or None if nothing is configured.
-        Deliberately independent of _should_show_qr(): a business that
-        only takes bank transfers (no QR/UPI) should still see its bank
-        details printed. Skipped entirely for complimentary invoices,
-        since there's nothing to pay on those."""
-        if self.data.get("is_complimentary"):
+        Independent of the per-invoice QR toggle/asset -- a business that
+        only takes bank transfers (no QR/UPI) still sees its bank details
+        printed. Still shares _invoice_needs_payment() with the QR check,
+        though, so a fully paid invoice doesn't keep printing "how to pay
+        us" instructions for money that's already been collected. Skipped
+        entirely for complimentary invoices, since there's nothing to pay
+        on those."""
+        if self.data.get("is_complimentary") or not self._invoice_needs_payment():
             return None
         pd = self.config.get("payment_details", {})
         lines = []
@@ -2347,14 +2358,14 @@ class SettingsDialog(tk.Toplevel):
         self._asset_row(t4, "upi_qr_code", "UPI QR Code",          "upi_qr.png")
 
         ttk.Separator(t4, bootstyle="secondary").pack(fill="x", pady=12)
-        self._section(t4, "QR Code Visibility")
+        self._section(t4, "Payment Details Visibility")
         self.always_show_qr_var = tk.BooleanVar()
-        qr_check = ttk.Checkbutton(t4, text="Always show the QR code, even on fully paid invoices",
+        qr_check = ttk.Checkbutton(t4, text="Always show payment details, even on fully paid invoices",
                                     variable=self.always_show_qr_var, bootstyle="round-toggle")
         qr_check.pack(anchor="w")
-        ttk.Label(t4, text="Off by default: the QR code only prints on Unpaid or Partially Paid invoices, "
-                            "since there's nothing left to pay once an invoice is settled. Turn this on to "
-                            "always include it regardless of payment status.",
+        ttk.Label(t4, text="Off by default: the QR code and bank/UPI details only print on Unpaid or "
+                            "Partially Paid invoices, since there's nothing left to pay once an invoice "
+                            "is settled. Turn this on to always include them regardless of payment status.",
                   font=(FONT_FAMILY, 9), bootstyle="secondary", wraplength=540, justify="left").pack(anchor="w", pady=(4, 0))
 
     def _build_data_tab(self, nb):
