@@ -120,13 +120,17 @@ APP_LOGO_ICO: Path     = RESOURCE_ASSETS_DIR / "app_logo.ico"
 # =============================================================================
 #  3. ENVIRONMENT INITIALIZATION
 # =============================================================================
-def _copy_bundled_files(src_dir: Path, dest_dir: Path) -> None:
+def _copy_bundled_files(src_dir: Path, dest_dir: Path, allowed_files: Tuple[str, ...] = None) -> None:
     """Helper method to securely copy bundled files to the writable directory."""
     if not src_dir.exists():
         return
         
     for item in src_dir.iterdir():
         if item.is_file():
+            # Strict whitelist to prevent local dev clutter (DBs, JSONs, old logos) from extracting
+            if allowed_files and item.name not in allowed_files:
+                continue
+                
             dest = dest_dir / item.name
             if not dest.exists():
                 try:
@@ -136,8 +140,6 @@ def _copy_bundled_files(src_dir: Path, dest_dir: Path) -> None:
                     print(f"Failed to copy {item.name}: {e}")
 
 def _initialize_environment() -> None:
-    """Create mutable directories and copy default assets/fonts on first launch."""
-    # 1. Ensure all required writable directories exist
     directories_to_create = (
         DATA_DIR, ASSETS_DIR, DATA_FONTS_DIR, 
         INVOICES_DIR, BATCH_DIR, LOGS_DIR
@@ -145,9 +147,12 @@ def _initialize_environment() -> None:
     for directory in directories_to_create:
         directory.mkdir(parents=True, exist_ok=True)
 
-    # 2. Extract defaults from EXE to Writable paths
-    _copy_bundled_files(RESOURCE_ASSETS_DIR, ASSETS_DIR)
-    _copy_bundled_files(FONTS_DIR, DATA_FONTS_DIR)
+    # ADDED logo.png to the whitelist
+    expected_assets = ("app_logo.png", "app_logo.ico", "logo.png", "sign.png", "upi_qr.png")
+    _copy_bundled_files(RESOURCE_ASSETS_DIR, ASSETS_DIR, allowed_files=expected_assets)
+    
+    expected_fonts = ("NotoSans-Regular.ttf", "NotoSans-Bold.ttf")
+    _copy_bundled_files(FONTS_DIR, DATA_FONTS_DIR, allowed_files=expected_fonts)
 
 # Trigger initialization immediately on module load
 _initialize_environment()
@@ -305,7 +310,7 @@ def get_default_config() -> Dict[str, Any]:
             "bank_name": "", "account_holder_name": "", "account_number": "",
             "ifsc_code": "", "payment_notes": "",
         },
-        "asset_paths":     {"logo": "assets/app_logo.png",    "signature": "assets/sign.png", "upi_qr_code": "assets/upi_qr.png"},
+        "asset_paths":     {"logo": "assets/logo.png",    "signature": "assets/sign.png", "upi_qr_code": "assets/upi_qr.png"},
         "pdf_settings":    {"footer_message": "Generated with Vyaprix • Business Made Smarter.", "always_show_qr_code": False},
         "currency_symbol": "₹",
     }
@@ -2351,7 +2356,8 @@ class SettingsDialog(tk.Toplevel):
                             "so the app keeps working even if you later move or delete the original.",
                   font=(FONT_FAMILY, 9), bootstyle="secondary", wraplength=540, justify="left").pack(anchor="w", pady=(0, 2))
 
-        self._asset_row(t4, "logo",        "Company Logo",         "app_logo.png")
+        # CHANGED: The destination filename is now "logo.png" to prevent overwriting app_logo.png
+        self._asset_row(t4, "logo",        "Company Logo",         "logo.png")
         ttk.Separator(t4, bootstyle="secondary").pack(fill="x", pady=2)
         self._asset_row(t4, "signature",   "Authorized Signature", "sign.png")
         ttk.Separator(t4, bootstyle="secondary").pack(fill="x", pady=2)
