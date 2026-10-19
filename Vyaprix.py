@@ -1,25 +1,12 @@
 # =============================================================================
-#  Vyaprix By EllowLabs  –  Professional Edition v1.5
-#  Complete rewrite: faster data layer, redesigned navigation, payment
-#  history, dedicated client/catalog managers, bulk actions, invoice notes.
+# Vyaprix By EllowLabs – Professional Edition v1.5
+# Python 3.15 – Native Lazy Imports
 # =============================================================================
 
-# --- 1. Standard Library Imports ---
-import csv
-import datetime
-import io
-import json
-import logging
-import os
-import queue
-import re
-import shutil
-import sqlite3
-import subprocess
+# --- Standard Library: Eager Imports ---
 import sys
-import threading
-import time
 import tkinter as tk
+
 from contextlib import closing
 from decimal import Decimal, ROUND_HALF_UP
 from enum import Enum
@@ -29,43 +16,69 @@ from tkinter import filedialog
 from typing import Any, Callable, Dict, List, Optional, Tuple, Type
 from xml.sax.saxutils import escape as xml_escape
 
-# --- 2. Third-Party GUI Imports (ttkbootstrap) ---
+# --- Standard Library: Lazy Imports ---
+lazy import csv
+lazy import datetime
+lazy import io
+lazy import json
+lazy import logging
+lazy import os
+lazy import queue
+lazy import re
+lazy import shutil
+lazy import sqlite3
+lazy import subprocess
+lazy import threading
+lazy import time
+lazy import urllib.parse
+lazy import webbrowser
+
+# --- GUI Dependencies ---
 import ttkbootstrap as ttk
 from ttkbootstrap.dialogs import Messagebox as _TTKMessagebox
 from ttkbootstrap.widgets import DateEntry
 from ttkbootstrap.widgets.scrolled import ScrolledFrame
 
-# --- 3. Third-Party Document Generation (ReportLab) ---
-from reportlab.lib import colors
-from reportlab.lib.enums import TA_CENTER, TA_RIGHT
-from reportlab.lib.fonts import addMapping
-from reportlab.lib.pagesizes import A4
-from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
-from reportlab.lib.units import cm
-from reportlab.pdfbase import pdfmetrics
-from reportlab.pdfbase.ttfonts import TTFont
-from reportlab.platypus import Image, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+# --- ReportLab: Lazy Imports ---
+lazy from reportlab.lib import colors
+lazy from reportlab.lib.enums import TA_CENTER, TA_RIGHT
+lazy from reportlab.lib.fonts import addMapping
+lazy from reportlab.lib.pagesizes import A4
+lazy from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+lazy from reportlab.lib.units import cm
+lazy from reportlab.pdfbase import pdfmetrics
+lazy from reportlab.pdfbase.ttfonts import TTFont
+lazy from reportlab.platypus import (
+    Image,
+    Paragraph,
+    SimpleDocTemplate,
+    Spacer,
+    Table,
+    TableStyle,
+)
 
-# --- 4. Optional & Critical Dependencies ---
-import urllib.parse
-import webbrowser
-
-# PyMuPDF (Required for PDF viewing/manipulation)
+# --- PyMuPDF: Required Dependency ---
 try:
     import pymupdf as fitz
 except ImportError:
-    print("CRITICAL: PyMuPDF not installed. Run: pip install PyMuPDF")
-    sys.exit(1)
+    try:
+        import fitz
+    except ImportError:
+        print("CRITICAL: PyMuPDF not installed. Run: pip install PyMuPDF")
+        sys.exit(1)
 
-# Python-Barcode (Optional)
+# --- Python-Barcode: Optional Dependency ---
 try:
     import barcode
     from barcode.writer import ImageWriter
+
     BARCODE_AVAILABLE = True
 except ImportError:
+    barcode = None
+    ImageWriter = None
     BARCODE_AVAILABLE = False
     print("WARNING: python-barcode not installed. Barcodes will be skipped.")
-
+    
 # =============================================================================
 #  1. APPLICATION METADATA
 # =============================================================================
