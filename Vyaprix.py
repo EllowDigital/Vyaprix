@@ -84,8 +84,8 @@ except ImportError:
 # =============================================================================
 APP_NAME: str          = "Vyaprix"
 APP_VERSION: str       = "v1.5"
-APP_BUILD_VERSION: str = "1.5.0"
-APP_RELEASE_DATE: str  = "28 July 2026"
+APP_BUILD_VERSION: str = "1.5.2"
+APP_RELEASE_DATE: str  = "22 October 2026"
 APP_TAGLINE: str       = "Business Made Smarter."
 
 APP_ATTRIBUTION: str = (
@@ -6330,3 +6330,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
