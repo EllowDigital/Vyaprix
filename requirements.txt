@@ -1,0 +1,6 @@
+# Core third-party dependencies for Vyaprix.
+# Use a Python interpreter compatible with the native lazy-import syntax in Vyaprix.py.
+ttkbootstrap>=1.10
+reportlab>=4.0
+PyMuPDF>=1.23
+Pillow>=10.0
