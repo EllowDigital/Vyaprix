@@ -7,7 +7,7 @@
 #
 #  Needs:  Python 3.15+, PySide6 (with QtPdf + QtPrintSupport), reportlab, pypdf
 #          python-barcode is optional (invoices simply print without a barcode)
-#  Run:    python Vyaprix_PySide6.py
+#  Run:    python Vyaprix.py
 # =============================================================================
 
 # --- Standard Library: Eager Imports ---
@@ -106,8 +106,8 @@ except ImportError:
 # =============================================================================
 APP_NAME: str          = "Vyaprix"
 APP_VERSION: str       = "v1.8"
-APP_BUILD_VERSION: str = "1.8.1"
-APP_RELEASE_DATE: str  = "7 November 2026"
+APP_BUILD_VERSION: str = "1.8.2"
+APP_RELEASE_DATE: str = "November 8, 2026"
 APP_TAGLINE: str       = "Business Made Smarter."
 
 APP_ATTRIBUTION: str = (
