@@ -1,34 +1,22 @@
 # =============================================================================
-#  Vyaprix By EllowLabs  –  Professional Edition v1.8   (PySide6 Edition)
+#  Vyaprix By EllowLabs  -  Professional Edition v1.8   (PySide6 Edition)
+#  Python 3.15  -  Native Lazy Imports (PEP 810)
 #
-#  GUI layer rebuilt on PySide6/Qt. The data layer (DatabaseManager), PDF
-#  generation (PDFGenerator), configuration, and every validation/formatting
-#  helper below are carried over from the Tkinter build UNCHANGED -- none of
-#  it ever imported tkinter in the first place, so none of it needed to
-#  change to move GUI toolkits.
+#  Single-file desktop invoicing application: PySide6 (Qt 6) user interface,
+#  SQLite storage, ReportLab PDF generation, Qt's own PDF viewer and printing.
 #
-#  ---------------------------------------------------------------------
-#  PREVIEW BUILD -- every screen, dialog and shortcut of the Tkinter
-#  edition is converted and tested; the final clean-up pass is still
-#  pending.
-#  ---------------------------------------------------------------------
+#  Needs:  Python 3.15+, PySide6 (with QtPdf + QtPrintSupport), reportlab, pypdf
+#          python-barcode is optional (invoices simply print without a barcode)
+#  Run:    python Vyaprix.py
 # =============================================================================
 
-# --- 1. Standard Library Imports ---
-import csv
-import datetime
-import io
-import json
+# --- Standard Library: Eager Imports ---
+# (logging and re are already used while this file is still loading -- the log file is opened and the
+#  validation patterns are compiled -- so making them lazy would gain nothing.)
 import logging
-import os
-import queue
 import re
-import shutil
-import sqlite3
-import subprocess
 import sys
-import threading
-import time
+
 from contextlib import closing
 from decimal import Decimal, ROUND_HALF_UP
 from enum import Enum
@@ -37,93 +25,89 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple, Type
 from xml.sax.saxutils import escape as xml_escape
 
-# --- 2. GUI Imports (PySide6 / Qt) ---
+# --- Standard Library: Lazy Imports ---
+lazy import csv
+lazy import datetime
+lazy import io
+lazy import json
+lazy import os
+lazy import queue
+lazy import shutil
+lazy import sqlite3
+lazy import subprocess
+lazy import tempfile
+lazy import threading
+lazy import time
+lazy import urllib.parse
+lazy import webbrowser
+
+# --- GUI Dependencies (PySide6 / Qt) ---
 from PySide6.QtCore import (
-    Qt, QEasingCurve, QEvent, QObject, QPropertyAnimation, QRegularExpression,
-    QSize, QTimer, Signal,
+    Qt, QCoreApplication, QDate, QEvent, QItemSelectionModel, QLocale, QObject, QPoint, QPointF,
+    QRect, QRectF, QRegularExpression, QSize, QStandardPaths, QStringListModel, QTimer, QUrl,
+    Signal,
 )
 from PySide6.QtGui import (
-    QAction, QColor, QFont, QIcon, QKeySequence, QPixmap,
+    QBrush, QColor, QDesktopServices, QFont, QFontDatabase, QFontMetrics, QGuiApplication, QIcon,
+    QImage, QKeySequence, QPainter, QPainterPath, QPalette, QPen, QPixmap,
     QRegularExpressionValidator, QShortcut, QValidator,
 )
 from PySide6.QtWidgets import (
-    QApplication, QCheckBox, QComboBox, QDialog, QFileDialog, QFrame,
-    QGridLayout, QHBoxLayout, QLabel, QLineEdit, QMainWindow, QMessageBox,
-    QProgressBar, QPushButton, QScrollArea, QSizePolicy, QSpacerItem,
-    QPlainTextEdit, QStackedWidget, QTabWidget, QTextEdit, QVBoxLayout, QWidget,
+    QAbstractItemView, QAbstractScrollArea, QAbstractSpinBox, QApplication, QCheckBox, QComboBox,
+    QCompleter, QDateEdit, QDialog, QFileDialog, QFormLayout, QFrame, QGridLayout, QHBoxLayout,
+    QHeaderView, QLabel, QLayout, QLineEdit, QMainWindow, QMenu, QMessageBox, QPlainTextEdit,
+    QProgressBar, QPushButton, QScrollArea, QSizePolicy, QStackedWidget, QTabWidget, QTableWidget,
+    QTableWidgetItem, QTableWidgetSelectionRange, QToolButton, QVBoxLayout, QWidget,
 )
 
-# @@EXTRA_IMPORTS@@
-from PySide6.QtWidgets import QDialog, QVBoxLayout, QLabel, QTextEdit, QPushButton
-import tempfile
-from PySide6.QtCore import QPointF, QRectF
-from PySide6.QtGui import QBrush, QImage, QPainter, QPainterPath, QPalette, QPen
-from PySide6.QtCore import QDate, QItemSelectionModel, QLocale, QStandardPaths
-from PySide6.QtWidgets import QAbstractScrollArea, QAbstractSpinBox, QDateEdit, QDialog, QTableWidget
-from PySide6.QtCore import QPoint, QRect, QUrl
-from PySide6.QtGui import QDesktopServices, QGuiApplication, QImage, QPainter, QPen
-from PySide6.QtWidgets import QAbstractScrollArea, QLayout
-from PySide6.QtCore import QPoint
-from PySide6.QtGui import QFontDatabase
-from PySide6.QtWidgets import (
-    QAbstractItemView, QHeaderView, QMenu, QPlainTextEdit, QTableWidget, QTableWidgetItem,
+# --- ReportLab: Lazy Imports ---
+lazy from reportlab.lib import colors
+lazy from reportlab.lib.enums import TA_CENTER, TA_RIGHT
+lazy from reportlab.lib.fonts import addMapping
+lazy from reportlab.lib.pagesizes import A4
+lazy from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+lazy from reportlab.lib.units import cm
+lazy from reportlab.pdfbase import pdfmetrics
+lazy from reportlab.pdfbase.ttfonts import TTFont
+lazy from reportlab.platypus import (
+    Image,
+    Paragraph,
+    SimpleDocTemplate,
+    Spacer,
+    Table,
+    TableStyle,
 )
-from PySide6.QtGui import QBrush
-from PySide6.QtWidgets import (
-    QAbstractItemView, QComboBox, QHeaderView, QMenu, QTableWidgetItem, QTableWidgetSelectionRange,
-)
-from PySide6.QtCore import QCoreApplication, QPointF, QRectF, QStringListModel
-from PySide6.QtGui import QPainter, QPen
-from PySide6.QtWidgets import QAbstractSpinBox, QCompleter, QToolButton
-from PySide6.QtWidgets import QFormLayout, QLayout
-from PySide6.QtGui import QGuiApplication
 
-# --- 3. Third-Party Document Generation (ReportLab) -- unchanged ---
-from reportlab.lib import colors
-from reportlab.lib.enums import TA_CENTER, TA_RIGHT
-from reportlab.lib.fonts import addMapping
-from reportlab.lib.pagesizes import A4
-from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
-from reportlab.lib.units import cm
-from reportlab.pdfbase import pdfmetrics
-from reportlab.pdfbase.ttfonts import TTFont
-from reportlab.platypus import Image, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
-
-# --- 4. Optional & Critical Dependencies ---
-import urllib.parse
-import webbrowser
-
-# PDF merging (bulk print). CHANGED FROM THE TKINTER BUILD: that version used
-# PyMuPDF (fitz) here. This edition uses pypdf instead, for two reasons: (1)
-# it's a pure-Python, purpose-built PDF *manipulation* library (merging is
-# exactly its job, where PyMuPDF is really a rendering/graphics engine being
-# used for one narrow task), and (2) PDF *viewing* -- fitz's other job in the
-# old build -- is being replaced by Qt's own PySide6.QtPdf module, so once
-# that lands, fitz drops out of the dependency list entirely. See merge_pdfs()
-# below and the PDFViewer notes in the chat message.
+# --- pypdf: needed for bulk printing (merging PDFs) ---
+# Qt's own QtPdf shows the PDFs; pypdf only merges them. A missing pypdf disables bulk printing only.
 try:
     from pypdf import PdfWriter
     PYPDF_AVAILABLE = True
 except ImportError:
+    PdfWriter = None
     PYPDF_AVAILABLE = False
     print("WARNING: pypdf not installed. Bulk-print PDF merging will be skipped (pip install pypdf).")
 
-# Python-Barcode (Optional) -- unchanged, has nothing to do with the GUI toolkit.
+# --- Python-Barcode: Optional Dependency ---
 try:
     import barcode
     from barcode.writer import ImageWriter
+
     BARCODE_AVAILABLE = True
 except ImportError:
+    barcode = None
+    ImageWriter = None
     BARCODE_AVAILABLE = False
     print("WARNING: python-barcode not installed. Barcodes will be skipped.")
+
 
 # =============================================================================
 #  1. APPLICATION METADATA
 # =============================================================================
 APP_NAME: str          = "Vyaprix"
 APP_VERSION: str       = "v1.8"
-APP_BUILD_VERSION: str = "1.8.0"
-APP_RELEASE_DATE: str  = "05 November 2026"
+APP_BUILD_VERSION: str = "1.8.2"
+APP_RELEASE_DATE: str = "November 8, 2026"
 APP_TAGLINE: str       = "Business Made Smarter."
 
 APP_ATTRIBUTION: str = (
@@ -132,6 +116,7 @@ APP_ATTRIBUTION: str = (
     "Published by EllowDigital\n"
     "© 2026 EllowDigital. All Rights Reserved."
 )
+
 
 # =============================================================================
 #  2. SYSTEM PATHS & DIRECTORIES
@@ -142,18 +127,31 @@ def _resource_root() -> Path:
         return Path(sys._MEIPASS)
     return Path(__file__).resolve().parent
 
+
 # Read-Only paths (inside the compiled EXE)
 RESOURCE_DIR: Path        = _resource_root()
 RESOURCE_ASSETS_DIR: Path = RESOURCE_DIR / "assets"
 FONTS_DIR: Path           = RESOURCE_DIR / "fonts"
 
+
+def _program_data_root() -> Path:
+    """Windows: the shared Public folder, exactly where the Tkinter build kept its data. Elsewhere
+    (e.g. developing on macOS or Linux) a folder in the user's home, instead of a stray 'C:\\Users\\Public'
+    directory inside the current folder."""
+    if public := os.environ.get("PUBLIC"):
+        return Path(public)
+    if sys.platform == "win32":
+        return Path(r"C:\Users\Public")
+    return Path.home() / ".local" / "share"
+
+
 # Mutable application state mapped to Windows ProgramData
-PROGRAM_DATA_DIR: Path = Path(os.environ.get("PUBLIC", r"C:\Users\Public"))
+PROGRAM_DATA_DIR: Path = _program_data_root()
 DATA_DIR: Path         = PROGRAM_DATA_DIR / "EllowDigital" / "Vyaprix"
 
 # Writable subdirectories
 ASSETS_DIR: Path       = DATA_DIR / "assets"
-DATA_FONTS_DIR: Path   = DATA_DIR / "fonts"     
+DATA_FONTS_DIR: Path   = DATA_DIR / "fonts"
 INVOICES_DIR: Path     = DATA_DIR / "invoices"
 BATCH_DIR: Path        = INVOICES_DIR / "_batches"
 PRINT_BATCH_SIZE: int  = 100  # bulk print merges PDFs in groups of this size -- see DashboardFrame._bulk_print_work
@@ -167,6 +165,7 @@ LOG_FILE: Path         = LOGS_DIR / "Vyaprix.log"
 # UI Specific Assets (Read directly from EXE for speed)
 APP_LOGO_PNG: Path     = RESOURCE_ASSETS_DIR / "app_logo.png"
 APP_LOGO_ICO: Path     = RESOURCE_ASSETS_DIR / "app_logo.ico"
+
 
 # =============================================================================
 #  3. ENVIRONMENT INITIALIZATION
@@ -189,6 +188,7 @@ def _copy_bundled_files(src_dir: Path, dest_dir: Path, allowed_files: Tuple[str,
                 except Exception as e:
                     print(f"Failed to copy {item.name}: {e}")
 
+
 def _initialize_environment() -> None:
     """Create mutable directories and copy default assets/fonts on first launch."""
     directories_to_create = (
@@ -206,99 +206,13 @@ def _initialize_environment() -> None:
     expected_fonts = ("NotoSans-Regular.ttf", "NotoSans-Bold.ttf")
     _copy_bundled_files(FONTS_DIR, DATA_FONTS_DIR, allowed_files=expected_fonts)
 
+
 # Trigger initialization immediately on module load
 _initialize_environment()
+
+
 # =============================================================================
-#  4. UI CONSTANTS & FORMATTING
-# =============================================================================
-FONT_FAMILY: str         = "Segoe UI"      # Qt silently falls back to the platform default if this font is absent
-DB_DATE_FORMAT: str      = "%Y-%m-%d"
-DISPLAY_DATE_FORMAT: str = "%d %b %Y"
-PAYMENT_MODES: List[str] = ['Cash', 'UPI', 'Bank Transfer', 'Card', 'Cheque', 'Other']
-
-# Regex to safely sanitize invoice numbers before converting them to PDF filenames.
-# Prevents path traversal and Windows filesystem crashes. Unchanged.
-INVALID_FILENAME_CHARS: re.Pattern = re.compile(r'[\\/:*?"<>|]')
-
-# One source of truth for "what color is this status" -- used for the
-# Dashboard table's row colouring, the invoice-form status badge, and the
-# PDF watermark alike. The Tkinter build kept a SECOND dict (STATUS_BOOTSTYLE)
-# mapping the same five statuses to ttkbootstrap style names, because
-# Treeview tags and ttk "bootstyle" widgets needed color expressed two
-# different ways. Qt widgets are all coloured through the one QSS/property
-# mechanism (see set_role() below), so that second mapping has nothing left
-# to point at and is retired -- status colour now lives in exactly one
-# place instead of two that could quietly drift apart.
-STATUS_BADGE: Dict[str, Dict[str, str]] = {
-    "PAID":          {"foreground": "#10B981", "background": ""},  # Soft Green
-    "DUE":           {"foreground": "#EF4444", "background": ""},  # Soft Red
-    "PARTIAL":       {"foreground": "#F59E0B", "background": ""},  # Orange/Amber
-    "OVERPAID":      {"foreground": "#8B5CF6", "background": ""},  # Violet -- distinct from "Paid" green so an overpayment stands out
-    "COMPLIMENTARY": {"foreground": "#3B82F6", "background": ""},  # Blue
-}
-
-STATUS_DISPLAY_LABELS: Dict[str, str] = {
-    "Due": "UNPAID", "Partial": "PARTIALLY PAID", "Paid": "PAID",
-    "Overpaid": "OVERPAID", "Complimentary": "COMPLIMENTARY",
-}
-
-
-class Messagebox:
-    """Static helpers matching the exact call shape this app already uses
-    everywhere -- title first, then message, an optional parent= kwarg,
-    and real booleans back from confirmation dialogs -- so every existing
-    call site (`Messagebox.show_error("Oops", "...", parent=self)`) keeps
-    working completely unchanged. Only the implementation is new: QMessageBox
-    instead of ttkbootstrap's dialogs."""
-
-    @staticmethod
-    def show_info(title, message, *args, parent=None, **kwargs):
-        QMessageBox.information(parent, title, message)
-
-    @staticmethod
-    def show_warning(title, message, *args, parent=None, **kwargs):
-        QMessageBox.warning(parent, title, message)
-
-    @staticmethod
-    def show_error(title, message, *args, parent=None, **kwargs):
-        QMessageBox.critical(parent, title, message)
-
-    @staticmethod
-    def show_question(title, message, *args, parent=None, **kwargs):
-        return QMessageBox.question(parent, title, message)
-
-    @staticmethod
-    def ok(title, message, *args, parent=None, **kwargs):
-        QMessageBox.information(parent, title, message)
-
-    @staticmethod
-    def okcancel(title, message, *args, parent=None, **kwargs) -> bool:
-        """True only if the user actually clicked OK."""
-        result = QMessageBox.question(
-            parent, title, message,
-            QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
-            QMessageBox.StandardButton.Cancel,
-        )
-        return result == QMessageBox.StandardButton.Ok
-
-    @staticmethod
-    def yesno(title, message, *args, parent=None, **kwargs) -> bool:
-        """True only if the user actually clicked Yes."""
-        result = QMessageBox.question(
-            parent, title, message,
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
-        )
-        return result == QMessageBox.StandardButton.Yes
-
-class InvoiceStatus(Enum):
-    PAID          = "Paid"
-    DUE           = "Due"
-    PARTIAL       = "Partial"
-    OVERPAID      = "Overpaid"
-    COMPLIMENTARY = "Complimentary"
-# =============================================================================
-#  LOGGING
+#  4. LOGGING
 # =============================================================================
 logging.basicConfig(
     level=logging.INFO,
@@ -310,9 +224,13 @@ logging.basicConfig(
         logging.StreamHandler(),
     ],
 )
+
+
 logger = logging.getLogger(__name__)
+
+
 # =============================================================================
-#  FONTS
+#  5. PDF FONTS
 # =============================================================================
 def register_fonts() -> str:
     for font_dir in (DATA_FONTS_DIR, FONTS_DIR):
@@ -336,10 +254,69 @@ def register_fonts() -> str:
     )
     return "Helvetica"
 
+
 PDF_FONT = register_fonts()
+
+
 # =============================================================================
-#  CONFIGURATION
+#  6. UI CONSTANTS & FORMATTING
 # =============================================================================
+FONT_FAMILY: str         = "Segoe UI"      # Qt silently falls back to the platform default if this font is absent
+DB_DATE_FORMAT: str      = "%Y-%m-%d"
+DISPLAY_DATE_FORMAT: str = "%d %b %Y"
+PAYMENT_MODES: List[str] = ['Cash', 'UPI', 'Bank Transfer', 'Card', 'Cheque', 'Other']
+
+# Regex to safely sanitize invoice numbers before converting them to PDF filenames.
+# Prevents path traversal and Windows filesystem crashes. Unchanged.
+INVALID_FILENAME_CHARS: re.Pattern = re.compile(r'[\\/:*?"<>|]')
+
+# The Dashboard table colours each row's text from STATUS_BADGE (a hex foreground per status). The invoice
+# form's status badge takes a theme *tone* instead (STATUS_TONES below -- the Tk build's ttkbootstrap
+# STATUS_BOOTSTYLE), so that it follows the active theme. The PDF watermark keeps its own palette in
+# PDFGenerator._apply_watermark (the same hues: a printed page never follows the UI theme).
+STATUS_BADGE: Dict[str, Dict[str, str]] = {
+    "PAID":          {"foreground": "#10B981", "background": ""},  # Soft Green
+    "DUE":           {"foreground": "#EF4444", "background": ""},  # Soft Red
+    "PARTIAL":       {"foreground": "#F59E0B", "background": ""},  # Orange/Amber
+    "OVERPAID":      {"foreground": "#8B5CF6", "background": ""},  # Violet -- distinct from "Paid" green so an overpayment stands out
+    "COMPLIMENTARY": {"foreground": "#3B82F6", "background": ""},  # Blue
+}
+
+STATUS_DISPLAY_LABELS: Dict[str, str] = {
+    "Due": "UNPAID", "Partial": "PARTIALLY PAID", "Paid": "PAID",
+    "Overpaid": "OVERPAID", "Complimentary": "COMPLIMENTARY",
+}
+
+#: ttkbootstrap "bootstyle" of the status badge  ->  theme tone (the Tk build's STATUS_BOOTSTYLE)
+STATUS_TONES: Dict[str, str] = {
+    "Paid": "success", "Due": "danger", "Partial": "warning", "Overpaid": "info", "Complimentary": "info",
+}
+
+
+class InvoiceStatus(Enum):
+    PAID          = "Paid"
+    DUE           = "Due"
+    PARTIAL       = "Partial"
+    OVERPAID      = "Overpaid"
+    COMPLIMENTARY = "Complimentary"
+
+
+# =============================================================================
+#  7. CONFIGURATION
+# =============================================================================
+# Sample values earlier builds pre-filled as *defaults*. They are not real business details, so they
+# must never reach a customer's invoice: new installs start with these fields empty, old configs are
+# cleaned on load, and the PDF generator ignores them even if one slips through.
+_SAMPLE_GSTIN: str = "22AAAAA0000A1Z5"
+_SAMPLE_UPI_ID: str = "yourupi@bank"
+
+
+def _real_value(value: Any, sample: str) -> str:
+    """`value` trimmed -- or "" when it is empty or just the sample text an older build pre-filled."""
+    text = str(value or "").strip()
+    return "" if text.casefold() == sample.casefold() else text
+
+
 def get_default_config() -> Dict[str, Any]:
     return {
         "theme": "litera",
@@ -349,9 +326,9 @@ def get_default_config() -> Dict[str, Any]:
             "state": "", "pin_code": "",
             "contact_info": "",
         },
-        "company_details": {"name": APP_NAME, "description": APP_TAGLINE, "gstin": "22AAAAA0000A1Z5"},
+        "company_details": {"name": APP_NAME, "description": APP_TAGLINE, "gstin": ""},
         "payment_details": {
-            "upi_id": "yourupi@bank", "payment_terms": "Due upon receipt",
+            "upi_id": "", "payment_terms": "Due upon receipt",
             "bank_name": "", "account_holder_name": "", "account_number": "",
             "ifsc_code": "", "payment_notes": "",
         },
@@ -361,11 +338,21 @@ def get_default_config() -> Dict[str, Any]:
         "currency_symbol": "₹",
     }
 
+
 def _migrate_legacy_business_identity(config: Dict[str, Any]) -> bool:
-  
+    """Upgrades an older config in place; True if anything changed (so the caller saves it)."""
     ud   = config.get("user_details", {})
     comp = config.setdefault("company_details", {})
+    pay  = config.setdefault("payment_details", {})
     changed = False
+
+    # The sample GSTIN / UPI ID older builds pre-filled were never the user's own details.
+    if comp.get("gstin") and not _real_value(comp.get("gstin"), _SAMPLE_GSTIN):
+        comp["gstin"] = ""
+        changed = True
+    if pay.get("upi_id") and not _real_value(pay.get("upi_id"), _SAMPLE_UPI_ID):
+        pay["upi_id"] = ""
+        changed = True
 
     legacy_firm = (ud.get("firm_name") or "").strip()
     if legacy_firm and (not comp.get("name") or comp.get("name") == APP_NAME):
@@ -373,12 +360,12 @@ def _migrate_legacy_business_identity(config: Dict[str, Any]) -> bool:
         changed = True
 
     legacy_gst = (ud.get("gst_number") or "").strip()
-    default_gstin = get_default_config()["company_details"]["gstin"]
-    if legacy_gst and (not comp.get("gstin") or comp.get("gstin") == default_gstin):
+    if legacy_gst and not comp.get("gstin"):
         comp["gstin"] = legacy_gst
         changed = True
 
     return changed
+
 
 def load_config() -> Dict[str, Any]:
     if not CONFIG_FILE.exists():
@@ -396,14 +383,36 @@ def load_config() -> Dict[str, Any]:
                     for sk, sv in v.items():
                         data[k].setdefault(sk, sv)
             if _migrate_legacy_business_identity(data):
-                _save_config_raw(data)
+                try:
+                    _save_config_raw(data)
+                except OSError as exc:      # the upgrade is re-applied on the next start; never discard the loaded settings
+                    logger.warning("Could not save the upgraded settings: %s", exc)
             return data
     except Exception:
         return get_default_config()
 
+
 def _save_config_raw(data: Dict[str, Any]):
+    """Writes config.json through a temporary file and os.replace(), so a crash or power cut part-way
+    through a save can never leave a truncated (unreadable) settings file behind."""
+    tmp = CONFIG_FILE.with_name(CONFIG_FILE.name + ".tmp")
+    try:
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(data, fh, indent=4)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, CONFIG_FILE)
+        return
+    except OSError:
+        pass                                # e.g. the file is briefly locked by a virus scan: plain write below
+    finally:
+        try:
+            tmp.unlink(missing_ok=True)     # nothing left to remove after a successful replace
+        except OSError:
+            pass
     with open(CONFIG_FILE, "w", encoding="utf-8") as fh:
         json.dump(data, fh, indent=4)
+
 
 def save_config(data: Dict[str, Any]):
     _save_config_raw(data)
@@ -411,10 +420,13 @@ def save_config(data: Dict[str, Any]):
     CONFIG          = data
     CURRENCY_SYMBOL = data.get("currency_symbol", "₹")
 
+
 CONFIG          = load_config()
 CURRENCY_SYMBOL = CONFIG.get("currency_symbol", "₹")
+
+
 # =============================================================================
-#  HELPERS
+#  8. FORMATTING & VALIDATION HELPERS
 # =============================================================================
 def parse_date(date_str: Optional[str], in_fmt: str, out_fmt: str) -> str:
     if not date_str:
@@ -423,6 +435,7 @@ def parse_date(date_str: Optional[str], in_fmt: str, out_fmt: str) -> str:
         return datetime.datetime.strptime(date_str, in_fmt).strftime(out_fmt)
     except (ValueError, TypeError):
         return date_str
+
 
 def fmt_money(value: Any) -> str:
     try:
@@ -433,30 +446,43 @@ def fmt_money(value: Any) -> str:
         amount = 0.0
     return f"{CURRENCY_SYMBOL}{amount:,.2f}"
 
+
+def like_pattern(text: str) -> str:
+    """'%text%' for a SQL `LIKE ? ESCAPE '\\'` search in which what the user typed is matched
+    literally: a typed %, _ or \\ is an ordinary character, not a wildcard (searching "50%"
+    used to match every row that merely contained "50")."""
+    escaped = str(text).replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return f"%{escaped}%"
+
+
 _CENTS = Decimal("0.01")
+
 
 def _round2(value: Any) -> Decimal:
     if isinstance(value, Decimal):
         return value.quantize(_CENTS, rounding=ROUND_HALF_UP)
     return Decimal(str(value or 0)).quantize(_CENTS, rounding=ROUND_HALF_UP)
 
+
 def safe_float(value: Any, fallback: float = 0.0) -> float:
     try:
         return float(value or 0)
     except (TypeError, ValueError):
         return fallback
-# =============================================================================
-#  VALIDATION HELPERS  (pure logic -- unchanged from the Tkinter build)
-# =============================================================================
+
+
 EMAIL_FORMAT_PATTERN = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]{2,}$")
 GSTIN_FORMAT_PATTERN = re.compile(r"^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][1-9A-Z]Z[0-9A-Z]$")
 PHONE_FORMAT_PATTERN = re.compile(r"^[+]?[\d\s().-]+$")
 
+
 def is_valid_email(value: str) -> bool:
     return bool(EMAIL_FORMAT_PATTERN.match(value.strip()))
 
+
 def is_valid_gstin(value: str) -> bool:
     return bool(GSTIN_FORMAT_PATTERN.match(value.strip().upper()))
+
 
 def is_valid_phone(value: str) -> bool:
     value = value.strip()
@@ -465,907 +491,13 @@ def is_valid_phone(value: str) -> bool:
     digit_count = sum(ch.isdigit() for ch in value)
     return 7 <= digit_count <= 15
 
+
 def safe_markup(value: Any) -> str:
     """Escape user-supplied text before it's embedded in ReportLab Paragraph
     strings, which parse a small XML/HTML-like markup subset. Unchanged --
     this is PDF generation logic and has nothing to do with the GUI toolkit."""
     return xml_escape(str(value or ""))
 
-
-# =============================================================================
-#  NUMERIC-ENTRY VALIDATION  (Qt equivalents of restrict_entry_to_decimal /
-#  restrict_entry_to_digits / format_entry_as_decimal_on_blur)
-# =============================================================================
-class _DecimalValidator(QValidator):
-    """Allows only a non-negative decimal number with at most
-    `max_decimal_places` digits after the point, live as the user types.
-    Applied via QLineEdit.setValidator() -- Qt's equivalent of the Tkinter
-    build's `entry.configure(validate="key", validatecommand=...)`."""
-    def __init__(self, max_decimal_places: int = 2, parent=None):
-        super().__init__(parent)
-        self._pattern = re.compile(r"^\d*\.?\d*$")
-        self._max_places = max_decimal_places
-
-    def validate(self, text: str, pos: int):
-        if text == "":
-            return QValidator.State.Acceptable, text, pos
-        if not self._pattern.match(text) or len(text.partition(".")[2]) > self._max_places:
-            return QValidator.State.Invalid, text, pos
-        return QValidator.State.Acceptable, text, pos
-
-
-def restrict_to_decimal(line_edit: QLineEdit, max_decimal_places: int = 2) -> QLineEdit:
-    line_edit.setValidator(_DecimalValidator(max_decimal_places, line_edit))
-    return line_edit
-
-
-def restrict_to_digits(line_edit: QLineEdit, max_length: Optional[int] = None) -> QLineEdit:
-    if max_length:
-        line_edit.setMaxLength(max_length)
-    line_edit.setValidator(QRegularExpressionValidator(QRegularExpression(r"^\d*$"), line_edit))
-    return line_edit
-
-
-class _BlurFormatFilter(QObject):
-    """Reformats a field to a fixed number of decimal places the moment it
-    loses focus (e.g. "5" -> "5.00"). QLineEdit has no del <FocusOut> event
-    the way a Tk Entry does, so this uses an event filter instead -- one
-    small object per field, parented to the field so Qt cleans it up
-    automatically when the field is destroyed."""
-    def __init__(self, places: int, parent=None):
-        super().__init__(parent)
-        self.places = places
-
-    def eventFilter(self, obj, event):
-        if event.type() == QEvent.Type.FocusOut:
-            current = obj.text()
-            formatted = f"{safe_float(current):.{self.places}f}"
-            if formatted != current:
-                obj.setText(formatted)
-        return False
-
-
-def format_as_decimal_on_blur(line_edit: QLineEdit, places: int = 2) -> QLineEdit:
-    line_edit.installEventFilter(_BlurFormatFilter(places, line_edit))
-    return line_edit
-
-
-# =============================================================================
-#  LOGO / THUMBNAIL LOADING
-# =============================================================================
-def load_app_logo_pixmap(max_width: int = 160) -> Optional[QPixmap]:
-    """Loads the bundled app logo (sidebar + splash screen), scaled to at
-    most `max_width` px wide. SIMPLER THAN THE TKINTER BUILD: Qt's QPixmap
-    already does smooth, high-quality scaling to any size on its own -- the
-    Pillow-with-a-Tk-PhotoImage-fallback dance the old load_app_logo_image()
-    needed (Tk's native PhotoImage.subsample() only scales by whole-number
-    factors) simply isn't necessary here."""
-    if not APP_LOGO_PNG.exists():
-        return None
-    try:
-        pixmap = QPixmap(str(APP_LOGO_PNG))
-        if pixmap.isNull():
-            return None
-        if pixmap.width() > max_width:
-            pixmap = pixmap.scaledToWidth(max_width, Qt.TransformationMode.SmoothTransformation)
-        return pixmap
-    except Exception as exc:
-        logger.warning(f"Could not load app logo image: {exc}")
-        return None
-
-
-def load_thumbnail_pixmap(path: Optional[Path], max_size: int = 44) -> Optional[QPixmap]:
-    """Same idea as load_app_logo_pixmap(), generalised to any path and
-    target size -- used for the asset-upload preview rows in Settings."""
-    if not path or not path.exists():
-        return None
-    try:
-        pixmap = QPixmap(str(path))
-        if pixmap.isNull():
-            return None
-        return pixmap.scaled(max_size, max_size, Qt.AspectRatioMode.KeepAspectRatio,
-                              Qt.TransformationMode.SmoothTransformation)
-    except Exception as exc:
-        logger.warning(f"Could not load thumbnail for {path}: {exc}")
-        return None
-
-
-# =============================================================================
-#  SMALL SHARED WIDGETS
-#  (ToolTip / Debouncer / Placeholder* -- kept as classes with the SAME
-#  names and constructor signatures as the Tkinter build, purely so every
-#  existing call site elsewhere in this file -- `ToolTip(widget, "text")`,
-#  `PlaceholderEntry(parent, placeholder="...")`, etc. -- keeps working
-#  with no changes at the call site. Only what's inside them is new.)
-# =============================================================================
-class ToolTip:
-    """Qt widgets already have a built-in hover tooltip
-    (QWidget.setToolTip()), so unlike the Tkinter build there is no custom
-    popup Toplevel to build and manage here -- this class exists only so
-    every `ToolTip(widget, "explanation")` call site elsewhere in the file
-    keeps working unchanged."""
-    def __init__(self, widget: QWidget, text: str, delay: int = 500):
-        widget.setToolTip(text)
-
-
-class Debouncer(QObject):
-    """Coalesces rapid repeated calls (e.g. keystrokes) into one after
-    `delay` ms. Same contract as the Tkinter build: construct once, then
-    call the instance itself on every keystroke; `.cancel()` stops a
-    pending call. Backed by QTimer instead of Tk's `.after()`."""
-    def __init__(self, parent: QObject, delay: int, func: Callable):
-        super().__init__(parent)
-        self._timer = QTimer(self)
-        self._timer.setSingleShot(True)
-        self._timer.timeout.connect(func)
-        self._delay = delay
-
-    def __call__(self, *args):
-        self._timer.start(self._delay)
-
-    def cancel(self):
-        self._timer.stop()
-
-
-class PlaceholderEntry(QLineEdit):
-    """Single-line hint-text field, replacing the Tkinter build's
-    PlaceholderEntry. Qt's native placeholderText already has the exact
-    property that build's PlaceholderMixin had to hand-build: text() reads
-    back "" while the hint is showing, so nothing can ever mistake the hint
-    for real input. get()/insert()/delete()/focus_set() aliases are kept
-    so the rest of this file's Tkinter-flavoured call sites need minimal
-    changes; new code can just use the native Qt methods directly."""
-    def __init__(self, parent=None, placeholder: str = "", **kw):
-        super().__init__(parent)
-        if placeholder:
-            self.setPlaceholderText(placeholder)
-
-    def get(self) -> str:
-        return self.text()
-
-    def insert(self, index, text):
-        self.setText(text)
-
-    def delete(self, first=0, last=None):
-        self.clear()
-
-    def focus_set(self):
-        self.setFocus()
-
-    def selection_range(self, start, end):
-        if end in ("end", -1):
-            self.selectAll()
-        else:
-            self.setSelection(start, end - start)
-
-
-class PlaceholderCombobox(QComboBox):
-    """Editable combo box with hint text, replacing PlaceholderCombobox --
-    used for the two free-typeable pickers in this app (client name,
-    catalog item title) that can also be chosen from a dropdown."""
-    def __init__(self, parent=None, placeholder: str = "", **kw):
-        super().__init__(parent)
-        self.setEditable(True)
-        if placeholder:
-            self.lineEdit().setPlaceholderText(placeholder)
-
-    def get(self) -> str:
-        return self.currentText()
-
-    def insert(self, index, text):
-        self.setCurrentText(text)
-
-    def delete(self, first=0, last=None):
-        self.setCurrentText("")
-
-    def focus_set(self):
-        self.setFocus()
-
-
-class PlaceholderText(QPlainTextEdit):
-    """Multi-line hint-text box. Qt's native placeholder text replaces the hand-rolled mechanism the Tkinter build
-    needed. It is a QPlainTextEdit rather than a QTextEdit on purpose: only QPlainTextEdit wraps a long hint over
-    several lines (QTextEdit draws it on one clipped line), and this box only ever holds plain text anyway."""
-    def __init__(self, parent=None, placeholder: str = "", height: Optional[int] = None, **kw):
-        super().__init__(parent)
-        if placeholder:
-            self.setPlaceholderText(placeholder)
-        if height:
-            fm = self.fontMetrics()
-            self.setFixedHeight(fm.lineSpacing() * int(height) + 22)    # + padding, border and document margin
-
-    def setAcceptRichText(self, accept: bool) -> None:
-        """No-op: a plain-text box never takes rich text. Kept so code written against QTextEdit still works."""
-
-    def acceptRichText(self) -> bool:
-        return False
-
-    def get(self, index1="1.0", index2="end-1c") -> str:
-        return self.toPlainText()
-
-    def insert(self, index, text):
-        self.setPlainText(text)
-
-    def delete(self, index1="1.0", index2=None):
-        self.clear()
-
-    def focus_set(self):
-        self.setFocus()
-
-
-# =============================================================================
-#  THEMES  (names and order match the Tkinter build's "App Theme" drop-down)
-# =============================================================================
-THEME_NAMES: List[str] = ["litera", "cosmo", "flatly", "darkly", "cyborg", "superhero", "morph", "pulse"]
-
-DEFAULT_THEME: str = "litera"
-
-#  bg      window background          surface  cards / inputs / menus
-#  alt     zebra rows, headers, hover  border   hairlines
-#  fg      body text                   muted    secondary text
-THEMES: Dict[str, Dict[str, Any]] = {
-    "litera": dict(dark=False, bg="#F4F6FA", surface="#FFFFFF", alt="#F1F3F7", border="#DDE1E7",
-                   fg="#343A40", muted="#6C757D",
-                   primary="#4582EC", secondary="#ADB5BD", success="#02B875",
-                   info="#17A2B8", warning="#F0AD4E", danger="#D9534F"),
-    "cosmo":  dict(dark=False, bg="#F5F7FA", surface="#FFFFFF", alt="#EFF2F6", border="#D9DEE4",
-                   fg="#373A3C", muted="#6B7075",
-                   primary="#2780E3", secondary="#7E8081", success="#3FB618",
-                   info="#9954BB", warning="#FF7518", danger="#FF0039"),
-    "flatly": dict(dark=False, bg="#F3F5F6", surface="#FFFFFF", alt="#ECF0F1", border="#D5DBDE",
-                   fg="#2C3E50", muted="#7B8A8B",
-                   primary="#2C3E50", secondary="#95A5A6", success="#18BC9C",
-                   info="#3498DB", warning="#F39C12", danger="#E74C3C"),
-    "darkly": dict(dark=True, bg="#222222", surface="#2D2D2D", alt="#363636", border="#454545",
-                   fg="#F1F1F1", muted="#ADB5BD",
-                   primary="#375A7F", secondary="#444444", success="#00BC8C",
-                   info="#3498DB", warning="#F39C12", danger="#E74C3C"),
-    "cyborg": dict(dark=True, bg="#060606", surface="#121212", alt="#1C1C1C", border="#2E2E2E",
-                   fg="#E4E4E4", muted="#9A9A9A",
-                   primary="#2A9FD6", secondary="#555555", success="#77B300",
-                   info="#9933CC", warning="#FF8800", danger="#CC0000"),
-    "superhero": dict(dark=True, bg="#2B3E50", surface="#34495E", alt="#3E5367", border="#4E6377",
-                      fg="#EBEBEB", muted="#A9B8C6",
-                      primary="#4C9BE8", secondary="#4E5D6C", success="#5CB85C",
-                      info="#5BC0DE", warning="#F0AD4E", danger="#D9534F"),
-    "morph":  dict(dark=False, bg="#DCE5F1", surface="#EDF2F9", alt="#E2EAF4", border="#C3D1E3",
-                   fg="#44546A", muted="#6F7F94",
-                   primary="#378DFC", secondary="#AAAAAA", success="#43CC29",
-                   info="#5B62F4", warning="#FFC107", danger="#E52527"),
-    "pulse":  dict(dark=False, bg="#F6F4FA", surface="#FFFFFF", alt="#F0ECF6", border="#DAD3E8",
-                   fg="#3D3D4A", muted="#7A7589",
-                   primary="#593196", secondary="#69676E", success="#13B955",
-                   info="#009CDC", warning="#EFA31D", danger="#FC3939"),
-}
-
-_LEGACY_THEME_NAMES = {"light": "litera", "dark": "darkly"}   # written by early PySide6 previews
-
-TONES: Tuple[str, ...] = ("primary", "secondary", "success", "info", "warning", "danger")
-
-_ACTIVE_THEME_NAME: str = DEFAULT_THEME
-
-_ACTIVE_PALETTE: Dict[str, str] = {}
-
-def normalize_theme_name(name: Optional[str]) -> str:
-    name = _LEGACY_THEME_NAMES.get((name or "").strip().lower(), (name or "").strip().lower())
-    return name if name in THEMES else DEFAULT_THEME
-
-# ---- tiny colour maths -------------------------------------------------------
-def _rgb(h: str) -> Tuple[int, int, int]:
-    h = h.lstrip("#")
-    return int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
-
-def _hex(r: float, g: float, b: float) -> str:
-    return "#{:02X}{:02X}{:02X}".format(*(max(0, min(255, int(round(v)))) for v in (r, g, b)))
-
-def _mix(a: str, b: str, t: float) -> str:
-    """t=0 -> a, t=1 -> b."""
-    ra, ga, ba = _rgb(a)
-    rb, gb, bb = _rgb(b)
-    return _hex(ra + (rb - ra) * t, ga + (gb - ga) * t, ba + (bb - ba) * t)
-
-def _lum(h: str) -> float:
-    def f(c):
-        c /= 255.0
-        return c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4
-    r, g, b = _rgb(h)
-    return 0.2126 * f(r) + 0.7152 * f(g) + 0.0722 * f(b)
-
-def _contrast(a: str, b: str) -> float:
-    la, lb = _lum(a), _lum(b)
-    hi, lo = max(la, lb), min(la, lb)
-    return (hi + 0.05) / (lo + 0.05)
-
-def _on(bg: str) -> str:
-    """Text colour for a filled background. White -- exactly what ttkbootstrap's `selectfg` gives every tone in all
-    eight themes -- except on the rare pale fill where white would be close to invisible (Morph's yellow warning)."""
-    return "#FFFFFF" if _contrast(bg, "#FFFFFF") >= 1.8 else "#1F2937"
-
-def _readable(color: str, on: str, minimum: float = 3.2) -> str:
-    """Nudge `color` toward black/white until it reads on `on` (for text & outlines)."""
-    target = "#FFFFFF" if _lum(on) < 0.4 else "#000000"
-    c = color
-    for step in range(12):
-        if _contrast(c, on) >= minimum:
-            break
-        c = _mix(c, target, 0.12)
-    return c
-
-def resolve_palette(theme: Dict[str, Any]) -> Dict[str, str]:
-    """Theme dict -> flat dict of every token the QSS / QPalette need."""
-    p: Dict[str, str] = {k: v for k, v in theme.items() if isinstance(v, str)}
-    dark = bool(theme["dark"])
-    p["is_dark"] = "1" if dark else "0"
-    p["input_bg"] = p["surface"]
-    p["border_strong"] = _mix(p["border"], p["fg"], 0.35)
-    p["sel"] = _mix(p["surface"], p["primary"], 0.28 if dark else 0.20)
-    p["sel_fg"] = p["fg"]
-    p["disabled_bg"] = _mix(p["bg"], p["fg"], 0.06)
-    p["disabled_fg"] = _mix(p["surface"], p["fg"], 0.42)
-    p["placeholder"] = _mix(p["surface"], p["fg"], 0.48)
-    p["shadow"] = "#000000"
-    for tone in TONES:
-        base = p[tone]
-        p[f"{tone}_on"] = _on(base)
-        p[f"{tone}_hover"] = _mix(base, "#FFFFFF" if dark else "#000000", 0.14)
-        p[f"{tone}_pressed"] = _mix(base, "#FFFFFF" if dark else "#000000", 0.24)
-        p[f"{tone}_soft"] = _mix(p["surface"], base, 0.18 if dark else 0.12)
-        p[f"{tone}_text"] = _readable(base, p["surface"])
-    p["muted_text"] = _readable(p["muted"], p["surface"], 3.0)
-    p["hero_bg"] = p["primary"]
-    p["hero_fg"] = _on(p["primary"])
-    p["hero_sub"] = _mix(p["primary"], p["hero_fg"], 0.78)
-    p["backdrop"] = _mix(p["bg"], "#000000", 0.18 if not dark else 0.30)    # PDF viewer / canvas surround
-    return p
-
-def theme_color(key: str) -> str:
-    """Current theme's colour for a palette token (e.g. 'border', 'primary_text')."""
-    if not _ACTIVE_PALETTE:
-        _ACTIVE_PALETTE.update(resolve_palette(THEMES[DEFAULT_THEME]))
-    return _ACTIVE_PALETTE[key]
-
-def active_theme_name() -> str:
-    return _ACTIVE_THEME_NAME
-
-def theme_is_dark() -> bool:
-    return theme_color("is_dark") == "1"
-
-# =============================================================================
-#  GENERATED ICONS  (QSS `image:` needs files; painted once per colour, cached)
-# =============================================================================
-def _icon_dir() -> Path:
-    for base in (DATA_DIR, Path(tempfile.gettempdir())):
-        try:
-            d = base / "ui_cache"
-            d.mkdir(parents=True, exist_ok=True)
-            return d
-        except OSError:
-            continue
-    return Path(tempfile.gettempdir())
-
-def _paint_icon(kind: str, color: str, px: int = 24) -> QImage:
-    img = QImage(px, px, QImage.Format.Format_ARGB32)
-    img.fill(0)
-    qp = QPainter(img)
-    qp.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-    pen = QPen(QColor(color))
-    pen.setWidthF(px * 0.11)
-    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-    pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
-    s = px / 24.0
-    if kind in ("down", "up"):
-        path = QPainterPath()
-        y1, y2 = (8.5, 15.0) if kind == "down" else (15.0, 8.5)
-        path.moveTo(6.0 * s, y1 * s)
-        path.lineTo(12.0 * s, y2 * s)
-        path.lineTo(18.0 * s, y1 * s)
-        qp.setPen(pen)
-        qp.drawPath(path)
-    elif kind in ("left", "right"):
-        path = QPainterPath()
-        x1, x2 = (14.5, 9.0) if kind == "left" else (9.5, 15.0)
-        path.moveTo(x1 * s, 6.0 * s)
-        path.lineTo(x2 * s, 12.0 * s)
-        path.lineTo(x1 * s, 18.0 * s)
-        qp.setPen(pen)
-        qp.drawPath(path)
-    elif kind == "check":
-        pen.setWidthF(px * 0.14)
-        path = QPainterPath()
-        path.moveTo(5.5 * s, 12.5 * s)
-        path.lineTo(10.0 * s, 17.0 * s)
-        path.lineTo(18.5 * s, 7.5 * s)
-        qp.setPen(pen)
-        qp.drawPath(path)
-    elif kind == "dot":
-        qp.setPen(Qt.PenStyle.NoPen)
-        qp.setBrush(QBrush(QColor(color)))
-        qp.drawEllipse(QRectF(7.5 * s, 7.5 * s, 9.0 * s, 9.0 * s))
-    elif kind in ("tri_up", "tri_down"):
-        qp.setPen(Qt.PenStyle.NoPen)
-        qp.setBrush(QBrush(QColor(color)))
-        path = QPainterPath()
-        if kind == "tri_up":
-            path.moveTo(12.0 * s, 8.0 * s); path.lineTo(18.0 * s, 16.0 * s); path.lineTo(6.0 * s, 16.0 * s)
-        else:
-            path.moveTo(12.0 * s, 16.0 * s); path.lineTo(18.0 * s, 8.0 * s); path.lineTo(6.0 * s, 8.0 * s)
-        path.closeSubpath()
-        qp.drawPath(path)
-    qp.end()
-    return img
-
-def _icon_url(kind: str, color: str) -> str:
-    path = _icon_dir() / f"{kind}_{color.lstrip('#').lower()}.png"
-    if not path.exists():
-        _paint_icon(kind, color).save(str(path), "PNG")
-    return 'url("' + path.as_posix() + '")'
-
-# =============================================================================
-#  QSS
-# =============================================================================
-_QSS_BASE = """
-* { outline: 0; }
-QWidget { font-family: "Segoe UI", "Noto Sans", "Helvetica Neue", Arial, sans-serif; font-size: 13px; color: @fg@; }
-QMainWindow, QDialog { background: @bg@; }
-QToolTip { background: @surface@; color: @fg@; border: 1px solid @border_strong@; padding: 4px 8px; border-radius: 4px; }
-
-/* ---------- frames ---------- */
-QFrame[role="card"]    { background: @surface@; border: 1px solid @border@; border-radius: 10px; }
-QFrame[role="sidebar"] { background: @surface@; border: none; }          /* the 1 px divider next to it is its own vline() */
-QFrame[role="toolbar"] { background: @surface@; border: 1px solid @border@; border-radius: 8px; }
-QFrame[role="sep"]     { background: @border@; border: none; }
-QFrame[role="hero"]    { background: @hero_bg@; border: none; border-radius: 0px; }
-QFrame[role="hero-round"] { background: @hero_bg@; border: none; border-radius: 8px; }
-QFrame[role="stat"]    { background: @surface@; border: 1px solid @border@; border-radius: 10px; }
-QFrame[role="stat"][tone="primary"]   { border-left: 4px solid @primary@; }
-QFrame[role="stat"][tone="success"]   { border-left: 4px solid @success@; }
-QFrame[role="stat"][tone="danger"]    { border-left: 4px solid @danger@; }
-QFrame[role="stat"][tone="warning"]   { border-left: 4px solid @warning@; }
-QFrame[role="stat"][tone="info"]      { border-left: 4px solid @info@; }
-QFrame[role="stat"][tone="secondary"] { border-left: 4px solid @secondary@; }
-QFrame[role="stat-solid"] { border: none; border-radius: 10px; }   /* Dashboard cards: solid tone block, as in the Tk build */
-QFrame[role="splash"]  { background: @surface@; border: none; }
-QFrame[role="splash-border"] { background: @primary@; border: none; }      /* square, like the Tk splash window */
-QFrame[role="thumb"]   { background: @alt@; border: 1px solid @border@; border-radius: 6px; }
-QFrame[role="key"]     { background: @alt@; border: 1px solid @border_strong@; border-radius: 4px; }
-
-/* ---------- labels ---------- */
-QLabel { background: transparent; }
-QLabel[role="h1"]      { font-size: 22px; font-weight: 700; }
-QLabel[role="h2"]      { font-size: 15px; font-weight: 600; }
-QLabel[role="h3"]      { font-size: 13px; font-weight: 700; }
-QLabel[role="muted"]   { color: @muted_text@; }
-QLabel[role="small"]   { color: @muted_text@; font-size: 11px; }
-QLabel[role="section"] { font-size: 11px; font-weight: 700; color: @muted_text@; }
-QLabel[role="caption"] { font-size: 12px; font-weight: 600; }          /* field captions on forms */
-QLabel[role="display"] { font-size: 34px; font-weight: 700; }            /* About box version number */
-QLabel[role="stat-value"] { font-size: 22px; font-weight: 700; }
-QLabel[role="stat-title"] { font-size: 11px; font-weight: 700; color: @muted_text@; }
-QLabel[role="stat-solid-title"] { font-size: 12px; }
-QLabel[role="stat-solid-value"] { font-size: 24px; font-weight: 700; }
-QLabel[role="stat-solid-value"][compact="true"] { font-size: 18px; }
-QLabel[role="hero-title"] { color: @hero_fg@; font-size: 20px; font-weight: 700; }
-QLabel[role="hero-sub"]   { color: @hero_sub@; font-size: 11px; }
-QLabel[role="key"]     { font-weight: 700; font-size: 12px; background: @alt@; border: 1px solid @border_strong@; border-radius: 4px; padding: 4px 8px; }
-QLabel[role="link"]    { color: @primary_text@; }
-QLabel[role="badge"]   { font-size: 11px; font-weight: 700; border-radius: 9px; padding: 3px 10px; }
-@LABEL_TONES@
-
-/* ---------- inputs ---------- */
-QLineEdit, QTextEdit, QPlainTextEdit, QComboBox, QSpinBox, QDoubleSpinBox, QDateEdit, QTimeEdit {
-    background: @input_bg@; color: @fg@; border: 1px solid @border_strong@; border-radius: 6px;
-    padding: 5px 8px; selection-background-color: @sel@; selection-color: @sel_fg@;
-}
-QLineEdit:hover, QTextEdit:hover, QPlainTextEdit:hover, QComboBox:hover, QSpinBox:hover, QDoubleSpinBox:hover, QDateEdit:hover { border-color: @primary@; }
-QLineEdit:focus, QTextEdit:focus, QPlainTextEdit:focus, QComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus, QDateEdit:focus,
-QComboBox:on { border: 1px solid @primary@; }
-QLineEdit:disabled, QTextEdit:disabled, QPlainTextEdit:disabled, QComboBox:disabled, QSpinBox:disabled, QDateEdit:disabled {
-    background: @disabled_bg@; color: @disabled_fg@; border-color: @border@; }
-QLineEdit[invalid="true"], QTextEdit[invalid="true"], QComboBox[invalid="true"] { border: 1px solid @danger@; }
-QLineEdit[readOnly="true"] { background: @alt@; }
-QLineEdit[flat="true"], QComboBox QLineEdit, QAbstractSpinBox QLineEdit, QDateEdit QLineEdit { border: none; background: transparent; padding: 0px; }
-
-QComboBox { padding-right: 26px; }
-QComboBox::drop-down, QDateEdit::drop-down { subcontrol-origin: padding; subcontrol-position: center right; width: 24px; border: none; }
-QComboBox::down-arrow, QDateEdit::down-arrow { image: @ICON_DOWN_FG@; width: 12px; height: 12px; }
-QComboBox::down-arrow:disabled, QDateEdit::down-arrow:disabled { image: @ICON_DOWN_DIS@; }
-QComboBox QAbstractItemView { background: @surface@; color: @fg@; border: 1px solid @border_strong@; border-radius: 6px;
-    selection-background-color: @primary@; selection-color: @primary_on@; padding: 3px; }
-QComboBox QAbstractItemView::item { min-height: 24px; padding: 2px 6px; border-radius: 4px; }
-
-QAbstractSpinBox::up-button, QAbstractSpinBox::down-button { width: 18px; border: none; background: transparent; }
-QAbstractSpinBox::up-arrow { image: @ICON_UP_FG@; width: 10px; height: 10px; }
-QAbstractSpinBox::down-arrow { image: @ICON_DOWN_FG@; width: 10px; height: 10px; }
-
-QCheckBox, QRadioButton { spacing: 8px; background: transparent; }
-QCheckBox::indicator { width: 16px; height: 16px; border: 1px solid @border_strong@; border-radius: 4px; background: @input_bg@; }
-QCheckBox::indicator:hover, QRadioButton::indicator:hover { border-color: @primary@; }
-QCheckBox::indicator:checked { background: @primary@; border-color: @primary@; image: @ICON_CHECK@; }
-QCheckBox::indicator:indeterminate { background: @primary@; border-color: @primary@; }
-QCheckBox::indicator:disabled, QRadioButton::indicator:disabled { background: @disabled_bg@; border-color: @border@; }
-QRadioButton::indicator { width: 16px; height: 16px; border: 1px solid @border_strong@; border-radius: 9px; background: @input_bg@; }
-QRadioButton::indicator:checked { background: @primary@; border-color: @primary@; image: @ICON_DOT@; }
-
-/* ---------- buttons ---------- */
-QPushButton { background: @surface@; color: @fg@; border: 1px solid @border_strong@; border-radius: 6px; padding: 7px 14px; }
-QPushButton:hover { background: @alt@; border-color: @muted@; }
-QPushButton:pressed { background: @border@; }
-QPushButton:focus { border-color: @primary@; }
-QPushButton:disabled { color: @disabled_fg@; background: @disabled_bg@; border-color: @border@; }
-QPushButton:checked { background: @primary@; color: @primary_on@; border-color: @primary@; }
-@BUTTON_ROLES@
-QPushButton[role="link"] { background: transparent; border: none; color: @primary_text@; padding: 4px 6px; }
-QPushButton[role="link"]:hover { background: @primary_soft@; }
-QPushButton[role="tool"] { padding: 4px 8px; min-width: 22px; font-size: 14px; background: @surface@; }
-QPushButton[glyph="true"] { padding: 7px 6px; }                                 /* one-symbol buttons ("✕"): no wide side padding */
-QPushButton[align="left"] { text-align: left; padding: 11px 15px; }        /* sidebar navigation / system buttons */
-QToolButton { background: transparent; border: 1px solid transparent; border-radius: 6px; padding: 4px; }
-QToolButton:hover { background: @alt@; border-color: @border@; }
-
-/* ---------- item views ---------- */
-QAbstractItemView { background: @surface@; alternate-background-color: @alt@; color: @fg@; border: 1px solid @border@;
-    border-radius: 8px; gridline-color: @border@; selection-background-color: @sel@; selection-color: @sel_fg@; }
-QTableView, QTreeView, QListView { show-decoration-selected: 1; }
-QTableView::item, QTreeView::item { padding: 5px 8px; border: none; }
-QTableView::item:selected, QTreeView::item:selected, QListView::item:selected { background: @sel@; color: @sel_fg@; }
-QTableView::item:hover, QTreeView::item:hover, QListView::item:hover { background: @alt@; }
-QTableView::item:selected:hover { background: @sel@; }
-QListView::item { padding: 6px 8px; border-radius: 4px; }
-QHeaderView { background: @alt@; border: none; }
-QHeaderView::section { background: @alt@; color: @muted_text@; font-weight: 700; padding: 8px 10px; border: none;
-    border-bottom: 1px solid @border_strong@; border-right: 1px solid @border@; }
-QHeaderView::section:hover { background: @border@; color: @fg@; }
-QHeaderView::section:first { border-top-left-radius: 8px; }
-QHeaderView::section:last { border-top-right-radius: 8px; border-right: none; }
-QHeaderView::up-arrow   { image: @ICON_TRI_UP@;   width: 12px; height: 12px; subcontrol-position: center right; }
-QHeaderView::down-arrow { image: @ICON_TRI_DOWN@; width: 12px; height: 12px; subcontrol-position: center right; }
-QTableCornerButton::section { background: @alt@; border: none; }
-
-/* ---------- menus ---------- */
-QMenu { background: @surface@; color: @fg@; border: 1px solid @border_strong@; border-radius: 8px; padding: 5px; }
-QMenu::item { padding: 7px 26px 7px 14px; border-radius: 5px; }
-QMenu::item:selected { background: @primary@; color: @primary_on@; }
-QMenu::item:disabled { color: @disabled_fg@; }
-QMenu::separator { height: 1px; background: @border@; margin: 5px 8px; }
-
-/* ---------- scrolling ---------- */
-QScrollArea { border: none; background: transparent; }
-QScrollBar:vertical   { width: 12px; background: transparent; margin: 2px; }
-QScrollBar:horizontal { height: 12px; background: transparent; margin: 2px; }
-QScrollBar::handle:vertical   { background: @border_strong@; border-radius: 4px; min-height: 28px; margin: 0px 2px; }
-QScrollBar::handle:horizontal { background: @border_strong@; border-radius: 4px; min-width: 28px; margin: 2px 0px; }
-QScrollBar::handle:hover { background: @muted@; }
-QScrollBar::add-line, QScrollBar::sub-line { width: 0px; height: 0px; background: none; border: none; }
-QScrollBar::add-page, QScrollBar::sub-page { background: transparent; }
-
-/* ---------- containers ---------- */
-QTabWidget::pane { border: 1px solid @border@; border-radius: 8px; top: -1px; background: transparent; }
-QTabBar::tab { padding: 9px 18px; background: transparent; color: @muted_text@; border: none; border-bottom: 2px solid transparent; margin-right: 2px; }
-QTabBar::tab:hover { color: @fg@; }
-QTabBar::tab:selected { color: @primary_text@; font-weight: 600; border-bottom: 2px solid @primary@; }
-QGroupBox { border: 1px solid @border@; border-radius: 8px; margin-top: 14px; padding: 14px 10px 10px 10px; background: transparent; }
-QGroupBox::title { subcontrol-origin: margin; subcontrol-position: top left; left: 12px; padding: 0 6px; color: @muted_text@; font-weight: 700; }
-QSplitter::handle { background: @border@; }
-QProgressBar { border: none; border-radius: 4px; background: @border@; text-align: center; min-height: 8px; max-height: 8px; color: @fg@; }
-QProgressBar::chunk { background: @primary@; border-radius: 4px; }
-QProgressBar[tall="true"] { min-height: 18px; max-height: 18px; border-radius: 9px; }
-QProgressBar[tall="true"]::chunk { border-radius: 9px; }
-QMessageBox { background: @bg@; }
-QMessageBox QLabel { color: @fg@; }
-
-/* ---------- calendar popup (QDateEdit) ---------- */
-QCalendarWidget QWidget { alternate-background-color: @alt@; }
-QCalendarWidget QToolButton { background: transparent; color: @fg@; border: none; border-radius: 6px; padding: 4px 8px; font-weight: 600; }
-QCalendarWidget QToolButton:hover { background: @alt@; }
-QCalendarWidget QToolButton::menu-indicator { image: none; }
-QCalendarWidget #qt_calendar_prevmonth { qproperty-icon: none; image: @ICON_LEFT@; width: 16px; height: 16px; }
-QCalendarWidget #qt_calendar_nextmonth { qproperty-icon: none; image: @ICON_RIGHT@; width: 16px; height: 16px; }
-QCalendarWidget QMenu { background: @surface@; }
-QCalendarWidget QSpinBox { background: @surface@; border: 1px solid @border_strong@; border-radius: 4px; padding: 2px 4px; }
-QCalendarWidget QAbstractItemView:enabled { background: @surface@; color: @fg@; border: none; border-radius: 0px;
-    selection-background-color: @primary@; selection-color: @primary_on@; }
-QCalendarWidget QAbstractItemView:disabled { color: @disabled_fg@; }
-#qt_calendar_navigationbar { background: @alt@; border-bottom: 1px solid @border@; }
-"""
-
-def _label_tone_rules() -> str:
-    out = []
-    for tone in TONES:
-        out.append(f'QLabel[tone="{tone}"] {{ color: @{tone}_text@; }}')
-        out.append(f'QLabel[role="badge"][tone="{tone}"] {{ background: @{tone}@; color: @{tone}_on@; }}')
-        out.append(f'QLabel[role="badge-soft"][tone="{tone}"] {{ background: @{tone}_soft@; color: @{tone}_text@; font-weight: 700; '
-                   f'border-radius: 9px; padding: 3px 10px; font-size: 11px; }}')
-        out.append(f'QFrame[role="stat-solid"][tone="{tone}"] {{ background: @{tone}@; }}')
-        out.append(f'QLabel[role="stat-solid-title"][tone="{tone}"], QLabel[role="stat-solid-value"][tone="{tone}"] '
-                   f'{{ color: @{tone}_on@; }}')
-    out.append('QLabel[tone="muted"] { color: @muted_text@; }')
-    return "\n".join(out)
-
-def _button_role_rules() -> str:
-    out = []
-    for tone in TONES:
-        out.append(
-            f'QPushButton[role="{tone}"] {{ background: @{tone}@; color: @{tone}_on@; border: 1px solid @{tone}@; }}\n'
-            f'QPushButton[role="{tone}"]:hover {{ background: @{tone}_hover@; border-color: @{tone}_hover@; }}\n'
-            f'QPushButton[role="{tone}"]:pressed {{ background: @{tone}_pressed@; border-color: @{tone}_pressed@; }}\n'
-            f'QPushButton[role="{tone}"]:disabled {{ background: @disabled_bg@; color: @disabled_fg@; border-color: @border@; }}\n'
-            f'QPushButton[role="{tone}-outline"] {{ background: transparent; color: @{tone}_text@; border: 1px solid @{tone}_text@; }}\n'
-            f'QPushButton[role="{tone}-outline"]:hover {{ background: @{tone}@; color: @{tone}_on@; border-color: @{tone}@; }}\n'
-            f'QPushButton[role="{tone}-outline"]:pressed {{ background: @{tone}_pressed@; color: @{tone}_on@; }}\n'
-            f'QPushButton[role="{tone}-outline"]:disabled {{ background: transparent; color: @disabled_fg@; border-color: @border@; }}'
-        )
-    return "\n".join(out)
-
-def build_qss(p: Dict[str, str]) -> str:
-    tokens = dict(p)
-    tokens["LABEL_TONES"] = _label_tone_rules()
-    tokens["BUTTON_ROLES"] = _button_role_rules()
-    # Icons are generated lazily and keyed by colour.
-    tokens["ICON_DOWN_FG"] = _icon_url("down", p["muted_text"])
-    tokens["ICON_DOWN_DIS"] = _icon_url("down", p["disabled_fg"])
-    tokens["ICON_UP_FG"] = _icon_url("up", p["muted_text"])
-    tokens["ICON_LEFT"] = _icon_url("left", p["fg"])
-    tokens["ICON_RIGHT"] = _icon_url("right", p["fg"])
-    tokens["ICON_CHECK"] = _icon_url("check", p["primary_on"])
-    tokens["ICON_DOT"] = _icon_url("dot", p["primary_on"])
-    tokens["ICON_TRI_UP"] = _icon_url("tri_up", p["muted_text"])
-    tokens["ICON_TRI_DOWN"] = _icon_url("tri_down", p["muted_text"])
-    qss = _QSS_BASE
-    # two passes: expand the generated rule blocks first, then every @token@
-    for key in ("LABEL_TONES", "BUTTON_ROLES"):
-        qss = qss.replace(f"@{key}@", tokens[key])
-    return re.sub(r"@(\w+)@", lambda m: tokens[m.group(1)], qss)
-
-def build_qpalette(p: Dict[str, str]) -> QPalette:
-    pal = QPalette()
-    R = QPalette.ColorRole
-    G = QPalette.ColorGroup
-    pairs = {
-        R.Window: p["bg"], R.WindowText: p["fg"], R.Base: p["input_bg"], R.AlternateBase: p["alt"],
-        R.Text: p["fg"], R.Button: p["surface"], R.ButtonText: p["fg"], R.ToolTipBase: p["surface"],
-        R.ToolTipText: p["fg"], R.Highlight: p["primary"], R.HighlightedText: p["primary_on"],
-        R.PlaceholderText: p["placeholder"], R.Link: p["primary_text"], R.LinkVisited: p["info_text"],
-        R.BrightText: "#FFFFFF", R.Light: p["surface"], R.Midlight: p["alt"], R.Mid: p["border"],
-        R.Dark: p["border_strong"], R.Shadow: "#000000",
-    }
-    for role, color in pairs.items():
-        pal.setColor(role, QColor(color))
-    for role in (R.WindowText, R.Text, R.ButtonText):
-        pal.setColor(G.Disabled, role, QColor(p["disabled_fg"]))
-    return pal
-
-def _repolish(widget: QWidget) -> QWidget:
-    st = widget.style()
-    st.unpolish(widget)
-    st.polish(widget)
-    widget.update()
-    return widget
-
-def set_flag(widget: QWidget, name: str, on: bool) -> QWidget:
-    """Sets a boolean dynamic property that QSS can match as [name="true"] (e.g. a `compact` variant of a
-    role) and refreshes the widget. No-op when the value is unchanged."""
-    value = "true" if on else "false"
-    if widget.property(name) == value:
-        return widget
-    widget.setProperty(name, value)
-    return _repolish(widget)
-
-def set_tone(widget: QWidget, tone: Optional[str]) -> QWidget:
-    widget.setProperty("tone", tone or "")
-    return _repolish(widget)
-
-def hline() -> QFrame:
-    f = QFrame()
-    f.setProperty("role", "sep")
-    f.setFixedHeight(1)
-    f.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-    return f
-
-def vline() -> QFrame:
-    f = QFrame()
-    f.setProperty("role", "sep")
-    f.setFixedWidth(1)
-    f.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
-    return f
-
-def make_label(text: str = "", role: Optional[str] = None, tone: Optional[str] = None,
-               wrap: bool = False, align: Optional[Qt.AlignmentFlag] = None) -> QLabel:
-    lbl = QLabel(text)
-    if role:
-        lbl.setProperty("role", role)
-    if tone:
-        lbl.setProperty("tone", tone)
-    if wrap:
-        lbl.setWordWrap(True)
-    if align is not None:
-        lbl.setAlignment(align)
-    return lbl
-
-def make_button(text: str, role: Optional[str] = None, slot: Optional[Callable] = None,
-                tooltip: str = "", min_height: int = 0) -> QPushButton:
-    btn = QPushButton(text)
-    if role:
-        btn.setProperty("role", role)
-    if tooltip:
-        btn.setToolTip(tooltip)
-    if min_height:
-        btn.setMinimumHeight(min_height)
-    if slot is not None:
-        btn.clicked.connect(lambda _checked=False: slot())
-    btn.setCursor(Qt.CursorShape.PointingHandCursor)
-    return btn
-
-# =============================================================================
-#  WHEEL GUARD  (replaces the Tkinter build's "bulletproof scroll fix" that
-#  deleted the Tcl-level <MouseWheel> bindings on every TCombobox)
-# =============================================================================
-class _WheelGuard(QObject):
-    """Stops mouse-wheel events from changing a combo box / spin box / date edit that does
-    not have keyboard focus, so scrolling a long form with the wheel never silently changes
-    a dropdown's value as the cursor drifts across it. Instead of relying on Qt's implicit
-    event propagation, the wheel is handed straight to the enclosing scroll area's vertical
-    scroll bar, so the form keeps scrolling smoothly while the cursor is over the field."""
-
-    def eventFilter(self, obj, event):
-        if event.type() == QEvent.Type.Wheel and not obj.hasFocus():
-            area = obj.parentWidget()
-            while area is not None and not isinstance(area, QAbstractScrollArea):
-                area = area.parentWidget()
-            if area is not None:
-                QApplication.sendEvent(area.verticalScrollBar(), event)
-            event.accept()
-            return True
-        return False
-
-def guard_wheel(widget: QWidget) -> QWidget:
-    """Apply the wheel guard to a QComboBox / QAbstractSpinBox / QDateEdit."""
-    widget.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
-    widget.installEventFilter(_WheelGuard(widget))
-    return widget
-
-# =============================================================================
-#  DATE PICKER  (ttkbootstrap DateEntry -> QDateEdit with a calendar popup)
-# =============================================================================
-QT_DISPLAY_DATE_FORMAT: str = "dd MMM yyyy"          # == DISPLAY_DATE_FORMAT "%d %b %Y"
-
-def make_date_edit(value: Optional[datetime.date] = None) -> QDateEdit:
-    """A date field that shows e.g. '24 Oct 2026' with an English calendar popup, whatever
-    the OS language is (Python's strptime('%b') only understands English month names, and
-    the DB layer stores ISO dates, so the displayed text must never be parsed back --
-    use date_edit_value()/date_edit_db() instead)."""
-    edit = QDateEdit()
-    edit.setLocale(QLocale(QLocale.Language.English, QLocale.Country.India))
-    edit.setDisplayFormat(QT_DISPLAY_DATE_FORMAT)
-    edit.setCalendarPopup(True)
-    cal = edit.calendarWidget()
-    if cal is not None:
-        cal.setLocale(QLocale(QLocale.Language.English, QLocale.Country.India))
-        cal.setGridVisible(False)
-    value = value or datetime.date.today()
-    edit.setDate(QDate(value.year, value.month, value.day))
-    guard_wheel(edit)
-    return edit
-
-def date_edit_value(edit: QDateEdit) -> datetime.date:
-    d = edit.date()
-    return datetime.date(d.year(), d.month(), d.day())
-
-def date_edit_db(edit: QDateEdit) -> str:
-    """The field's date as the DB layer stores it ('YYYY-MM-DD')."""
-    return date_edit_value(edit).strftime(DB_DATE_FORMAT)
-
-def set_date_edit_from_db(edit: QDateEdit, db_date: Optional[str]) -> None:
-    """Load a stored 'YYYY-MM-DD' (or empty/invalid -> today) into the field."""
-    try:
-        d = datetime.datetime.strptime(db_date, DB_DATE_FORMAT).date() if db_date else datetime.date.today()
-    except (TypeError, ValueError):
-        d = datetime.date.today()
-    edit.setDate(QDate(d.year, d.month, d.day))
-
-def documents_dir() -> Path:
-    """The user's Documents folder (falls back to the home folder): where file dialogs start when there is no
-    better idea of where the user wants to save to."""
-    docs = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.DocumentsLocation)
-    return Path(docs) if docs else Path.home()
-
-# =============================================================================
-#  MODAL DIALOG RUNNER
-# =============================================================================
-def run_dialog(dialog: QDialog) -> int:
-    """Run a modal dialog to completion, then release it. Always use this instead of a bare
-    `dialog.exec()` in the application.
-
-    * Qt keeps a closed dialog alive as a hidden child of its parent, so without this every
-      Add/Edit click would leave one more hidden dialog on the main window for the whole session.
-    * PySide6 can crash while tearing down widgets that are kept alive only by lambda slots
-      (a reference cycle through a signal connection) when the interpreter exits. Deleting dialogs
-      the normal Qt way as soon as they are finished (together with the orderly shutdown in
-      main()) keeps that from ever happening.
-
-    Read anything you need from the dialog (e.g. `dialog.job_result`) straight after this returns;
-    the C++ object is deleted when control is back in the event loop."""
-    try:
-        return dialog.exec()
-    finally:
-        dialog.deleteLater()
-
-# =============================================================================
-#  KEY-AWARE TABLE  (Tk bound <Delete> / <Return> on the Treeview; a QTableWidget reports them as signals)
-# =============================================================================
-class KeyTable(QTableWidget):
-    """QTableWidget that turns Delete and Enter/Return into `delete_pressed` / `enter_pressed` signals
-    (and swallows those two keys, so a table with no handler connected does nothing, exactly like the
-    Tk Treeview). Used by the Dashboard, Clients and Catalog lists."""
-    delete_pressed = Signal()
-    enter_pressed = Signal()
-
-    def keyPressEvent(self, event):
-        if event.key() == Qt.Key.Key_Delete:
-            self.delete_pressed.emit()
-            return
-        if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
-            self.enter_pressed.emit()
-            return
-        super().keyPressEvent(event)
-
-    def select_only_row(self, row: int) -> None:
-        """Make `row` the one and only selected row, whatever keyboard modifiers are held at that moment.
-        (QTableView.selectRow() honours Ctrl = toggle / Shift = extend, which is wrong for "the user
-        right-clicked this row".)"""
-        index = self.model().index(row, 0)
-        sm = self.selectionModel()
-        sm.setCurrentIndex(index, QItemSelectionModel.SelectionFlag.NoUpdate)
-        sm.select(index, QItemSelectionModel.SelectionFlag.ClearAndSelect | QItemSelectionModel.SelectionFlag.Rows)
-
-
-# @@THEME@@
-
-
-
-
-
-def apply_app_style(app: QApplication, theme_name: Optional[str] = None) -> None:
-    """Install the named theme application-wide (palette + stylesheet). Live: every
-    open window re-polishes instantly, no restart and no per-widget fix-ups."""
-    global _ACTIVE_THEME_NAME
-    name = normalize_theme_name(theme_name)
-    pal = resolve_palette(THEMES[name])
-    _ACTIVE_THEME_NAME = name
-    _ACTIVE_PALETTE.clear()
-    _ACTIVE_PALETTE.update(pal)
-    app.setStyle("Fusion")
-    app.setPalette(build_qpalette(pal))
-    app.setStyleSheet(build_qss(pal))
-
-
-def set_role(widget: QWidget, role: str, tone: Optional[str] = None) -> QWidget:
-    """Sets the QSS-visible `role` (and optional `tone`) property -- the Qt
-    equivalent of ttkbootstrap's bootstyle= -- and refreshes the widget so the
-    change shows immediately even if it is already on screen."""
-    widget.setProperty("role", role)
-    if tone is not None:
-        widget.setProperty("tone", tone)
-    return _repolish(widget)
-
-
-def prompt_and_backup_database(parent: Optional[QWidget] = None) -> None:
-    """Asks where to save a copy of the live database, then writes it there. Shared by the Settings dialog's
-    "Save a Backup Copy" button and the Ctrl+B shortcut, so there is one definition of "back up the database"."""
-    default_name = f"Vyaprix-backup-{datetime.date.today().isoformat()}.db"
-    path, _ = QFileDialog.getSaveFileName(parent, "Save Database Backup", str(_start_dir("backup_dir") / default_name),
-                                          "SQLite Database (*.db)")
-    if not path:
-        return
-    target = Path(path)
-    if not target.suffix:
-        target = target.with_suffix(".db")
-    _remember_dir("backup_dir", target)
-    try:
-        backup_database_to(target)
-    except Exception as exc:
-        Messagebox.show_error("Backup Failed", str(exc), parent=parent)
-        return
-    Messagebox.show_info("Backup Saved", f"Database backed up to:\n{target}", parent=parent)
 
 def compose_your_name(config: Dict[str, Any]) -> str:
     """Turns Settings into the single bold headline used at the top of an
@@ -1378,6 +510,7 @@ def compose_your_name(config: Dict[str, Any]) -> str:
     company_name  = (config.get("company_details", {}).get("name") or "").strip()
     personal_name = (config.get("user_details", {}).get("name") or "").strip()
     return company_name or personal_name or "Your Name/Company"
+
 
 def compose_your_contact(config: Dict[str, Any]) -> str:
     """Turns Settings > Your Details into the multi-line contact block
@@ -1419,16 +552,10 @@ def compose_your_contact(config: Dict[str, Any]) -> str:
         return "\n".join(lines)
     return (user_details.get("contact_info") or "").strip()
 
-def configure_windows_app_identity() -> None:
-    if sys.platform != "win32":
-        return
-    try:
-        import ctypes
-        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
-            "EllowLabs.Vyaprix"
-        )
-    except Exception as exc:
-        logger.warning("Could not set Windows application identity: %s", exc)
+
+# =============================================================================
+#  9. DATABASE LAYER
+# =============================================================================
 class DatabaseManager:
     """
     Data-access layer.
@@ -1465,6 +592,12 @@ class DatabaseManager:
             except sqlite3.Error:
                 pass
             with c:
+                # ONE explicit transaction for the whole set-up. Python's sqlite3 module opens a
+                # transaction only before INSERT/UPDATE/DELETE -- never before DDL -- so without this
+                # every ALTER / CREATE / RENAME below committed on its own, and a crash half-way
+                # through a table migration could leave `clients_legacy` behind with the real data
+                # stranded in it. SQLite DDL is transactional: this makes the set-up all-or-nothing.
+                c.execute("BEGIN IMMEDIATE")
                 c.execute("""
                     CREATE TABLE IF NOT EXISTS invoices (
                         invoice_number        TEXT PRIMARY KEY,
@@ -1745,9 +878,9 @@ class DatabaseManager:
     def get_all_clients(self, search: str = "") -> List[Dict]:
         with closing(self._conn()) as c:
             if search:
-                q = f"%{search}%"
                 rows = c.execute(
-                    "SELECT * FROM clients WHERE name LIKE ? ORDER BY name", (q,)
+                    "SELECT * FROM clients WHERE name LIKE ? ESCAPE '\\' ORDER BY name",
+                    (like_pattern(search),),
                 ).fetchall()
             else:
                 rows = c.execute("SELECT * FROM clients ORDER BY name").fetchall()
@@ -1810,9 +943,9 @@ class DatabaseManager:
     def get_all_catalog_items(self, search: str = "") -> List[Dict]:
         with closing(self._conn()) as c:
             if search:
-                q = f"%{search}%"
                 rows = c.execute(
-                    "SELECT * FROM catalog WHERE title LIKE ? ORDER BY title", (q,)
+                    "SELECT * FROM catalog WHERE title LIKE ? ESCAPE '\\' ORDER BY title",
+                    (like_pattern(search),),
                 ).fetchall()
             else:
                 rows = c.execute("SELECT * FROM catalog ORDER BY title").fetchall()
@@ -1900,8 +1033,9 @@ class DatabaseManager:
     def get_all_invoices(self, search_query: str = "", status_filter: str = "All") -> List[sqlite3.Row]:
         clauses, params = [], []
         if search_query:
-            clauses.append("(invoice_number LIKE ? OR bill_to LIKE ? OR notes LIKE ?)")
-            q = f"%{search_query}%"
+            clauses.append("(invoice_number LIKE ? ESCAPE '\\' OR bill_to LIKE ? ESCAPE '\\' "
+                           "OR notes LIKE ? ESCAPE '\\')")
+            q = like_pattern(search_query)
             params += [q, q, q]
         if status_filter and status_filter != "All":
             clauses.append("UPPER(status) = ?")
@@ -1940,8 +1074,9 @@ class DatabaseManager:
         """
         clauses, params = [], []
         if search_query:
-            clauses.append("(invoice_number LIKE ? OR bill_to LIKE ? OR notes LIKE ?)")
-            q = f"%{search_query}%"
+            clauses.append("(invoice_number LIKE ? ESCAPE '\\' OR bill_to LIKE ? ESCAPE '\\' "
+                           "OR notes LIKE ? ESCAPE '\\')")
+            q = like_pattern(search_query)
             params += [q, q, q]
         if status_filter and status_filter != "All":
             clauses.append("UPPER(status) = ?")
@@ -2149,6 +1284,174 @@ class DatabaseManager:
                 FROM invoices
             """).fetchone()
             return dict(row)
+
+
+# -----------------------------------------------------------------------------
+#  Backup, restore and import
+# -----------------------------------------------------------------------------
+# Every copy of the database goes through SQLite's own online-backup API instead of a raw file copy. A raw copy of a
+# WAL-mode database can silently miss recent changes that still sit in the -wal file; the backup API always produces
+# a complete, consistent file, and it works while the application has the database open.
+_FILE_DIALOG_STATE: Dict[str, Optional[str]] = {"backup_dir": None, "import_dir": None, "asset_dir": None}
+
+
+def _start_dir(key: str) -> Path:
+    """Where a file dialog opens: the folder used last time, else the user's Documents folder."""
+    remembered = _FILE_DIALOG_STATE.get(key)
+    if remembered and Path(remembered).is_dir():
+        return Path(remembered)
+    return documents_dir()
+
+
+def _remember_dir(key: str, chosen_file: Any) -> None:
+    _FILE_DIALOG_STATE[key] = str(Path(str(chosen_file)).parent)
+
+
+def _same_file(a: Path, b: Path) -> bool:
+    try:
+        return os.path.samefile(a, b)
+    except OSError:
+        return False
+
+
+def _overwrite_database(source: Path, dest: Path) -> None:
+    """Makes the SQLite database at `dest` an exact copy of the one at `source`."""
+    with closing(sqlite3.connect(str(source), timeout=10)) as src, closing(sqlite3.connect(str(dest), timeout=10)) as dst:
+        try:
+            # SQLite refuses a backup into a WAL-mode database when the two page sizes differ.
+            dst.execute("PRAGMA journal_mode = DELETE")
+        except sqlite3.Error:
+            pass
+        src.backup(dst)
+
+
+def _write_database_copy(source: Path, dest: Path) -> None:
+    """Writes a complete single-file copy of the database `source` to `dest`, replacing whatever is there. The copy
+    is built under a temporary name beside `dest` first, so a failure half-way never leaves a damaged file behind."""
+    source, dest = Path(source), Path(dest)
+    if not source.is_file():
+        raise FileNotFoundError(f"The database file was not found:\n{source}")
+    if dest.exists() and _same_file(source, dest):
+        raise ValueError("That is the database Vyaprix is using right now.\nPlease choose a different file.")
+    temp = dest.with_name(dest.name + ".part")
+    sidecars = ("-wal", "-shm", "-journal")
+    try:
+        _overwrite_database(source, temp)
+        try:
+            with closing(sqlite3.connect(str(temp), timeout=10)) as conn:
+                conn.execute("PRAGMA journal_mode = DELETE")        # a self-contained file: nothing left in a -wal
+        except sqlite3.Error:
+            pass
+        for suffix in sidecars:                                      # a stale -wal beside the old file must not be replayed
+            try:
+                dest.with_name(dest.name + suffix).unlink()
+            except OSError:
+                pass
+        os.replace(temp, dest)
+    finally:
+        for leftover in [temp] + [temp.with_name(temp.name + s) for s in sidecars]:
+            try:
+                leftover.unlink()
+            except OSError:
+                pass
+
+
+def backup_database_to(dest: Path) -> None:
+    """Saves a complete copy of the live database to `dest`."""
+    _write_database_copy(Path(DB_NAME), Path(dest))
+
+
+# Columns every Vyaprix database has had since the first release (newer ones are added by DatabaseManager).
+_CORE_INVOICE_COLUMNS = frozenset({"invoice_number", "bill_to", "items", "status", "invoice_date"})
+
+
+def validate_import_database(path: Path) -> Optional[str]:
+    """None when `path` is a usable Vyaprix database, otherwise a short human-readable reason why it is not."""
+    path = Path(path)
+    if not path.is_file():
+        return "The file could not be found."
+    try:
+        with closing(sqlite3.connect(str(path), timeout=10)) as conn:
+            tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+            if "invoices" not in tables:
+                return "It is a database, but not a Vyaprix one (there is no invoices table in it)."
+            missing = sorted(_CORE_INVOICE_COLUMNS - {row[1] for row in conn.execute("PRAGMA table_info(invoices)")})
+            if missing:
+                return f"It is a database, but not a Vyaprix one (its invoices table has no {', '.join(missing)} column)."
+            verdict = conn.execute("PRAGMA quick_check(1)").fetchone()
+            if not verdict or verdict[0] != "ok":
+                return f"The file failed SQLite's integrity check and may be damaged ({verdict[0] if verdict else 'no result'})."
+    except sqlite3.Error as exc:
+        return str(exc)
+    return None
+
+
+class DatabaseImportError(Exception):
+    """Raised by import_database_from(). `stage` is "backup" (the safety copy could not be made, nothing was touched)
+    or "import" (the import failed; `restored` says whether the previous database could be put back)."""
+
+    def __init__(self, message: str, stage: str, restored: bool = True, backup_path: Optional[Path] = None):
+        super().__init__(message)
+        self.stage = stage
+        self.restored = restored
+        self.backup_path = backup_path
+
+
+def import_database_from(source: Path) -> Path:
+    """Replaces everything in the live database with the contents of `source`. The current database is copied to a
+    timestamped safety file first (its path is returned) and put back if anything goes wrong."""
+    source = Path(source)
+    live = Path(DB_NAME)
+    stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+    backup_path = DATA_DIR / f"Vyaprix-pre-import-backup-{stamp}.db"
+    counter = 2
+    while backup_path.exists():         # never overwrite an earlier safety copy (it may even be the file being imported)
+        backup_path = DATA_DIR / f"Vyaprix-pre-import-backup-{stamp}-{counter}.db"
+        counter += 1
+    had_live = live.exists()
+    try:
+        if had_live:
+            _write_database_copy(live, backup_path)
+    except Exception as exc:
+        raise DatabaseImportError(str(exc), "backup", backup_path=backup_path) from exc
+    try:
+        _overwrite_database(source, live)
+        DatabaseManager(live)       # adds anything an older / smaller file is missing; fails on a file that is not ours
+    except Exception as exc:
+        restored = False
+        try:
+            if had_live:
+                _overwrite_database(backup_path, live)
+                restored = True
+        except Exception:
+            logger.exception("Could not restore the previous database after a failed import")
+        raise DatabaseImportError(str(exc), "import", restored, backup_path) from exc
+    return backup_path
+
+
+def prompt_and_backup_database(parent: Optional[QWidget] = None) -> None:
+    """Asks where to save a copy of the live database, then writes it there. Shared by the Settings dialog's
+    "Save a Backup Copy" button and the Ctrl+B shortcut, so there is one definition of "back up the database"."""
+    default_name = f"Vyaprix-backup-{datetime.date.today().isoformat()}.db"
+    path, _ = QFileDialog.getSaveFileName(parent, "Save Database Backup", str(_start_dir("backup_dir") / default_name),
+                                          "SQLite Database (*.db)")
+    if not path:
+        return
+    target = Path(path)
+    if not target.suffix:
+        target = target.with_suffix(".db")
+    _remember_dir("backup_dir", target)
+    try:
+        backup_database_to(target)
+    except Exception as exc:
+        Messagebox.show_error("Backup Failed", str(exc), parent=parent)
+        return
+    Messagebox.show_info("Backup Saved", f"Database backed up to:\n{target}", parent=parent)
+
+
+# =============================================================================
+#  10. PDF GENERATION
+# =============================================================================
 class PDFGenerator:
     def __init__(self, data: Dict[str, Any], config: Dict[str, Any],
                  payments: Optional[List[Dict]] = None, out_dir: Optional[Path] = None):
@@ -2305,7 +1608,7 @@ class PDFGenerator:
         if self.is_gst:
             if cgstin := self.data.get("client_gstin"):
                 cg = f"<br/>GSTIN: {safe_markup(cgstin)}"
-            if ygstin := self.config.get("company_details", {}).get("gstin"):
+            if ygstin := _real_value(self.config.get("company_details", {}).get("gstin"), _SAMPLE_GSTIN):
                 yg = f"<br/>GSTIN: {safe_markup(ygstin)}"
         # Escape first, THEN turn newlines into <br/> -- safe_markup() only
         # touches &/</>, so it won't disturb the newlines we're about to replace.
@@ -2489,7 +1792,8 @@ class PDFGenerator:
         for label, key in (("Bank", "bank_name"), ("A/C Holder", "account_holder_name"),
                             ("A/C No", "account_number"), ("IFSC", "ifsc_code"),
                             ("UPI ID", "upi_id")):
-            if val := pd.get(key):
+            val = _real_value(pd.get(key), _SAMPLE_UPI_ID) if key == "upi_id" else pd.get(key)
+            if val:
                 lines.append(f"{label}: {safe_markup(val)}")
         if notes := pd.get("payment_notes"):
             lines.append(safe_markup(notes).replace("\n", "<br/>"))
@@ -2538,9 +1842,8 @@ class PDFGenerator:
         story += [Spacer(1, 0.3*cm), self._build_footer_section()]
         doc.build(story, onFirstPage=self.on_each_page, onLaterPages=self.on_each_page)
         return self.filename
-# =============================================================================
-#  PDF MERGING  (bulk print)
-# =============================================================================
+
+
 def merge_pdfs(paths: List[Path], out_path: Path) -> Path:
     """Combine multiple single-invoice PDFs into one file for batch printing.
 
@@ -2562,12 +1865,2094 @@ def merge_pdfs(paths: List[Path], out_path: Path) -> Path:
         writer.close()
     return out_path
 
+
 # =============================================================================
-#  ABOUT DIALOG
+#  11. THEME ENGINE
+#  Eight named themes. Each is one palette; the Qt palette, the global stylesheet and the generated icons derive from it.
 # =============================================================================
+THEME_NAMES: List[str] = ["litera", "cosmo", "flatly", "darkly", "cyborg", "superhero", "morph", "pulse"]
+DEFAULT_THEME: str = "litera"
+
+#  bg      window background          surface  cards / inputs / menus
+#  alt     zebra rows, headers, hover  border   hairlines
+#  fg      body text                   muted    secondary text
+THEMES: Dict[str, Dict[str, Any]] = {
+    "litera": dict(dark=False, bg="#F4F6FA", surface="#FFFFFF", alt="#F1F3F7", border="#DDE1E7",
+                   fg="#343A40", muted="#6C757D",
+                   primary="#4582EC", secondary="#ADB5BD", success="#02B875",
+                   info="#17A2B8", warning="#F0AD4E", danger="#D9534F"),
+    "cosmo":  dict(dark=False, bg="#F5F7FA", surface="#FFFFFF", alt="#EFF2F6", border="#D9DEE4",
+                   fg="#373A3C", muted="#6B7075",
+                   primary="#2780E3", secondary="#7E8081", success="#3FB618",
+                   info="#9954BB", warning="#FF7518", danger="#FF0039"),
+    "flatly": dict(dark=False, bg="#F3F5F6", surface="#FFFFFF", alt="#ECF0F1", border="#D5DBDE",
+                   fg="#2C3E50", muted="#7B8A8B",
+                   primary="#2C3E50", secondary="#95A5A6", success="#18BC9C",
+                   info="#3498DB", warning="#F39C12", danger="#E74C3C"),
+    "darkly": dict(dark=True, bg="#222222", surface="#2D2D2D", alt="#363636", border="#454545",
+                   fg="#F1F1F1", muted="#ADB5BD",
+                   primary="#375A7F", secondary="#444444", success="#00BC8C",
+                   info="#3498DB", warning="#F39C12", danger="#E74C3C"),
+    "cyborg": dict(dark=True, bg="#060606", surface="#121212", alt="#1C1C1C", border="#2E2E2E",
+                   fg="#E4E4E4", muted="#9A9A9A",
+                   primary="#2A9FD6", secondary="#555555", success="#77B300",
+                   info="#9933CC", warning="#FF8800", danger="#CC0000"),
+    "superhero": dict(dark=True, bg="#2B3E50", surface="#34495E", alt="#3E5367", border="#4E6377",
+                      fg="#EBEBEB", muted="#A9B8C6",
+                      primary="#4C9BE8", secondary="#4E5D6C", success="#5CB85C",
+                      info="#5BC0DE", warning="#F0AD4E", danger="#D9534F"),
+    "morph":  dict(dark=False, bg="#DCE5F1", surface="#EDF2F9", alt="#E2EAF4", border="#C3D1E3",
+                   fg="#44546A", muted="#6F7F94",
+                   primary="#378DFC", secondary="#AAAAAA", success="#43CC29",
+                   info="#5B62F4", warning="#FFC107", danger="#E52527"),
+    "pulse":  dict(dark=False, bg="#F6F4FA", surface="#FFFFFF", alt="#F0ECF6", border="#DAD3E8",
+                   fg="#3D3D4A", muted="#7A7589",
+                   primary="#593196", secondary="#69676E", success="#13B955",
+                   info="#009CDC", warning="#EFA31D", danger="#FC3939"),
+}
+
+_LEGACY_THEME_NAMES = {"light": "litera", "dark": "darkly"}   # written by early PySide6 previews
+TONES: Tuple[str, ...] = ("primary", "secondary", "success", "info", "warning", "danger")
+_ACTIVE_THEME_NAME: str = DEFAULT_THEME
+_ACTIVE_PALETTE: Dict[str, str] = {}
+
+
+def normalize_theme_name(name: Optional[str]) -> str:
+    name = _LEGACY_THEME_NAMES.get((name or "").strip().lower(), (name or "").strip().lower())
+    return name if name in THEMES else DEFAULT_THEME
+
+
+# ---- tiny colour maths -------------------------------------------------------
+def _rgb(h: str) -> Tuple[int, int, int]:
+    h = h.lstrip("#")
+    return int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+
+
+def _hex(r: float, g: float, b: float) -> str:
+    return "#{:02X}{:02X}{:02X}".format(*(max(0, min(255, int(round(v)))) for v in (r, g, b)))
+
+
+def _mix(a: str, b: str, t: float) -> str:
+    """t=0 -> a, t=1 -> b."""
+    ra, ga, ba = _rgb(a)
+    rb, gb, bb = _rgb(b)
+    return _hex(ra + (rb - ra) * t, ga + (gb - ga) * t, ba + (bb - ba) * t)
+
+
+def _lum(h: str) -> float:
+    def f(c):
+        c /= 255.0
+        return c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4
+    r, g, b = _rgb(h)
+    return 0.2126 * f(r) + 0.7152 * f(g) + 0.0722 * f(b)
+
+
+def _contrast(a: str, b: str) -> float:
+    la, lb = _lum(a), _lum(b)
+    hi, lo = max(la, lb), min(la, lb)
+    return (hi + 0.05) / (lo + 0.05)
+
+
+def _on(bg: str) -> str:
+    """Text colour for a filled background. White -- exactly what ttkbootstrap's `selectfg` gives every tone in all
+    eight themes -- except on the rare pale fill where white would be close to invisible (Morph's yellow warning)."""
+    return "#FFFFFF" if _contrast(bg, "#FFFFFF") >= 1.8 else "#1F2937"
+
+
+def _readable(color: str, on: str, minimum: float = 3.2) -> str:
+    """Nudge `color` toward black/white until it reads on `on` (for text & outlines)."""
+    target = "#FFFFFF" if _lum(on) < 0.4 else "#000000"
+    c = color
+    for step in range(12):
+        if _contrast(c, on) >= minimum:
+            break
+        c = _mix(c, target, 0.12)
+    return c
+
+
+def resolve_palette(theme: Dict[str, Any]) -> Dict[str, str]:
+    """Theme dict -> flat dict of every token the QSS / QPalette need."""
+    p: Dict[str, str] = {k: v for k, v in theme.items() if isinstance(v, str)}
+    dark = bool(theme["dark"])
+    p["is_dark"] = "1" if dark else "0"
+    p["input_bg"] = p["surface"]
+    p["border_strong"] = _mix(p["border"], p["fg"], 0.35)
+    p["sel"] = _mix(p["surface"], p["primary"], 0.28 if dark else 0.20)
+    p["sel_fg"] = p["fg"]
+    p["disabled_bg"] = _mix(p["bg"], p["fg"], 0.06)
+    p["disabled_fg"] = _mix(p["surface"], p["fg"], 0.42)
+    p["placeholder"] = _mix(p["surface"], p["fg"], 0.48)
+    p["shadow"] = "#000000"
+    for tone in TONES:
+        base = p[tone]
+        p[f"{tone}_on"] = _on(base)
+        p[f"{tone}_hover"] = _mix(base, "#FFFFFF" if dark else "#000000", 0.14)
+        p[f"{tone}_pressed"] = _mix(base, "#FFFFFF" if dark else "#000000", 0.24)
+        p[f"{tone}_soft"] = _mix(p["surface"], base, 0.18 if dark else 0.12)
+        p[f"{tone}_text"] = _readable(base, p["surface"])
+    p["muted_text"] = _readable(p["muted"], p["surface"], 3.0)
+    p["hero_bg"] = p["primary"]
+    p["hero_fg"] = _on(p["primary"])
+    p["hero_sub"] = _mix(p["primary"], p["hero_fg"], 0.78)
+    p["backdrop"] = _mix(p["bg"], "#000000", 0.18 if not dark else 0.30)    # PDF viewer / canvas surround
+    return p
+
+
+def theme_color(key: str) -> str:
+    """Current theme's colour for a palette token (e.g. 'border', 'primary_text')."""
+    if not _ACTIVE_PALETTE:
+        _ACTIVE_PALETTE.update(resolve_palette(THEMES[DEFAULT_THEME]))
+    return _ACTIVE_PALETTE[key]
+
+
+def active_theme_name() -> str:
+    return _ACTIVE_THEME_NAME
+
+
+def theme_is_dark() -> bool:
+    return theme_color("is_dark") == "1"
+
+
+def _icon_dir() -> Path:
+    for base in (DATA_DIR, Path(tempfile.gettempdir())):
+        try:
+            d = base / "ui_cache"
+            d.mkdir(parents=True, exist_ok=True)
+            return d
+        except OSError:
+            continue
+    return Path(tempfile.gettempdir())
+
+
+def _paint_icon(kind: str, color: str, px: int = 24) -> QImage:
+    img = QImage(px, px, QImage.Format.Format_ARGB32)
+    img.fill(0)
+    qp = QPainter(img)
+    qp.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+    pen = QPen(QColor(color))
+    pen.setWidthF(px * 0.11)
+    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+    pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+    s = px / 24.0
+    if kind in ("down", "up"):
+        path = QPainterPath()
+        y1, y2 = (8.5, 15.0) if kind == "down" else (15.0, 8.5)
+        path.moveTo(6.0 * s, y1 * s)
+        path.lineTo(12.0 * s, y2 * s)
+        path.lineTo(18.0 * s, y1 * s)
+        qp.setPen(pen)
+        qp.drawPath(path)
+    elif kind in ("left", "right"):
+        path = QPainterPath()
+        x1, x2 = (14.5, 9.0) if kind == "left" else (9.5, 15.0)
+        path.moveTo(x1 * s, 6.0 * s)
+        path.lineTo(x2 * s, 12.0 * s)
+        path.lineTo(x1 * s, 18.0 * s)
+        qp.setPen(pen)
+        qp.drawPath(path)
+    elif kind == "check":
+        pen.setWidthF(px * 0.14)
+        path = QPainterPath()
+        path.moveTo(5.5 * s, 12.5 * s)
+        path.lineTo(10.0 * s, 17.0 * s)
+        path.lineTo(18.5 * s, 7.5 * s)
+        qp.setPen(pen)
+        qp.drawPath(path)
+    elif kind == "dot":
+        qp.setPen(Qt.PenStyle.NoPen)
+        qp.setBrush(QBrush(QColor(color)))
+        qp.drawEllipse(QRectF(7.5 * s, 7.5 * s, 9.0 * s, 9.0 * s))
+    elif kind in ("tri_up", "tri_down"):
+        qp.setPen(Qt.PenStyle.NoPen)
+        qp.setBrush(QBrush(QColor(color)))
+        path = QPainterPath()
+        if kind == "tri_up":
+            path.moveTo(12.0 * s, 8.0 * s); path.lineTo(18.0 * s, 16.0 * s); path.lineTo(6.0 * s, 16.0 * s)
+        else:
+            path.moveTo(12.0 * s, 16.0 * s); path.lineTo(18.0 * s, 8.0 * s); path.lineTo(6.0 * s, 8.0 * s)
+        path.closeSubpath()
+        qp.drawPath(path)
+    qp.end()
+    return img
+
+
+def _icon_url(kind: str, color: str) -> str:
+    path = _icon_dir() / f"{kind}_{color.lstrip('#').lower()}.png"
+    if not path.exists():
+        _paint_icon(kind, color).save(str(path), "PNG")
+    return 'url("' + path.as_posix() + '")'
+
+
+_QSS_BASE = """
+* { outline: 0; }
+QWidget { font-family: "@font_family@", "Noto Sans", "Helvetica Neue", Arial, sans-serif; font-size: 13px; color: @fg@; }
+QMainWindow, QDialog { background: @bg@; }
+QToolTip { background: @surface@; color: @fg@; border: 1px solid @border_strong@; padding: 4px 8px; border-radius: 4px; }
+
+/* ---------- frames ---------- */
+QFrame[role="card"]    { background: @surface@; border: 1px solid @border@; border-radius: 10px; }
+QFrame[role="sidebar"] { background: @surface@; border: none; }          /* the 1 px divider next to it is its own vline() */
+QFrame[role="toolbar"] { background: @surface@; border: 1px solid @border@; border-radius: 8px; }
+QFrame[role="sep"]     { background: @border@; border: none; }
+QFrame[role="hero"]    { background: @hero_bg@; border: none; border-radius: 0px; }
+QFrame[role="hero-round"] { background: @hero_bg@; border: none; border-radius: 8px; }
+QFrame[role="stat"]    { background: @surface@; border: 1px solid @border@; border-radius: 10px; }
+QFrame[role="stat"][tone="primary"]   { border-left: 4px solid @primary@; }
+QFrame[role="stat"][tone="success"]   { border-left: 4px solid @success@; }
+QFrame[role="stat"][tone="danger"]    { border-left: 4px solid @danger@; }
+QFrame[role="stat"][tone="warning"]   { border-left: 4px solid @warning@; }
+QFrame[role="stat"][tone="info"]      { border-left: 4px solid @info@; }
+QFrame[role="stat"][tone="secondary"] { border-left: 4px solid @secondary@; }
+QFrame[role="stat-solid"] { border: none; border-radius: 10px; }   /* Dashboard cards: solid tone block, as in the Tk build */
+QFrame[role="splash"]  { background: @surface@; border: none; }
+QFrame[role="splash-border"] { background: @primary@; border: none; }      /* square, like the Tk splash window */
+QFrame[role="thumb"]   { background: @alt@; border: 1px solid @border@; border-radius: 6px; }
+QFrame[role="key"]     { background: @alt@; border: 1px solid @border_strong@; border-radius: 4px; }
+
+/* ---------- labels ---------- */
+QLabel { background: transparent; }
+QLabel[role="h1"]      { font-size: 22px; font-weight: 700; }
+QLabel[role="h2"]      { font-size: 15px; font-weight: 600; }
+QLabel[role="h3"]      { font-size: 13px; font-weight: 700; }
+QLabel[role="muted"]   { color: @muted_text@; }
+QLabel[role="small"]   { color: @muted_text@; font-size: 11px; }
+QLabel[role="section"] { font-size: 11px; font-weight: 700; color: @muted_text@; }
+QLabel[role="caption"] { font-size: 12px; font-weight: 600; }          /* field captions on forms */
+QLabel[role="display"] { font-size: 34px; font-weight: 700; }            /* About box version number */
+QLabel[role="stat-value"] { font-size: 22px; font-weight: 700; }
+QLabel[role="stat-title"] { font-size: 11px; font-weight: 700; color: @muted_text@; }
+QLabel[role="stat-solid-title"] { font-size: 12px; }
+QLabel[role="stat-solid-value"] { font-size: 24px; font-weight: 700; }
+QLabel[role="stat-solid-value"][compact="true"] { font-size: 18px; }
+QLabel[role="hero-title"] { color: @hero_fg@; font-size: 20px; font-weight: 700; }
+QLabel[role="hero-sub"]   { color: @hero_sub@; font-size: 11px; }
+QLabel[role="key"]     { font-weight: 700; font-size: 12px; background: @alt@; border: 1px solid @border_strong@; border-radius: 4px; padding: 4px 8px; }
+QLabel[role="link"]    { color: @primary_text@; }
+QLabel[role="badge"]   { font-size: 11px; font-weight: 700; border-radius: 9px; padding: 3px 10px; }
+@LABEL_TONES@
+
+/* ---------- inputs ---------- */
+QLineEdit, QTextEdit, QPlainTextEdit, QComboBox, QSpinBox, QDoubleSpinBox, QDateEdit, QTimeEdit {
+    background: @input_bg@; color: @fg@; border: 1px solid @border_strong@; border-radius: 6px;
+    padding: 5px 8px; selection-background-color: @sel@; selection-color: @sel_fg@;
+}
+QLineEdit:hover, QTextEdit:hover, QPlainTextEdit:hover, QComboBox:hover, QSpinBox:hover, QDoubleSpinBox:hover, QDateEdit:hover { border-color: @primary@; }
+QLineEdit:focus, QTextEdit:focus, QPlainTextEdit:focus, QComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus, QDateEdit:focus,
+QComboBox:on { border: 1px solid @primary@; }
+QLineEdit:disabled, QTextEdit:disabled, QPlainTextEdit:disabled, QComboBox:disabled, QSpinBox:disabled, QDateEdit:disabled {
+    background: @disabled_bg@; color: @disabled_fg@; border-color: @border@; }
+QLineEdit[invalid="true"], QTextEdit[invalid="true"], QComboBox[invalid="true"] { border: 1px solid @danger@; }
+QLineEdit[readOnly="true"] { background: @alt@; }
+QLineEdit[flat="true"], QComboBox QLineEdit, QAbstractSpinBox QLineEdit, QDateEdit QLineEdit { border: none; background: transparent; padding: 0px; }
+
+QComboBox { padding-right: 26px; }
+QComboBox::drop-down, QDateEdit::drop-down { subcontrol-origin: padding; subcontrol-position: center right; width: 24px; border: none; }
+QComboBox::down-arrow, QDateEdit::down-arrow { image: @ICON_DOWN_FG@; width: 12px; height: 12px; }
+QComboBox::down-arrow:disabled, QDateEdit::down-arrow:disabled { image: @ICON_DOWN_DIS@; }
+QComboBox QAbstractItemView { background: @surface@; color: @fg@; border: 1px solid @border_strong@; border-radius: 6px;
+    selection-background-color: @primary@; selection-color: @primary_on@; padding: 3px; }
+QComboBox QAbstractItemView::item { min-height: 24px; padding: 2px 6px; border-radius: 4px; }
+
+QAbstractSpinBox::up-button, QAbstractSpinBox::down-button { width: 18px; border: none; background: transparent; }
+QAbstractSpinBox::up-arrow { image: @ICON_UP_FG@; width: 10px; height: 10px; }
+QAbstractSpinBox::down-arrow { image: @ICON_DOWN_FG@; width: 10px; height: 10px; }
+
+QCheckBox, QRadioButton { spacing: 8px; background: transparent; }
+QCheckBox::indicator { width: 16px; height: 16px; border: 1px solid @border_strong@; border-radius: 4px; background: @input_bg@; }
+QCheckBox::indicator:hover, QRadioButton::indicator:hover { border-color: @primary@; }
+QCheckBox::indicator:checked { background: @primary@; border-color: @primary@; image: @ICON_CHECK@; }
+QCheckBox::indicator:indeterminate { background: @primary@; border-color: @primary@; }
+QCheckBox::indicator:disabled, QRadioButton::indicator:disabled { background: @disabled_bg@; border-color: @border@; }
+QRadioButton::indicator { width: 16px; height: 16px; border: 1px solid @border_strong@; border-radius: 9px; background: @input_bg@; }
+QRadioButton::indicator:checked { background: @primary@; border-color: @primary@; image: @ICON_DOT@; }
+
+/* ---------- buttons ---------- */
+QPushButton { background: @surface@; color: @fg@; border: 1px solid @border_strong@; border-radius: 6px; padding: 7px 14px; }
+QPushButton:hover { background: @alt@; border-color: @muted@; }
+QPushButton:pressed { background: @border@; }
+QPushButton:focus { border-color: @primary@; }
+QPushButton:disabled { color: @disabled_fg@; background: @disabled_bg@; border-color: @border@; }
+QPushButton:checked { background: @primary@; color: @primary_on@; border-color: @primary@; }
+@BUTTON_ROLES@
+QPushButton[role="link"] { background: transparent; border: none; color: @primary_text@; padding: 4px 6px; }
+QPushButton[role="link"]:hover { background: @primary_soft@; }
+QPushButton[role="tool"] { padding: 4px 8px; min-width: 22px; font-size: 14px; background: @surface@; }
+QPushButton[glyph="true"] { padding: 7px 6px; }                                 /* one-symbol buttons ("✕"): no wide side padding */
+QPushButton[align="left"] { text-align: left; padding: 11px 15px; }        /* sidebar navigation / system buttons */
+QToolButton { background: transparent; border: 1px solid transparent; border-radius: 6px; padding: 4px; }
+QToolButton:hover { background: @alt@; border-color: @border@; }
+
+/* ---------- item views ---------- */
+QAbstractItemView { background: @surface@; alternate-background-color: @alt@; color: @fg@; border: 1px solid @border@;
+    border-radius: 8px; gridline-color: @border@; selection-background-color: @sel@; selection-color: @sel_fg@; }
+QTableView, QTreeView, QListView { show-decoration-selected: 1; }
+QTableView::item, QTreeView::item { padding: 5px 8px; border: none; }
+QTableView::item:selected, QTreeView::item:selected, QListView::item:selected { background: @sel@; color: @sel_fg@; }
+QTableView::item:hover, QTreeView::item:hover, QListView::item:hover { background: @alt@; }
+QTableView::item:selected:hover { background: @sel@; }
+QListView::item { padding: 6px 8px; border-radius: 4px; }
+QHeaderView { background: @alt@; border: none; }
+QHeaderView::section { background: @alt@; color: @muted_text@; font-weight: 700; padding: 8px 10px; border: none;
+    border-bottom: 1px solid @border_strong@; border-right: 1px solid @border@; }
+QHeaderView::section:hover { background: @border@; color: @fg@; }
+QHeaderView::section:first { border-top-left-radius: 8px; }
+QHeaderView::section:last { border-top-right-radius: 8px; border-right: none; }
+QHeaderView::up-arrow   { image: @ICON_TRI_UP@;   width: 12px; height: 12px; subcontrol-position: center right; }
+QHeaderView::down-arrow { image: @ICON_TRI_DOWN@; width: 12px; height: 12px; subcontrol-position: center right; }
+QTableCornerButton::section { background: @alt@; border: none; }
+
+/* ---------- menus ---------- */
+QMenu { background: @surface@; color: @fg@; border: 1px solid @border_strong@; border-radius: 8px; padding: 5px; }
+QMenu::item { padding: 7px 26px 7px 14px; border-radius: 5px; }
+QMenu::item:selected { background: @primary@; color: @primary_on@; }
+QMenu::item:disabled { color: @disabled_fg@; }
+QMenu::separator { height: 1px; background: @border@; margin: 5px 8px; }
+
+/* ---------- scrolling ---------- */
+QScrollArea { border: none; background: transparent; }
+QScrollBar:vertical   { width: 12px; background: transparent; margin: 2px; }
+QScrollBar:horizontal { height: 12px; background: transparent; margin: 2px; }
+QScrollBar::handle:vertical   { background: @border_strong@; border-radius: 4px; min-height: 28px; margin: 0px 2px; }
+QScrollBar::handle:horizontal { background: @border_strong@; border-radius: 4px; min-width: 28px; margin: 2px 0px; }
+QScrollBar::handle:hover { background: @muted@; }
+QScrollBar::add-line, QScrollBar::sub-line { width: 0px; height: 0px; background: none; border: none; }
+QScrollBar::add-page, QScrollBar::sub-page { background: transparent; }
+
+/* ---------- containers ---------- */
+QTabWidget::pane { border: 1px solid @border@; border-radius: 8px; top: -1px; background: transparent; }
+QTabBar::tab { padding: 9px 18px; background: transparent; color: @muted_text@; border: none; border-bottom: 2px solid transparent; margin-right: 2px; }
+QTabBar::tab:hover { color: @fg@; }
+QTabBar::tab:selected { color: @primary_text@; font-weight: 600; border-bottom: 2px solid @primary@; }
+QGroupBox { border: 1px solid @border@; border-radius: 8px; margin-top: 14px; padding: 14px 10px 10px 10px; background: transparent; }
+QGroupBox::title { subcontrol-origin: margin; subcontrol-position: top left; left: 12px; padding: 0 6px; color: @muted_text@; font-weight: 700; }
+QSplitter::handle { background: @border@; }
+QProgressBar { border: none; border-radius: 4px; background: @border@; text-align: center; min-height: 8px; max-height: 8px; color: @fg@; }
+QProgressBar::chunk { background: @primary@; border-radius: 4px; }
+QProgressBar[tall="true"] { min-height: 18px; max-height: 18px; border-radius: 9px; }
+QProgressBar[tall="true"]::chunk { border-radius: 9px; }
+QMessageBox { background: @bg@; }
+QMessageBox QLabel { color: @fg@; }
+
+/* ---------- calendar popup (QDateEdit) ---------- */
+QCalendarWidget QWidget { alternate-background-color: @alt@; }
+QCalendarWidget QToolButton { background: transparent; color: @fg@; border: none; border-radius: 6px; padding: 4px 8px; font-weight: 600; }
+QCalendarWidget QToolButton:hover { background: @alt@; }
+QCalendarWidget QToolButton::menu-indicator { image: none; }
+QCalendarWidget #qt_calendar_prevmonth { qproperty-icon: none; image: @ICON_LEFT@; width: 16px; height: 16px; }
+QCalendarWidget #qt_calendar_nextmonth { qproperty-icon: none; image: @ICON_RIGHT@; width: 16px; height: 16px; }
+QCalendarWidget QMenu { background: @surface@; }
+QCalendarWidget QSpinBox { background: @surface@; border: 1px solid @border_strong@; border-radius: 4px; padding: 2px 4px; }
+QCalendarWidget QAbstractItemView:enabled { background: @surface@; color: @fg@; border: none; border-radius: 0px;
+    selection-background-color: @primary@; selection-color: @primary_on@; }
+QCalendarWidget QAbstractItemView:disabled { color: @disabled_fg@; }
+#qt_calendar_navigationbar { background: @alt@; border-bottom: 1px solid @border@; }
+"""
+
+
+def _label_tone_rules() -> str:
+    out = []
+    for tone in TONES:
+        out.append(f'QLabel[tone="{tone}"] {{ color: @{tone}_text@; }}')
+        out.append(f'QLabel[role="badge"][tone="{tone}"] {{ background: @{tone}@; color: @{tone}_on@; }}')
+        out.append(f'QLabel[role="badge-soft"][tone="{tone}"] {{ background: @{tone}_soft@; color: @{tone}_text@; font-weight: 700; '
+                   f'border-radius: 9px; padding: 3px 10px; font-size: 11px; }}')
+        out.append(f'QFrame[role="stat-solid"][tone="{tone}"] {{ background: @{tone}@; }}')
+        out.append(f'QLabel[role="stat-solid-title"][tone="{tone}"], QLabel[role="stat-solid-value"][tone="{tone}"] '
+                   f'{{ color: @{tone}_on@; }}')
+    out.append('QLabel[tone="muted"] { color: @muted_text@; }')
+    return "\n".join(out)
+
+
+def _button_role_rules() -> str:
+    out = []
+    for tone in TONES:
+        out.append(
+            f'QPushButton[role="{tone}"] {{ background: @{tone}@; color: @{tone}_on@; border: 1px solid @{tone}@; }}\n'
+            f'QPushButton[role="{tone}"]:hover {{ background: @{tone}_hover@; border-color: @{tone}_hover@; }}\n'
+            f'QPushButton[role="{tone}"]:pressed {{ background: @{tone}_pressed@; border-color: @{tone}_pressed@; }}\n'
+            f'QPushButton[role="{tone}"]:disabled {{ background: @disabled_bg@; color: @disabled_fg@; border-color: @border@; }}\n'
+            f'QPushButton[role="{tone}-outline"] {{ background: transparent; color: @{tone}_text@; border: 1px solid @{tone}_text@; }}\n'
+            f'QPushButton[role="{tone}-outline"]:hover {{ background: @{tone}@; color: @{tone}_on@; border-color: @{tone}@; }}\n'
+            f'QPushButton[role="{tone}-outline"]:pressed {{ background: @{tone}_pressed@; color: @{tone}_on@; }}\n'
+            f'QPushButton[role="{tone}-outline"]:disabled {{ background: transparent; color: @disabled_fg@; border-color: @border@; }}'
+        )
+    return "\n".join(out)
+
+
+def build_qss(p: Dict[str, str]) -> str:
+    tokens = dict(p)
+    tokens["font_family"] = FONT_FAMILY
+    tokens["LABEL_TONES"] = _label_tone_rules()
+    tokens["BUTTON_ROLES"] = _button_role_rules()
+    # Icons are generated lazily and keyed by colour.
+    tokens["ICON_DOWN_FG"] = _icon_url("down", p["muted_text"])
+    tokens["ICON_DOWN_DIS"] = _icon_url("down", p["disabled_fg"])
+    tokens["ICON_UP_FG"] = _icon_url("up", p["muted_text"])
+    tokens["ICON_LEFT"] = _icon_url("left", p["fg"])
+    tokens["ICON_RIGHT"] = _icon_url("right", p["fg"])
+    tokens["ICON_CHECK"] = _icon_url("check", p["primary_on"])
+    tokens["ICON_DOT"] = _icon_url("dot", p["primary_on"])
+    tokens["ICON_TRI_UP"] = _icon_url("tri_up", p["muted_text"])
+    tokens["ICON_TRI_DOWN"] = _icon_url("tri_down", p["muted_text"])
+    qss = _QSS_BASE
+    # two passes: expand the generated rule blocks first, then every @token@
+    for key in ("LABEL_TONES", "BUTTON_ROLES"):
+        qss = qss.replace(f"@{key}@", tokens[key])
+    return re.sub(r"@(\w+)@", lambda m: tokens[m.group(1)], qss)
+
+
+def build_qpalette(p: Dict[str, str]) -> QPalette:
+    pal = QPalette()
+    R = QPalette.ColorRole
+    G = QPalette.ColorGroup
+    pairs = {
+        R.Window: p["bg"], R.WindowText: p["fg"], R.Base: p["input_bg"], R.AlternateBase: p["alt"],
+        R.Text: p["fg"], R.Button: p["surface"], R.ButtonText: p["fg"], R.ToolTipBase: p["surface"],
+        R.ToolTipText: p["fg"], R.Highlight: p["primary"], R.HighlightedText: p["primary_on"],
+        R.PlaceholderText: p["placeholder"], R.Link: p["primary_text"], R.LinkVisited: p["info_text"],
+        R.BrightText: "#FFFFFF", R.Light: p["surface"], R.Midlight: p["alt"], R.Mid: p["border"],
+        R.Dark: p["border_strong"], R.Shadow: "#000000",
+    }
+    for role, color in pairs.items():
+        pal.setColor(role, QColor(color))
+    for role in (R.WindowText, R.Text, R.ButtonText):
+        pal.setColor(G.Disabled, role, QColor(p["disabled_fg"]))
+    return pal
+
+
+def apply_app_style(app: QApplication, theme_name: Optional[str] = None) -> None:
+    """Install the named theme application-wide (palette + stylesheet). Live: every
+    open window re-polishes instantly, no restart and no per-widget fix-ups."""
+    global _ACTIVE_THEME_NAME
+    name = normalize_theme_name(theme_name)
+    pal = resolve_palette(THEMES[name])
+    _ACTIVE_THEME_NAME = name
+    _ACTIVE_PALETTE.clear()
+    _ACTIVE_PALETTE.update(pal)
+    app.setStyle("Fusion")
+    app.setPalette(build_qpalette(pal))
+    app.setStyleSheet(build_qss(pal))
+
+
+def _repolish(widget: QWidget) -> QWidget:
+    st = widget.style()
+    st.unpolish(widget)
+    st.polish(widget)
+    widget.update()
+    return widget
+
+
+def set_role(widget: QWidget, role: str, tone: Optional[str] = None) -> QWidget:
+    """Sets the QSS-visible `role` (and optional `tone`) property -- the Qt
+    equivalent of ttkbootstrap's bootstyle= -- and refreshes the widget so the
+    change shows immediately even if it is already on screen."""
+    widget.setProperty("role", role)
+    if tone is not None:
+        widget.setProperty("tone", tone)
+    return _repolish(widget)
+
+
+def set_flag(widget: QWidget, name: str, on: bool) -> QWidget:
+    """Sets a boolean dynamic property that QSS can match as [name="true"] (e.g. a `compact` variant of a
+    role) and refreshes the widget. No-op when the value is unchanged."""
+    value = "true" if on else "false"
+    if widget.property(name) == value:
+        return widget
+    widget.setProperty(name, value)
+    return _repolish(widget)
+
+
+def set_tone(widget: QWidget, tone: Optional[str]) -> QWidget:
+    widget.setProperty("tone", tone or "")
+    return _repolish(widget)
+
+
+def hline() -> QFrame:
+    f = QFrame()
+    f.setProperty("role", "sep")
+    f.setFixedHeight(1)
+    f.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+    return f
+
+
+def vline() -> QFrame:
+    f = QFrame()
+    f.setProperty("role", "sep")
+    f.setFixedWidth(1)
+    f.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
+    return f
+
+
+def make_label(text: str = "", role: Optional[str] = None, tone: Optional[str] = None,
+               wrap: bool = False, align: Optional[Qt.AlignmentFlag] = None) -> QLabel:
+    lbl = QLabel(text)
+    if role:
+        lbl.setProperty("role", role)
+    if tone:
+        lbl.setProperty("tone", tone)
+    if wrap:
+        lbl.setWordWrap(True)
+    if align is not None:
+        lbl.setAlignment(align)
+    return lbl
+
+
+def make_button(text: str, role: Optional[str] = None, slot: Optional[Callable] = None,
+                tooltip: str = "", min_height: int = 0) -> QPushButton:
+    btn = QPushButton(text)
+    if role:
+        btn.setProperty("role", role)
+    if tooltip:
+        btn.setToolTip(tooltip)
+    if min_height:
+        btn.setMinimumHeight(min_height)
+    if slot is not None:
+        btn.clicked.connect(lambda _checked=False: slot())
+    btn.setCursor(Qt.CursorShape.PointingHandCursor)
+    return btn
+
+
 # =============================================================================
-#  ABOUT DIALOG
+#  12. SHARED UI HELPERS
 # =============================================================================
+class Messagebox:
+    """Static helpers matching the exact call shape this app already uses
+    everywhere -- title first, then message, an optional parent= kwarg,
+    and real booleans back from confirmation dialogs -- so every existing
+    call site (`Messagebox.show_error("Oops", "...", parent=self)`) keeps
+    working completely unchanged. Only the implementation is new: QMessageBox
+    instead of ttkbootstrap's dialogs."""
+
+    @staticmethod
+    def show_info(title, message, *args, parent=None, **kwargs):
+        QMessageBox.information(parent, title, message)
+
+    @staticmethod
+    def show_warning(title, message, *args, parent=None, **kwargs):
+        QMessageBox.warning(parent, title, message)
+
+    @staticmethod
+    def show_error(title, message, *args, parent=None, **kwargs):
+        QMessageBox.critical(parent, title, message)
+
+    @staticmethod
+    def show_question(title, message, *args, parent=None, **kwargs):
+        return QMessageBox.question(parent, title, message)
+
+    @staticmethod
+    def ok(title, message, *args, parent=None, **kwargs):
+        QMessageBox.information(parent, title, message)
+
+    @staticmethod
+    def okcancel(title, message, *args, parent=None, **kwargs) -> bool:
+        """True only if the user actually clicked OK."""
+        result = QMessageBox.question(
+            parent, title, message,
+            QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
+        )
+        return result == QMessageBox.StandardButton.Ok
+
+    @staticmethod
+    def yesno(title, message, *args, parent=None, **kwargs) -> bool:
+        """True only if the user actually clicked Yes."""
+        result = QMessageBox.question(
+            parent, title, message,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        return result == QMessageBox.StandardButton.Yes
+
+
+# -----------------------------------------------------------------------------
+#  Number fields
+# -----------------------------------------------------------------------------
+class _DecimalValidator(QValidator):
+    """Allows only a non-negative decimal number with at most
+    `max_decimal_places` digits after the point, live as the user types.
+    Applied via QLineEdit.setValidator() -- Qt's equivalent of the Tkinter
+    build's `entry.configure(validate="key", validatecommand=...)`."""
+    def __init__(self, max_decimal_places: int = 2, parent=None):
+        super().__init__(parent)
+        self._pattern = re.compile(r"^\d*\.?\d*$")
+        self._max_places = max_decimal_places
+
+    def validate(self, text: str, pos: int):
+        if text == "":
+            return QValidator.State.Acceptable, text, pos
+        if not self._pattern.match(text) or len(text.partition(".")[2]) > self._max_places:
+            return QValidator.State.Invalid, text, pos
+        return QValidator.State.Acceptable, text, pos
+
+
+def restrict_to_decimal(line_edit: QLineEdit, max_decimal_places: int = 2) -> QLineEdit:
+    line_edit.setValidator(_DecimalValidator(max_decimal_places, line_edit))
+    return line_edit
+
+
+def restrict_to_digits(line_edit: QLineEdit, max_length: Optional[int] = None) -> QLineEdit:
+    if max_length:
+        line_edit.setMaxLength(max_length)
+    line_edit.setValidator(QRegularExpressionValidator(QRegularExpression(r"^\d*$"), line_edit))
+    return line_edit
+
+
+class _BlurFormatFilter(QObject):
+    """Reformats a field to a fixed number of decimal places the moment it
+    loses focus (e.g. "5" -> "5.00"). QLineEdit has no del <FocusOut> event
+    the way a Tk Entry does, so this uses an event filter instead -- one
+    small object per field, parented to the field so Qt cleans it up
+    automatically when the field is destroyed."""
+    def __init__(self, places: int, parent=None):
+        super().__init__(parent)
+        self.places = places
+
+    def eventFilter(self, obj, event):
+        if event.type() == QEvent.Type.FocusOut:
+            current = obj.text()
+            formatted = f"{safe_float(current):.{self.places}f}"
+            if formatted != current:
+                obj.setText(formatted)
+        return False
+
+
+def format_as_decimal_on_blur(line_edit: QLineEdit, places: int = 2) -> QLineEdit:
+    line_edit.installEventFilter(_BlurFormatFilter(places, line_edit))
+    return line_edit
+
+
+# -----------------------------------------------------------------------------
+#  Pictures, tooltips and small widgets
+# -----------------------------------------------------------------------------
+def load_app_logo_pixmap(max_width: int = 160) -> Optional[QPixmap]:
+    """Loads the bundled app logo (sidebar + splash screen), scaled to at
+    most `max_width` px wide. SIMPLER THAN THE TKINTER BUILD: Qt's QPixmap
+    already does smooth, high-quality scaling to any size on its own -- the
+    Pillow-with-a-Tk-PhotoImage-fallback dance the old load_app_logo_image()
+    needed (Tk's native PhotoImage.subsample() only scales by whole-number
+    factors) simply isn't necessary here."""
+    if not APP_LOGO_PNG.exists():
+        return None
+    try:
+        pixmap = QPixmap(str(APP_LOGO_PNG))
+        if pixmap.isNull():
+            return None
+        if pixmap.width() > max_width:
+            pixmap = pixmap.scaledToWidth(max_width, Qt.TransformationMode.SmoothTransformation)
+        return pixmap
+    except Exception as exc:
+        logger.warning(f"Could not load app logo image: {exc}")
+        return None
+
+
+def load_thumbnail_pixmap(path: Optional[Path], max_size: int = 44) -> Optional[QPixmap]:
+    """Same idea as load_app_logo_pixmap(), generalised to any path and
+    target size -- used for the asset-upload preview rows in Settings."""
+    if not path or not path.exists():
+        return None
+    try:
+        pixmap = QPixmap(str(path))
+        if pixmap.isNull():
+            return None
+        return pixmap.scaled(max_size, max_size, Qt.AspectRatioMode.KeepAspectRatio,
+                              Qt.TransformationMode.SmoothTransformation)
+    except Exception as exc:
+        logger.warning(f"Could not load thumbnail for {path}: {exc}")
+        return None
+
+
+class ToolTip:
+    """Qt widgets already have a built-in hover tooltip
+    (QWidget.setToolTip()), so unlike the Tkinter build there is no custom
+    popup Toplevel to build and manage here -- this class exists only so
+    every `ToolTip(widget, "explanation")` call site elsewhere in the file
+    keeps working unchanged."""
+    def __init__(self, widget: QWidget, text: str, delay: int = 500):
+        widget.setToolTip(text)
+
+
+class Debouncer(QObject):
+    """Coalesces rapid repeated calls (e.g. keystrokes) into one after
+    `delay` ms. Same contract as the Tkinter build: construct once, then
+    call the instance itself on every keystroke; `.cancel()` stops a
+    pending call. Backed by QTimer instead of Tk's `.after()`."""
+    def __init__(self, parent: QObject, delay: int, func: Callable):
+        super().__init__(parent)
+        self._timer = QTimer(self)
+        self._timer.setSingleShot(True)
+        self._timer.timeout.connect(func)
+        self._delay = delay
+
+    def __call__(self, *args):
+        self._timer.start(self._delay)
+
+    def cancel(self):
+        self._timer.stop()
+
+
+class PlaceholderEntry(QLineEdit):
+    """Single-line hint-text field, replacing the Tkinter build's
+    PlaceholderEntry. Qt's native placeholderText already has the exact
+    property that build's PlaceholderMixin had to hand-build: text() reads
+    back "" while the hint is showing, so nothing can ever mistake the hint
+    for real input. get()/insert()/delete()/focus_set() aliases are kept
+    so the rest of this file's Tkinter-flavoured call sites need minimal
+    changes; new code can just use the native Qt methods directly."""
+    def __init__(self, parent=None, placeholder: str = "", **kw):
+        super().__init__(parent)
+        if placeholder:
+            self.setPlaceholderText(placeholder)
+
+    def get(self) -> str:
+        return self.text()
+
+    def insert(self, index, text):
+        self.setText(text)
+
+    def delete(self, first=0, last=None):
+        self.clear()
+
+    def focus_set(self):
+        self.setFocus()
+
+    def selection_range(self, start, end):
+        if end in ("end", -1):
+            self.selectAll()
+        else:
+            self.setSelection(start, end - start)
+
+
+class PlaceholderText(QPlainTextEdit):
+    """Multi-line hint-text box. Qt's native placeholder text replaces the hand-rolled mechanism the Tkinter build
+    needed. It is a QPlainTextEdit rather than a QTextEdit on purpose: only QPlainTextEdit wraps a long hint over
+    several lines (QTextEdit draws it on one clipped line), and this box only ever holds plain text anyway."""
+    def __init__(self, parent=None, placeholder: str = "", height: Optional[int] = None, **kw):
+        super().__init__(parent)
+        if placeholder:
+            self.setPlaceholderText(placeholder)
+        if height:
+            fm = self.fontMetrics()
+            self.setFixedHeight(fm.lineSpacing() * int(height) + 22)    # + padding, border and document margin
+
+    def setAcceptRichText(self, accept: bool) -> None:
+        """No-op: a plain-text box never takes rich text. Kept so code written against QTextEdit still works."""
+
+    def acceptRichText(self) -> bool:
+        return False
+
+    def get(self, index1="1.0", index2="end-1c") -> str:
+        return self.toPlainText()
+
+    def insert(self, index, text):
+        self.setPlainText(text)
+
+    def delete(self, index1="1.0", index2=None):
+        self.clear()
+
+    def focus_set(self):
+        self.setFocus()
+
+
+# -----------------------------------------------------------------------------
+#  Scrolling, dates and dialogs
+# -----------------------------------------------------------------------------
+class _WheelGuard(QObject):
+    """Stops mouse-wheel events from changing a combo box / spin box / date edit that does
+    not have keyboard focus, so scrolling a long form with the wheel never silently changes
+    a dropdown's value as the cursor drifts across it. Instead of relying on Qt's implicit
+    event propagation, the wheel is handed straight to the enclosing scroll area's vertical
+    scroll bar, so the form keeps scrolling smoothly while the cursor is over the field."""
+
+    def eventFilter(self, obj, event):
+        if event.type() == QEvent.Type.Wheel and not obj.hasFocus():
+            area = obj.parentWidget()
+            while area is not None and not isinstance(area, QAbstractScrollArea):
+                area = area.parentWidget()
+            if area is not None:
+                QApplication.sendEvent(area.verticalScrollBar(), event)
+            event.accept()
+            return True
+        return False
+
+
+def guard_wheel(widget: QWidget) -> QWidget:
+    """Apply the wheel guard to a QComboBox / QAbstractSpinBox / QDateEdit."""
+    widget.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+    widget.installEventFilter(_WheelGuard(widget))
+    return widget
+
+
+QT_DISPLAY_DATE_FORMAT: str = "dd MMM yyyy"          # == DISPLAY_DATE_FORMAT "%d %b %Y"
+
+
+def make_date_edit(value: Optional[datetime.date] = None) -> QDateEdit:
+    """A date field that shows e.g. '24 Oct 2026' with an English calendar popup, whatever
+    the OS language is (Python's strptime('%b') only understands English month names, and
+    the DB layer stores ISO dates, so the displayed text must never be parsed back --
+    use date_edit_value()/date_edit_db() instead)."""
+    edit = QDateEdit()
+    edit.setLocale(QLocale(QLocale.Language.English, QLocale.Country.India))
+    edit.setDisplayFormat(QT_DISPLAY_DATE_FORMAT)
+    edit.setCalendarPopup(True)
+    cal = edit.calendarWidget()
+    if cal is not None:
+        cal.setLocale(QLocale(QLocale.Language.English, QLocale.Country.India))
+        cal.setGridVisible(False)
+    value = value or datetime.date.today()
+    edit.setDate(QDate(value.year, value.month, value.day))
+    guard_wheel(edit)
+    return edit
+
+
+def date_edit_value(edit: QDateEdit) -> datetime.date:
+    d = edit.date()
+    return datetime.date(d.year(), d.month(), d.day())
+
+
+def date_edit_db(edit: QDateEdit) -> str:
+    """The field's date as the DB layer stores it ('YYYY-MM-DD')."""
+    return date_edit_value(edit).strftime(DB_DATE_FORMAT)
+
+
+def set_date_edit_from_db(edit: QDateEdit, db_date: Optional[str]) -> None:
+    """Load a stored 'YYYY-MM-DD' (or empty/invalid -> today) into the field."""
+    try:
+        d = datetime.datetime.strptime(db_date, DB_DATE_FORMAT).date() if db_date else datetime.date.today()
+    except (TypeError, ValueError):
+        d = datetime.date.today()
+    edit.setDate(QDate(d.year, d.month, d.day))
+
+
+def documents_dir() -> Path:
+    """The user's Documents folder (falls back to the home folder): where file dialogs start when there is no
+    better idea of where the user wants to save to."""
+    docs = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.DocumentsLocation)
+    return Path(docs) if docs else Path.home()
+
+
+def run_dialog(dialog: QDialog) -> int:
+    """Run a modal dialog to completion, then release it. Always use this instead of a bare
+    `dialog.exec()` in the application.
+
+    * Qt keeps a closed dialog alive as a hidden child of its parent, so without this every
+      Add/Edit click would leave one more hidden dialog on the main window for the whole session.
+    * PySide6 can crash while tearing down widgets that are kept alive only by lambda slots
+      (a reference cycle through a signal connection) when the interpreter exits. Deleting dialogs
+      the normal Qt way as soon as they are finished (together with the orderly shutdown in
+      main()) keeps that from ever happening.
+
+    Read anything you need from the dialog (e.g. `dialog.job_result`) straight after this returns;
+    the C++ object is deleted when control is back in the event loop."""
+    try:
+        return dialog.exec()
+    finally:
+        dialog.deleteLater()
+
+
+def _fit_to_screen(dialog: QDialog, width: int, height: int, min_width: int, min_height: int) -> None:
+    """Sizes a dialog as the Tk build did, but never larger than the screen it opens on (many laptops are 768 px tall)."""
+    screen = dialog.screen() or QApplication.primaryScreen()
+    if screen is not None:
+        area = screen.availableGeometry()
+        width, height = min(width, max(320, area.width() - 40)), min(height, max(320, area.height() - 60))
+    dialog.setMinimumSize(min(min_width, width), min(min_height, height))
+    dialog.resize(width, height)
+
+
+def _no_default_button(*buttons: QPushButton) -> None:
+    for btn in buttons:
+        btn.setAutoDefault(False)
+        btn.setDefault(False)
+
+
+class KeyTable(QTableWidget):
+    """QTableWidget that turns Delete and Enter/Return into `delete_pressed` / `enter_pressed` signals
+    (and swallows those two keys, so a table with no handler connected does nothing, exactly like the
+    Tk Treeview). Used by the Dashboard, Clients and Catalog lists."""
+    delete_pressed = Signal()
+    enter_pressed = Signal()
+
+    def __init__(self, *args):
+        super().__init__(*args)
+        self._width_floors: Dict[int, int] = {}    # column -> the widest width its content has ever needed (fit_columns)
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key.Key_Delete:
+            self.delete_pressed.emit()
+            return
+        if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            self.enter_pressed.emit()
+            return
+        super().keyPressEvent(event)
+
+    def fit_columns(self, samples: Dict[int, List[str]], padding: int = 24, cap: int = 260) -> None:
+        """Widen -- never narrow -- the listed columns so the widest of their sample texts, the header text and
+        whatever the column currently shows fit in this table's own font. The designed column widths suit Segoe UI;
+        another font, a longer currency symbol or a bigger amount would otherwise end in "…" (a cut-off amount
+        reads as a different amount). Only the columns' *needed* width is remembered: a column the user has since
+        dragged narrower stays where they put it until something wider than ever before has to be shown. The
+        stretch column absorbs the difference."""
+        header = self.horizontalHeader()
+        self.ensurePolished()                      # the stylesheet's font (not the application default) is what is drawn
+        header.ensurePolished()
+        body_fm = self.fontMetrics()
+        head_font = QFont(header.font())
+        head_font.setBold(True)
+        head_fm = QFontMetrics(head_font)
+        floors = self._width_floors
+        for col, texts in samples.items():
+            if header.sectionResizeMode(col) == QHeaderView.ResizeMode.Stretch:
+                continue
+            shown = [self.item(r, col).text() for r in range(self.rowCount()) if self.item(r, col) is not None]
+            need = max((body_fm.horizontalAdvance(t) for t in [*texts, *shown]), default=0) + padding
+            head = self.horizontalHeaderItem(col)
+            if head is not None:                   # room for the sort arrow too (any column can become the sorted one)
+                need = max(need, head_fm.horizontalAdvance(head.text().rstrip(" ▲▼") + "  ▼") + padding)
+            need = min(need, cap)
+            if need > floors.get(col, 0):
+                floors[col] = need
+                if self.columnWidth(col) < need:
+                    self.setColumnWidth(col, need)
+
+    def select_only_row(self, row: int) -> None:
+        """Make `row` the one and only selected row, whatever keyboard modifiers are held at that moment.
+        (QTableView.selectRow() honours Ctrl = toggle / Shift = extend, which is wrong for "the user
+        right-clicked this row".)"""
+        index = self.model().index(row, 0)
+        sm = self.selectionModel()
+        sm.setCurrentIndex(index, QItemSelectionModel.SelectionFlag.NoUpdate)
+        sm.select(index, QItemSelectionModel.SelectionFlag.ClearAndSelect | QItemSelectionModel.SelectionFlag.Rows)
+
+
+# =============================================================================
+#  13. PDF VIEWER, PRINTING & SHARING
+# =============================================================================
+PDF_FIT_FILL: float = 0.97                # Tk: the fitted page fills 97% of the canvas
+PDF_ZOOM_STEP: float = 0.15
+PDF_PRINT_MAX_DPI: int = 300
+PDF_MAX_RENDER_PIXELS: int = 64_000_000   # safety net for the biggest zoom on a 4K / HiDPI screen
+_VIEWER_STATE: Dict[str, Any] = {"save_dir": None}      # folder of the last "Save a copy" (this session)
+
+
+def _is_windows() -> bool:
+    """A tiny seam, so the Windows-only printing path can be exercised by tests on any OS."""
+    return sys.platform == "win32"
+
+
+def _load_qtpdf():
+    """The QPdfDocument class, or None when PySide6's QtPdf module is not installed (it ships in the
+    PySide6-Addons wheel, which a plain `pip install PySide6` includes). Imported on first use so the
+    application still starts without it -- the invoice is then simply opened in the default PDF program."""
+    try:
+        from PySide6.QtPdf import QPdfDocument
+    except ImportError:
+        return None
+    return QPdfDocument
+
+
+def _load_print_support():
+    """(QPrintDialog, QPrinter, QPrinterInfo) from QtPrintSupport, or None when that module is missing."""
+    try:
+        from PySide6.QtPrintSupport import QPrintDialog, QPrinter, QPrinterInfo
+    except ImportError:
+        return None
+    return QPrintDialog, QPrinter, QPrinterInfo
+
+
+def open_in_system_viewer(path) -> bool:
+    """Open a file in the operating system's default program for it (Tk: os.startfile). True when the OS
+    accepted the request."""
+    return bool(QDesktopServices.openUrl(QUrl.fromLocalFile(str(path))))
+
+
+def _pdf_error_text(QPdfDocument, error) -> str:
+    """Plain-English reason for a QPdfDocument.load() failure."""
+    E = QPdfDocument.Error
+    return {
+        E.FileNotFound: "The file was not found.",
+        E.InvalidFileFormat: "This is not a valid PDF document.",
+        E.IncorrectPassword: "This PDF is password-protected.",
+        E.UnsupportedSecurityScheme: "This PDF uses an unsupported security scheme.",
+    }.get(error, "The PDF could not be loaded.")
+
+
+def _render_on_white(doc, page: int, size: QSize) -> QImage:
+    """One PDF page as an opaque image on white paper. PDFium renders onto a *transparent* bitmap, so everything
+    the PDF leaves unpainted (most of an invoice's paper) would show whatever is behind the image -- the page's
+    shadow in the viewer, or an undefined background on a print-to-PDF printer. Composite it on white instead."""
+    rendered = doc.render(page, size)
+    paper = QImage(rendered.size(), QImage.Format.Format_RGB32)
+    paper.fill(QColor("#FFFFFF"))
+    painter = QPainter(paper)
+    painter.drawImage(0, 0, rendered)
+    painter.end()
+    return paper
+
+
+def _default_save_dir() -> Path:
+    last = _VIEWER_STATE.get("save_dir")
+    if last and Path(last).is_dir():
+        return Path(last)
+    return documents_dir()
+
+
+class _PageCanvas(QWidget):
+    """The viewer's drawing surface: a neutral backdrop, the page's drop shadow and 1 px edge, and the rendered
+    page, centred. It lives in a QScrollArea, so a page zoomed beyond the window can be scrolled. The backdrop,
+    shadow and edge colours come from the active theme (the Tk canvas used one fixed grey)."""
+    zoom_wheel = Signal(int)            # +1 / -1: Ctrl + mouse wheel
+    SHADOW = 4
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._image: Optional[QImage] = None
+        self._page_px = QSize(0, 0)        # the page's size in logical pixels
+        self.setMinimumSize(1, 1)
+
+    @property
+    def page_size(self) -> QSize:
+        return QSize(self._page_px)
+
+    def set_image(self, image: Optional[QImage]) -> None:
+        self._image = image
+        if image is None:
+            self._page_px = QSize(0, 0)
+            self.setMinimumSize(1, 1)
+        else:
+            dpr = image.devicePixelRatio() or 1.0
+            self._page_px = QSize(round(image.width() / dpr), round(image.height() / dpr))
+            # Never smaller than the page (plus its shadow and edge), so a page zoomed beyond the window gets scroll
+            # bars. At "fit" the page is at most 97% of the viewport, so this never forces scroll bars there.
+            self.setMinimumSize(self._page_px.width() + self.SHADOW + 1, self._page_px.height() + self.SHADOW + 1)
+        self.update()
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.fillRect(self.rect(), QColor(theme_color("backdrop")))
+        if self._image is None:
+            return
+        w, h = self._page_px.width(), self._page_px.height()
+        x = max((self.width() - w) // 2, 0)
+        y = max((self.height() - h) // 2, 0)
+        shadow = QColor(theme_color("shadow"))
+        shadow.setAlpha(110)
+        p.fillRect(x, y, w + self.SHADOW, h + self.SHADOW, shadow)       # soft drop shadow, offset to the bottom right
+        p.setPen(QPen(QColor(theme_color("border_strong")), 1))
+        p.drawRect(x - 1, y - 1, w + 1, h + 1)                            # crisp 1 px edge exactly around the page
+        p.drawImage(QPoint(x, y), self._image)
+
+    def wheelEvent(self, event):
+        if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
+            step = event.angleDelta().y()
+            if step:
+                self.zoom_wheel.emit(1 if step > 0 else -1)
+            event.accept()
+            return
+        # Plain wheel: hand it straight to the enclosing scroll area's scroll bar (like the form's wheel guard does) --
+        # relying on Qt's implicit propagation to the parent is not dependable for every kind of event source.
+        area = self.parentWidget()
+        while area is not None and not isinstance(area, QAbstractScrollArea):
+            area = area.parentWidget()
+        if area is None:
+            event.ignore()
+            return
+        delta = event.angleDelta()
+        bar = area.verticalScrollBar() if (delta.y() or not delta.x()) else area.horizontalScrollBar()
+        QApplication.sendEvent(bar, event)
+        event.accept()
+
+
+class _PrinterDialog(QDialog):
+    """`choice` is None (cancelled) or ("print", <printer name>) / ("system", None) / ("manual", None)."""
+
+    def __init__(self, parent, printers: List[str], default_printer: str = ""):
+        super().__init__(parent)
+        self.setWindowTitle("Select Printer")
+        self.setModal(True)
+        self.choice: Optional[Tuple[str, Optional[str]]] = None
+        self._printers = list(printers)
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(20, 15, 20, 15)
+        lay.setSpacing(8)
+        lay.setSizeConstraint(QLayout.SizeConstraint.SetFixedSize)           # Tk: resizable(False, False)
+
+        lay.addWidget(make_label("🖨️ Choose a printer destination:", "h3"))
+
+        self.combo = QComboBox()
+        self.combo.setMinimumWidth(360)                                       # => a 400 px wide dialog, as in Tk
+        if self._printers:
+            self.combo.addItems(self._printers)
+            self.combo.setCurrentText(default_printer if default_printer in self._printers else self._printers[0])
+        else:
+            self.combo.addItem("No printers detected")
+            self.combo.setEnabled(False)
+        lay.addWidget(self.combo)
+
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 2, 0, 2)
+        row.addStretch(1)
+        self.print_btn = make_button("Print Document", "success", self._on_print)
+        self.cancel_btn = make_button("Cancel", "secondary-outline", self.reject)
+        row.addWidget(self.print_btn)
+        row.addSpacing(10)
+        row.addWidget(self.cancel_btn)
+        lay.addLayout(row)
+        self.print_btn.setEnabled(bool(self._printers))
+
+        lay.addWidget(hline())
+        self.system_btn = make_button("⚙️ Use System Print Dialog", "info-outline", self._on_system_dialog)
+        self.manual_btn = make_button("🌐 Open PDF Manually (Browser/Viewer)", "primary-outline", self._on_manual_open)
+        lay.addWidget(self.system_btn)
+        lay.addWidget(self.manual_btn)
+
+        for btn in (self.print_btn, self.cancel_btn, self.system_btn, self.manual_btn):
+            btn.setAutoDefault(False)
+        if self._printers:
+            self.print_btn.setDefault(True)                                   # Enter prints to the selected printer
+
+    def _on_print(self):
+        if not self._printers:
+            return
+        self.choice = ("print", self.combo.currentText())
+        self.accept()
+
+    def _on_system_dialog(self):
+        self.choice = ("system", None)
+        self.accept()
+
+    def _on_manual_open(self):
+        self.choice = ("manual", None)
+        self.accept()
+
+
+class PDFViewer(QDialog):
+    MIN_ZOOM = 0.4
+    MAX_ZOOM = 3.5
+
+    def __init__(self, parent, pdf_path: Path, invoice_data: Optional[Dict] = None):
+        super().__init__(parent)
+        self.pdf_path = Path(pdf_path)
+        self.invoice_data = invoice_data
+        self.doc = None
+        self.page_idx = 0
+        self.total = 0
+        self.zoom = 1.0
+        self._failed = False        # the PDF could not be opened: show()/exec() become no-ops
+        self._released = False
+        self._placed = False
+
+        self.setWindowTitle(f"Preview  —  {self.pdf_path.name}")
+        self.setModal(True)                                       # Tk: transient + grab_set() (non-blocking show())
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)    # nobody keeps a reference: free it when it closes
+        self.setWindowFlag(Qt.WindowType.WindowMaximizeButtonHint, True)
+
+        # --- Size (Tk: 900x720, also the minimum; centred on the screen on first show) ---
+        self.setMinimumSize(900, 720)
+        self.resize(900, 720)
+
+        if not self._open_document():
+            return
+
+        self._resize_timer = QTimer(self)                         # Tk: after(130, _render) debounce on <Configure>
+        self._resize_timer.setSingleShot(True)
+        self._resize_timer.timeout.connect(self._render)
+
+        self._build()
+        self._bind_keys()
+
+    # ------------------------------------------------------------------ #
+    #  Opening the document
+    # ------------------------------------------------------------------ #
+    def _open_document(self) -> bool:
+        QPdfDocument = _load_qtpdf()
+        if QPdfDocument is None:
+            return self._give_up(
+                "The built-in preview needs PySide6's QtPdf module (it is part of `pip install PySide6`).\n"
+                "The invoice will open in your default PDF viewer instead.", external=True)
+        doc = QPdfDocument(self)
+        error = doc.load(str(self.pdf_path))
+        if error != QPdfDocument.Error.None_:
+            doc.close()
+            return self._give_up(f"Cannot open file:\n{self.pdf_path}\n\n{_pdf_error_text(QPdfDocument, error)}")
+        if doc.pageCount() < 1:
+            doc.close()
+            return self._give_up(f"Cannot open file:\n{self.pdf_path}\n\nThe PDF has no pages.")
+        self.doc = doc
+        self.total = doc.pageCount()
+        return True
+
+    def _give_up(self, message: str, external: bool = False) -> bool:
+        """Tk: Messagebox.show_error("PDF Error", ...); self.destroy(); return."""
+        self._failed = True
+        Messagebox.show_error("PDF Error", message, parent=self.parentWidget())
+        if external:
+            open_in_system_viewer(self.pdf_path)
+        self.deleteLater()
+        return False
+
+    def setVisible(self, visible: bool):
+        if visible and self._failed:
+            return                                                 # the Tk window was destroyed in __init__
+        super().setVisible(visible)
+
+    def exec(self):
+        if self._failed:
+            return int(QDialog.DialogCode.Rejected)
+        return super().exec()
+
+    # ------------------------------------------------------------------ #
+    #  UI
+    # ------------------------------------------------------------------ #
+    def _build(self):
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+
+        bar = QWidget()
+        tb = QHBoxLayout(bar)
+        tb.setContentsMargins(10, 7, 10, 7)
+        tb.setSpacing(4)
+
+        self.prev_btn = make_button("◀  Prev", "primary", self._prev, "Previous page (← or Page Up)")
+        self.next_btn = make_button("Next  ▶", "primary", self._next, "Next page (→ or Page Down)")
+        for b in (self.prev_btn, self.next_btn):
+            b.setMinimumWidth(88)
+        tb.addWidget(self.prev_btn)
+        tb.addWidget(self.next_btn)
+        tb.addSpacing(10)
+        self.page_lbl = QLabel("")
+        tb.addWidget(self.page_lbl)
+        tb.addStretch(1)
+
+        # Right-hand group, left to right: Fit  ⊖  ⊕  100%  |  Print  Save  Share  Close   (Tk packed it right to left)
+        self.fit_btn = make_button("Fit", "secondary-outline", self._reset_zoom, "Fit the page to the window (Ctrl+0)")
+        self.zoom_out_btn = make_button("⊖", "secondary-outline", self._zoom_out, "Zoom out (Ctrl + −)")
+        self.zoom_in_btn = make_button("⊕", "secondary-outline", self._zoom_in, "Zoom in (Ctrl + +)")
+        self.fit_btn.setMinimumWidth(48)
+        for b in (self.zoom_out_btn, self.zoom_in_btn):
+            b.setMinimumWidth(40)
+        self.zoom_lbl = QLabel("100%")
+        self.zoom_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.zoom_lbl.setMinimumWidth(52)
+        self.print_btn = make_button("🖨  Print", "success", self._print, "Print this PDF (Ctrl+P)")
+        self.save_btn = make_button("💾  Save", "secondary", self._save_copy, "Save a copy of this PDF (Ctrl+E)")
+        self.share_btn = make_button("📤 Share", "info", self._open_share, "Share this invoice by WhatsApp or e-mail")
+        self.close_btn = make_button("✕  Close", "danger", self._close, "Close this viewer (Esc)")
+        for b in (self.print_btn, self.save_btn, self.share_btn, self.close_btn):
+            b.setMinimumWidth(88)
+
+        for w in (self.fit_btn, self.zoom_out_btn, self.zoom_in_btn, self.zoom_lbl):
+            tb.addWidget(w)
+        tb.addSpacing(6)
+        tb.addWidget(vline())
+        tb.addSpacing(6)
+        for w in (self.print_btn, self.save_btn, self.share_btn, self.close_btn):
+            tb.addWidget(w)
+        for b in bar.findChildren(QPushButton):
+            b.setAutoDefault(False)                                  # Enter must not "click" a random toolbar button
+
+        root.addWidget(bar)
+        root.addWidget(hline())
+
+        self.scroll = QScrollArea()
+        self.scroll.setWidgetResizable(True)
+        self.scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.scroll.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.canvas = _PageCanvas()
+        self.canvas.zoom_wheel.connect(self._wheel_zoom)
+        self.scroll.setWidget(self.canvas)
+        root.addWidget(self.scroll, 1)
+
+        hint = make_label("← → or Page Up/Down to navigate  •  Ctrl + / − zoom  •  Ctrl+0 fit  •  "
+                          "Ctrl+P print  •  Ctrl+E save  •  Esc close", "small", align=Qt.AlignmentFlag.AlignCenter)
+        hint.setContentsMargins(0, 3, 0, 3)
+        root.addWidget(hint)
+
+        self._update_nav_state()
+
+    def _bind_keys(self):
+        """Local shortcuts (Tk: self.bind). WidgetWithChildren context = active whenever this window has the focus."""
+        self._shortcuts = []
+        for keys, slot in (
+            (("Left", "PgUp"), self._prev),
+            (("Right", "PgDown"), self._next),
+            (("Ctrl+=", "Ctrl++"), self._zoom_in),
+            (("Ctrl+-",), self._zoom_out),
+            (("Ctrl+0",), self._reset_zoom),
+            (("Ctrl+P",), self._print),
+            (("Ctrl+E",), self._save_copy),
+        ):
+            for key in keys:
+                sc = QShortcut(QKeySequence(key), self)
+                sc.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+                sc.activated.connect(slot)
+                self._shortcuts.append(sc)
+
+    # ------------------------------------------------------------------ #
+    #  Window events
+    # ------------------------------------------------------------------ #
+    def showEvent(self, event):
+        super().showEvent(event)
+        if not self._placed:
+            self._placed = True
+            parent = self.parentWidget()
+            screen = parent.screen() if parent is not None else QGuiApplication.primaryScreen()
+            if screen is not None:                                     # Tk: centred on the screen
+                area = screen.availableGeometry()
+                self.move(area.center() - QPoint(self.width() // 2, self.height() // 2))
+        self.scroll.setFocus()
+        self._schedule_render(30)                                      # first picture as soon as the window has its size
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if not self._failed:
+            self._schedule_render(130)                                 # re-render once the user stops resizing
+
+    def _schedule_render(self, delay_ms: int):
+        """(Re)start the debounce timer. QTimer.start(msec) also *changes* the interval, so the delay is passed
+        every time instead of being set once."""
+        self._resize_timer.start(delay_ms)
+
+    def _release_document(self):
+        """Let go of the PDF file (on Windows an open handle would block deleting / overwriting the invoice)."""
+        if self._released:
+            return
+        self._released = True
+        self._resize_timer.stop()
+        if self.doc is not None:
+            self.doc.close()
+
+    def done(self, result):
+        self._release_document()
+        super().done(result)
+
+    def closeEvent(self, event):
+        self._release_document()
+        super().closeEvent(event)
+
+    def _close(self):
+        self.close()
+
+    # ------------------------------------------------------------------ #
+    #  Rendering
+    # ------------------------------------------------------------------ #
+    def _render(self, reset_scroll: bool = False):
+        if self._released or self.doc is None:
+            return
+        viewport = self.scroll.maximumViewportSize()      # the viewport as if there were no scroll bars: stable fit
+        cw, ch = viewport.width(), viewport.height()
+        if cw <= 1 or ch <= 1:
+            return
+        page_pt = self.doc.pagePointSize(self.page_idx)
+        if page_pt.width() <= 0 or page_pt.height() <= 0:
+            return
+        fit_z = min(cw / page_pt.width(), ch / page_pt.height()) * PDF_FIT_FILL
+        z = fit_z * self.zoom
+        w = max(int(page_pt.width() * z), 1)
+        h = max(int(page_pt.height() * z), 1)
+
+        dpr = self.devicePixelRatioF() or 1.0
+        pw, ph = max(round(w * dpr), 1), max(round(h * dpr), 1)
+        if pw * ph > PDF_MAX_RENDER_PIXELS:                 # never ask PDFium for an absurdly large bitmap
+            shrink = (PDF_MAX_RENDER_PIXELS / (pw * ph)) ** 0.5
+            pw, ph = max(int(pw * shrink), 1), max(int(ph * shrink), 1)
+        image = _render_on_white(self.doc, self.page_idx, QSize(pw, ph))
+        image.setDevicePixelRatio(pw / w)                    # logical size stays w x h whatever the bitmap size
+
+        # Keep the point at the middle of the window where it is while zooming / resizing.
+        hbar, vbar = self.scroll.horizontalScrollBar(), self.scroll.verticalScrollBar()
+        view = self.scroll.viewport().size()
+        old = self.canvas.size()
+        cx = (hbar.value() + view.width() / 2) / max(old.width(), 1)
+        cy = (vbar.value() + view.height() / 2) / max(old.height(), 1)
+
+        self.canvas.set_image(image)
+        self.canvas.resize(viewport.expandedTo(self.canvas.minimumSize()))   # adopt the new size now (updates the bars)
+        QApplication.sendPostedEvents(None, int(QEvent.Type.LayoutRequest))
+        new = self.canvas.size()
+        view = self.scroll.viewport().size()
+        if reset_scroll:
+            hbar.setValue(0)
+            vbar.setValue(0)
+        else:
+            hbar.setValue(round(cx * new.width() - view.width() / 2))
+            vbar.setValue(round(cy * new.height() - view.height() / 2))
+
+        self.page_lbl.setText(f"Page {self.page_idx + 1} / {self.total}")
+        self.zoom_lbl.setText(f"{round(self.zoom * 100)}%")     # Tk: int() -> 1.3 showed as "129%"
+        self._update_nav_state()
+
+    def _update_nav_state(self):
+        self.prev_btn.setEnabled(self.page_idx > 0)
+        self.next_btn.setEnabled(self.page_idx < self.total - 1)
+
+    # ------------------------------------------------------------------ #
+    #  Navigation / zoom
+    # ------------------------------------------------------------------ #
+    def _next(self):
+        if self.page_idx < self.total - 1:
+            self.page_idx += 1
+            self._render(reset_scroll=True)
+
+    def _prev(self):
+        if self.page_idx > 0:
+            self.page_idx -= 1
+            self._render(reset_scroll=True)
+
+    def _zoom(self, delta: float):
+        self.zoom = round(max(self.MIN_ZOOM, min(self.MAX_ZOOM, self.zoom + delta)), 4)
+        self._render()
+
+    def _zoom_in(self):
+        self._zoom(+PDF_ZOOM_STEP)
+
+    def _zoom_out(self):
+        self._zoom(-PDF_ZOOM_STEP)
+
+    def _wheel_zoom(self, direction: int):
+        self._zoom(PDF_ZOOM_STEP * direction)
+
+    def _reset_zoom(self):
+        self.zoom = 1.0
+        self._render()
+
+    # ------------------------------------------------------------------ #
+    #  Printing
+    # ------------------------------------------------------------------ #
+    def _print(self):
+        if not _is_windows():
+            try:
+                subprocess.run(["lp", str(self.pdf_path)], check=True)
+            except Exception as exc:
+                Messagebox.show_error("Print Error", str(exc), parent=self)
+            return
+
+        support = _load_print_support()
+        if support is None:
+            self._print_via_shell()      # Tk: the "PyQt5 is missing" fallback
+            return
+        QPrinterInfo = support[2]
+        printers = list(QPrinterInfo.availablePrinterNames())
+        default_printer = QPrinterInfo.defaultPrinterName()
+
+        dialog = _PrinterDialog(self, printers, default_printer)
+        run_dialog(dialog)
+        choice = dialog.choice
+        if choice is None:
+            return
+        kind, name = choice
+        if kind == "print":
+            self._print_with_qt(printer_name=name)
+        elif kind == "system":
+            self._print_with_qt(show_dialog=True)
+        else:
+            self._open_manually()
+
+    def _print_via_shell(self):
+        """Last resort when QtPrintSupport is unavailable: ask Windows to print the file with its default PDF program."""
+        try:
+            os.startfile(self.pdf_path, "print")
+        except OSError:
+            Messagebox.show_warning(
+                "Manual Print Required",
+                "A PDF reader is not set as default.\n"
+                "The file will open — press Ctrl+P to print.", parent=self)
+            self._open_manually()
+
+    def _open_manually(self):
+        if not open_in_system_viewer(self.pdf_path):
+            Messagebox.show_error("Open Error", f"Windows could not open the PDF:\n{self.pdf_path}", parent=self)
+
+    def _print_with_qt(self, printer_name: Optional[str] = None, show_dialog: bool = False):
+        """Both ways of printing: straight to a named printer, or through the system print dialog."""
+        support = _load_print_support()
+        if support is None:
+            self._print_via_shell()
+            return
+        QPrintDialog, QPrinter, _ = support
+
+        painter = None
+        busy = False
+        try:
+            printer = QPrinter(QPrinter.PrinterMode.HighResolution)
+            if show_dialog:
+                print_dialog = QPrintDialog(printer, self)
+                accepted = run_dialog(print_dialog) == int(QDialog.DialogCode.Accepted)
+                if not accepted:
+                    return
+            else:
+                printer.setPrinterName(printer_name)
+
+            QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+            busy = True
+            painter = QPainter()
+            if not painter.begin(printer):
+                raise RuntimeError("The print job could not be started.\n"
+                                   "Check that the printer is switched on and not in use by another program.")
+            dpi = min(printer.resolution() or PDF_PRINT_MAX_DPI, PDF_PRINT_MAX_DPI)
+            scale = dpi / 72.0
+            for page_index in range(self.total):
+                if page_index > 0:
+                    printer.newPage()
+                size_pt = self.doc.pagePointSize(page_index)
+                image = _render_on_white(self.doc, page_index, QSize(max(round(size_pt.width() * scale), 1),
+                                                                     max(round(size_pt.height() * scale), 1)))
+                # Fit the page into the printable area, centred. (Tk moved the painter's viewport cumulatively, so
+                # every page after the first was drawn at the wrong offset.)
+                area = painter.viewport()
+                fitted = image.size().scaled(area.size(), Qt.AspectRatioMode.KeepAspectRatio)
+                target = QRect(area.x() + (area.width() - fitted.width()) // 2,
+                               area.y() + (area.height() - fitted.height()) // 2,
+                               fitted.width(), fitted.height())
+                painter.drawImage(target, image)
+        except Exception as exc:
+            if busy:
+                QApplication.restoreOverrideCursor()
+                busy = False
+            Messagebox.show_error("Print Error", str(exc), parent=self)
+            return
+        finally:
+            # Tk BUG FIX kept: cleanup is on every path (a failure part-way used to leave the painter attached to
+            # the print spooler).
+            if painter is not None and painter.isActive():
+                painter.end()
+            if busy:
+                QApplication.restoreOverrideCursor()
+        if not show_dialog:
+            Messagebox.show_info("Success", f"Document sent to {printer_name}!", parent=self)
+
+    # ------------------------------------------------------------------ #
+    #  Save a copy / share
+    # ------------------------------------------------------------------ #
+    def _save_copy(self):
+        start = str(_default_save_dir() / self.pdf_path.name)
+        path, _ = QFileDialog.getSaveFileName(self, "Save As", start, "PDF Documents (*.pdf)")
+        if not path:
+            return
+        if not Path(path).suffix:                    # Tk: defaultextension=".pdf"
+            path += ".pdf"
+        try:
+            shutil.copy(self.pdf_path, path)
+            _VIEWER_STATE["save_dir"] = str(Path(path).parent)
+            Messagebox.show_info("Saved", f"Invoice saved to:\n{path}", parent=self)
+        except Exception as exc:
+            Messagebox.show_error("Save Error", str(exc), parent=self)
+
+    def _open_share(self):
+        run_dialog(ShareDialog(self, self.pdf_path, self.invoice_data))
+
+
+class ShareDialog(QDialog):
+    """Mini dialog to share the invoice via WhatsApp or the default e-mail program."""
+
+    def __init__(self, parent, pdf_path: Path, invoice_data: Optional[Dict]):
+        super().__init__(parent)
+        self.pdf_path = pdf_path
+        self.invoice_data = dict(invoice_data) if invoice_data else {}
+
+        self.setWindowTitle("Share Invoice")
+        self.setModal(True)
+        self._build()
+        self._prefill_data()
+        self.phone_entry.setFocus()
+
+    def _build(self):
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(20, 20, 20, 20)
+        lay.setSpacing(0)
+        lay.setSizeConstraint(QLayout.SizeConstraint.SetFixedSize)         # Tk: 420x340, not resizable
+
+        lay.addWidget(make_label("📤 Share Invoice", "h2"))
+        lay.addSpacing(15)
+
+        lay.addWidget(make_label("WhatsApp Number (with Country Code):", "caption"))
+        lay.addSpacing(2)
+        self.phone_entry = QLineEdit()
+        self.phone_entry.setMinimumWidth(380)                                # => a 420 px wide dialog, as in Tk
+        self.phone_entry.setPlaceholderText("e.g. +91 98765 43210")
+        self.phone_entry.returnPressed.connect(self._send_whatsapp)
+        lay.addWidget(self.phone_entry)
+        lay.addSpacing(10)
+
+        lay.addWidget(make_label("Client Email Address:", "caption"))
+        lay.addSpacing(2)
+        self.email_entry = QLineEdit()
+        self.email_entry.setPlaceholderText("e.g. accounts@client.com")
+        self.email_entry.returnPressed.connect(self._send_email)
+        lay.addWidget(self.email_entry)
+        lay.addSpacing(15)
+
+        row = QHBoxLayout()
+        row.setSpacing(10)
+        self.whatsapp_btn = make_button("💬 WhatsApp", "success", self._send_whatsapp, min_height=32)
+        self.email_btn = make_button("✉️ Email", "primary", self._send_email, min_height=32)
+        row.addWidget(self.whatsapp_btn, 1)
+        row.addWidget(self.email_btn, 1)
+        lay.addLayout(row)
+        lay.addSpacing(15)
+
+        note = make_label("Note: The PDF file path will be copied to your clipboard.\n"
+                          "Simply paste (Ctrl+V) when attaching the file.", "small",
+                          align=Qt.AlignmentFlag.AlignCenter)
+        lay.addWidget(note)
+        for btn in (self.whatsapp_btn, self.email_btn):
+            btn.setAutoDefault(False)
+
+    def _prefill_data(self):
+        contact_info = self.invoice_data.get("client_contact", "") or ""
+        if not contact_info:
+            return
+        # Basic regex to pull an e-mail address and a phone number out of the free-text contact box
+        email_match = re.search(r'[\w\.-]+@[\w\.-]+', contact_info)
+        if email_match:
+            self.email_entry.setText(email_match.group(0))
+        phone_match = re.search(r'\+?\d[\d\s-]{8,}\d', contact_info)
+        if phone_match:
+            self.phone_entry.setText(re.sub(r'[^\d+]', '', phone_match.group(0)))   # digits and a leading + only
+
+    def _copy_path_to_clipboard(self):
+        QGuiApplication.clipboard().setText(str(self.pdf_path))
+
+    def _send_whatsapp(self):
+        phone = self.phone_entry.text().strip()
+        clean_phone = re.sub(r'[^\d]', '', phone)
+        if not clean_phone:                       # empty, or nothing but punctuation / letters
+            Messagebox.show_warning("Missing Info", "Please enter a WhatsApp number.", parent=self)
+            return
+
+        self._copy_path_to_clipboard()
+
+        inv_num = self.invoice_data.get('invoice_number', 'Invoice')
+        msg = f"Hello! Please find attached {inv_num}. Thank you for your business."
+        safe_msg = urllib.parse.quote(msg)
+        self._open_link(f"https://wa.me/{clean_phone}?text={safe_msg}")
+
+    def _send_email(self):
+        email = self.email_entry.text().strip()
+        if not email:
+            Messagebox.show_warning("Missing Info", "Please enter an email address.", parent=self)
+            return
+
+        self._copy_path_to_clipboard()
+
+        inv_num = self.invoice_data.get('invoice_number', 'Invoice')
+        subject = urllib.parse.quote(f"Invoice {inv_num} from {self.invoice_data.get('your_name', 'Us')}")
+        body = urllib.parse.quote(f"Hello,\n\nPlease find attached {inv_num}.\n\nThank you!")
+        self._open_link(f"mailto:{email}?subject={subject}&body={body}")
+
+    def _open_link(self, url: str):
+        if webbrowser.open(url):
+            self.accept()                          # Tk: destroy() -- the job is done
+        else:
+            Messagebox.show_warning(
+                "Share", "Could not open your browser / e-mail program.\n"
+                "The PDF path is on the clipboard, so you can still paste it into a message.", parent=self)
+
+
+# =============================================================================
+#  14. DIALOGS
+# =============================================================================
+class _EditDialog(QDialog):
+    """Shared chrome for the small modal edit dialogs: a bold header, labelled fields,
+    a hairline, and a right-aligned [Save][Cancel] row -- the same arrangement as the
+    Tkinter build. Enter saves (the Save button is the dialog's default button) except
+    inside a multi-line box, where Enter inserts a new line -- Qt's own behaviour, so the
+    Tk build's hand-written <Return> handler is no longer needed. Esc cancels."""
+
+    def __init__(self, parent, window_title: str, header: str, width: int = 440):
+        super().__init__(parent)
+        self.setWindowTitle(window_title)
+        self.setModal(True)
+        self.setMinimumWidth(width)
+        self._root = QVBoxLayout(self)
+        self._root.setContentsMargins(20, 20, 20, 20)
+        self._root.setSpacing(0)
+        self._root.addWidget(make_label(header, "h2"))
+        self._root.addSpacing(14)
+
+    def _add_field(self, label: str, widget: QWidget, space_after: int = 12) -> None:
+        self._root.addWidget(make_label(label, "h3"))
+        self._root.addSpacing(4)
+        self._root.addWidget(widget)
+        self._root.addSpacing(space_after)
+
+    @staticmethod
+    def _multiline(placeholder: str, rows: int) -> PlaceholderText:
+        box = PlaceholderText(placeholder=placeholder, height=rows)
+        box.setTabChangesFocus(True)
+        box.setAcceptRichText(False)
+        return box
+
+    def _add_buttons(self, save_text: str, save_slot: Callable) -> None:
+        self._root.addWidget(hline())
+        self._root.addSpacing(10)
+        row = QHBoxLayout()
+        row.addStretch()
+        self.save_btn = make_button(save_text, "success", save_slot)
+        self.save_btn.setDefault(True)
+        self.cancel_btn = make_button("✕ Cancel", "secondary-outline", self.reject)
+        self.cancel_btn.setAutoDefault(False)
+        row.addWidget(self.save_btn)
+        row.addSpacing(8)
+        row.addWidget(self.cancel_btn)
+        self._root.addLayout(row)
+
+
+class ClientDialog(_EditDialog):
+    """Add or edit a single Address Book entry."""
+
+    def __init__(self, parent, db_manager: "DatabaseManager", client: Optional[Dict], on_saved: Callable):
+        super().__init__(parent, "Edit Client" if client else "Add Client",
+                         "Edit Client Details" if client else "New Client Details")
+        self.db_manager = db_manager
+        self.client = client
+        self.on_saved = on_saved
+
+        self.name_entry = PlaceholderEntry(placeholder="Enter client name")
+        self._add_field("Client / Company Name *", self.name_entry)
+        self.contact_text = self._multiline("+91 98765 43210\nname@email.com\nCity, State", 4)
+        self._add_field("Contact Info", self.contact_text)
+        self.gstin_entry = PlaceholderEntry(placeholder="e.g., 22ABCDE1234F1Z5")
+        self._add_field("GSTIN (Optional)", self.gstin_entry, space_after=15)
+
+        if client:
+            self.name_entry.setText(client.get("name", ""))
+            self.contact_text.setPlainText(client.get("contact", "") or "")
+            self.gstin_entry.setText(client.get("gstin", "") or "")
+
+        self._add_buttons("💾 Save", self._save)
+        self.name_entry.setFocus()
+
+    def _save(self):
+        name = self.name_entry.text().strip()
+        if not name:
+            return Messagebox.show_error("Validation", "Client name is required.", parent=self)
+        contact = self.contact_text.toPlainText().strip()
+        gstin = self.gstin_entry.text().strip()
+        # IMPROVEMENT over the Tk build: the invoice form refuses to save an invoice whose client
+        # GSTIN is malformed, so catch it here instead of at invoicing time.
+        if gstin and not is_valid_gstin(gstin):
+            return Messagebox.show_error(
+                "Invalid GST Number",
+                f'"{gstin}" is not a valid GSTIN.\nA GSTIN is 15 characters, for example 22ABCDE1234F1Z5.',
+                parent=self)
+        cid = self.client.get("id") if self.client else None
+        ok, err = self.db_manager.upsert_client_by_id(cid, name, contact, gstin)
+        if ok:
+            self.on_saved()
+            self.accept()
+        else:
+            Messagebox.show_error("Could Not Save", err, parent=self)
+
+
+class CatalogItemDialog(_EditDialog):
+    """Add or edit a single Product & Service Catalog entry."""
+
+    def __init__(self, parent, db_manager: "DatabaseManager", item: Optional[Dict], on_saved: Callable):
+        super().__init__(parent, "Edit Catalog Item" if item else "Add Catalog Item",
+                         "Edit Catalog Item" if item else "New Catalog Item")
+        self.db_manager = db_manager
+        self.item = item
+        self.on_saved = on_saved
+
+        self.title_entry = PlaceholderEntry(placeholder="Enter item / service name")
+        self._add_field("Item / Service Title *", self.title_entry)
+        self.desc_text = self._multiline("Description (optional)", 4)
+        self._add_field("Description", self.desc_text)
+        self.amount_entry = QLineEdit()
+        # UX polish: strict numeric controls (same as the Tk build)
+        restrict_to_decimal(self.amount_entry)
+        format_as_decimal_on_blur(self.amount_entry)
+        self._add_field(f"Default Amount ({CURRENCY_SYMBOL})", self.amount_entry, space_after=15)
+
+        if item:
+            self.title_entry.setText(item.get("title", ""))
+            self.desc_text.setPlainText(item.get("description", "") or "")
+            self.amount_entry.setText(f"{float(item.get('amount', 0) or 0):.2f}")
+        else:
+            self.amount_entry.setText("0.00")
+
+        self._add_buttons("💾 Save", self._save)
+        self.title_entry.setFocus()
+
+    def _save(self):
+        title = self.title_entry.text().strip()
+        if not title:
+            return Messagebox.show_error("Validation", "Item title is required.", parent=self)
+        try:
+            amount = float(self.amount_entry.text() or 0)
+        except ValueError:
+            return Messagebox.show_error("Validation", "Amount must be a valid number.", parent=self)
+        desc = self.desc_text.toPlainText().strip()
+        iid = self.item.get("id") if self.item else None
+        ok, err = self.db_manager.upsert_catalog_item_by_id(iid, title, desc, amount)
+        if ok:
+            self.on_saved()
+            self.accept()
+        else:
+            Messagebox.show_error("Could Not Save", err, parent=self)
+
+
+class NoteDialog(_EditDialog):
+    """Quick popup to add/edit an invoice's internal note straight from the
+    invoice list, without opening the full invoice form."""
+
+    def __init__(self, parent, db_manager: "DatabaseManager", invoice_number: str,
+                 current_note: str, on_saved: Callable):
+        super().__init__(parent, f"Note  —  Invoice #{invoice_number}", f"Invoice #{invoice_number}")
+        self.db_manager = db_manager
+        self.invoice_number = invoice_number
+        self.on_saved = on_saved
+        self.setMinimumHeight(320)
+
+        # The header above is followed by a muted explanation, exactly as in the Tk build.
+        self._root.insertWidget(1, make_label("Internal note (not printed on the customer's PDF)", "muted"))
+        self.text = PlaceholderText(placeholder="Add an internal note...")
+        self.text.setTabChangesFocus(True)
+        self.text.setAcceptRichText(False)
+        self.text.setPlainText(current_note or "")
+        self._root.addWidget(self.text, 1)
+        self._root.addSpacing(15)
+
+        self._add_buttons("💾 Save Note", self._save)
+        self.save_btn.setDefault(False)       # Enter inserts a new line in the note, it does not save
+        self.save_btn.setAutoDefault(False)
+        self.text.setFocus()
+
+    def _save(self):
+        note = self.text.toPlainText().strip()
+        self.db_manager.update_notes(self.invoice_number, note)
+        self.on_saved()
+        self.accept()
+
+
+class BulkProgressDialog(QDialog):
+    """Modal progress window for long bulk jobs (delete / export / print / PDF generation).
+
+    `work_fn(items, report, is_aborted) -> dict` runs on a background thread and must
+    never touch a widget; it calls `report(current, total, status_text, log_line=None,
+    success_delta=0, failed_delta=0)` to post progress. A QTimer on the GUI thread drains
+    the queue every 100 ms -- the only code here allowed to touch widgets -- and calls
+    `on_done(result)` exactly once when the job ends. Use as `dlg.exec()`.
+
+    Window X / Esc while running == Cancel (the job stops after the current item); once the
+    job has finished they simply close the window, as in the Tkinter build."""
+
+    def __init__(self, parent, title: str, items: list, work_fn: Callable,
+                 on_done: Optional[Callable[[dict], None]] = None):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.setModal(True)
+        self.resize(580, 480)
+        self.setMinimumSize(520, 440)
+
+        self._items = items
+        self._work_fn = work_fn
+        self._on_done = on_done
+        self._total = len(items)
+        self._abort_event = threading.Event()
+        self._q: queue.Queue = queue.Queue()
+        self._start_time = time.monotonic()
+        self._done = False
+        self._success_count = 0
+        self._failed_count = 0
+        self.job_result: Optional[dict] = None     # NOT `result`: that would shadow QDialog.result()
+
+        self._build(title)
+        self._thread = threading.Thread(target=self._run_worker, daemon=True)
+        self._thread.start()
+        self._timer = QTimer(self)
+        self._timer.timeout.connect(self._poll)
+        self._timer.start(100)
+
+    def _build(self, title: str):
+        main = QVBoxLayout(self)
+        main.setContentsMargins(18, 18, 18, 18)
+
+        main.addWidget(make_label(title, "h2"))
+        self.status_lbl = make_label("Starting…", "muted")
+        main.addSpacing(4)
+        main.addWidget(self.status_lbl)
+        main.addSpacing(12)
+
+        bar_row = QHBoxLayout()
+        self.progress = QProgressBar()
+        self.progress.setProperty("tall", True)
+        self.progress.setRange(0, max(1, self._total))
+        self.progress.setValue(0)
+        self.progress.setTextVisible(False)
+        self.pct_lbl = make_label("0%", "h3", align=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self.pct_lbl.setFixedWidth(52)
+        bar_row.addWidget(self.progress, 1)
+        bar_row.addSpacing(10)
+        bar_row.addWidget(self.pct_lbl)
+        main.addLayout(bar_row)
+
+        main.addSpacing(10)
+        stats = QHBoxLayout()
+        self.processed_lbl = QLabel(f"Processed: 0 / {self._total}")
+        self.eta_lbl = make_label("Estimating…", "muted")
+        stats.addWidget(self.processed_lbl)
+        stats.addStretch()
+        stats.addWidget(self.eta_lbl)
+        main.addLayout(stats)
+
+        main.addSpacing(4)
+        counts = QHBoxLayout()
+        self.success_lbl = make_label("✔  Success: 0", "h3", "success")
+        self.failed_lbl = make_label("✖  Failed: 0", "h3", "danger")
+        counts.addWidget(self.success_lbl)
+        counts.addSpacing(18)
+        counts.addWidget(self.failed_lbl)
+        counts.addStretch()
+        main.addLayout(counts)
+
+        main.addSpacing(12)
+        main.addWidget(make_label("Details:", "h3"))
+        main.addSpacing(2)
+        self.log_text = QPlainTextEdit()
+        self.log_text.setReadOnly(True)
+        self.log_text.setLineWrapMode(QPlainTextEdit.LineWrapMode.WidgetWidth)
+        self.log_text.setFont(QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont))
+        main.addWidget(self.log_text, 1)
+
+        main.addSpacing(14)
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+        self.abort_btn = make_button("✕  Cancel", "danger-outline", self._on_abort_click)
+        self.close_btn = make_button("Close", "secondary", lambda: QDialog.accept(self))
+        self.close_btn.hide()                 # only shown once the operation finishes -- see _on_finished()
+        btn_row.addWidget(self.abort_btn)
+        btn_row.addWidget(self.close_btn)
+        main.addLayout(btn_row)
+
+    def _log(self, line: str):
+        self.log_text.appendPlainText(line)
+        bar = self.log_text.verticalScrollBar()
+        bar.setValue(bar.maximum())
+
+    # ---- window-close semantics -------------------------------------------- #
+    def reject(self):                         # Esc
+        self._on_abort_click()
+
+    def closeEvent(self, event):              # window X
+        if self._done:
+            event.accept()
+        else:
+            event.ignore()
+            self._on_abort_click()
+
+    def _on_abort_click(self):
+        if self._done:
+            QDialog.reject(self)
+            return
+        self._abort_event.set()
+        self.abort_btn.setEnabled(False)
+        self.abort_btn.setText("Cancelling…")
+        self.status_lbl.setText("Cancelling -- finishing the current item…")
+
+    # ------------------------------------------------------------------ #
+    #  Worker thread side -- touches only self._q, never a widget
+    # ------------------------------------------------------------------ #
+    def _run_worker(self):
+        def report(current, total, status_text, log_line=None, success_delta=0, failed_delta=0):
+            self._q.put({"type": "progress", "current": current, "total": total,
+                         "status_text": status_text, "log_line": log_line,
+                         "success_delta": success_delta, "failed_delta": failed_delta})
+        try:
+            result = self._work_fn(self._items, report, self._abort_event.is_set)
+        except Exception as exc:
+            logger.error(f"Bulk operation failed: {exc}", exc_info=True)
+            result = {"success": self._success_count, "failed": max(0, self._total - self._success_count),
+                      "aborted": False, "result": None, "error": str(exc)}
+        self._q.put({"type": "done", "result": result})
+
+    # ------------------------------------------------------------------ #
+    #  GUI-thread side
+    # ------------------------------------------------------------------ #
+    def _poll(self):
+        try:
+            while True:
+                msg = self._q.get_nowait()
+                if msg["type"] == "progress":
+                    self._on_progress(msg)
+                elif msg["type"] == "done":
+                    self._on_finished(msg["result"])
+        except queue.Empty:
+            pass
+
+    def _on_progress(self, msg: dict):
+        current, total = msg["current"], msg["total"]
+        self.progress.setRange(0, max(1, total))
+        self.progress.setValue(min(current, max(1, total)))
+        pct = int(current / total * 100) if total else 0
+        self.pct_lbl.setText(f"{pct}%")
+        self.processed_lbl.setText(f"Processed: {current} / {total}")
+        self.status_lbl.setText(msg["status_text"])
+
+        if msg.get("success_delta"):
+            self._success_count += msg["success_delta"]
+            self.success_lbl.setText(f"✔  Success: {self._success_count}")
+        if msg.get("failed_delta"):
+            self._failed_count += msg["failed_delta"]
+            self.failed_lbl.setText(f"✖  Failed: {self._failed_count}")
+        if msg.get("log_line"):
+            self._log(msg["log_line"])
+
+        elapsed = time.monotonic() - self._start_time
+        if current > 0 and elapsed > 0.4:
+            rate = current / elapsed
+            remaining = max(0, total - current)
+            eta_seconds = (remaining / rate) if rate > 0 else 0
+            self.eta_lbl.setText(f"~{self._format_duration(eta_seconds)} remaining")
+        else:
+            self.eta_lbl.setText("Estimating…")
+
+    @staticmethod
+    def _format_duration(seconds: float) -> str:
+        seconds = max(0, int(seconds))
+        if seconds < 60:
+            return f"{seconds}s"
+        minutes, seconds = divmod(seconds, 60)
+        if minutes < 60:
+            return f"{minutes}m {seconds}s"
+        hours, minutes = divmod(minutes, 60)
+        return f"{hours}h {minutes}m"
+
+    def _on_finished(self, result: dict):
+        if self._done:
+            return
+        self._done = True
+        self._timer.stop()
+        self.job_result = result
+        aborted = result.get("aborted", False)
+        success = result.get("success", self._success_count)
+        failed = result.get("failed", self._failed_count)
+        error = result.get("error")
+
+        if error:
+            self.status_lbl.setText(f"Stopped due to an error: {error}")
+            self._log(f"ERROR: {error}")
+        elif aborted:
+            self.status_lbl.setText(f"Cancelled -- {success} completed, {failed} failed before stopping.")
+        else:
+            self.status_lbl.setText(f"Done -- {success} succeeded, {failed} failed.")
+            self.progress.setValue(self.progress.maximum())
+            self.pct_lbl.setText("100%")
+        self.eta_lbl.setText("")
+
+        self.abort_btn.hide()
+        self.close_btn.show()
+        self.close_btn.setFocus()
+
+        if self._on_done:
+            try:
+                self._on_done(result)
+            except Exception as exc:
+                logger.error(f"Bulk operation on_done callback failed: {exc}", exc_info=True)
+
+
 class AboutDialog(QDialog):
     WIDTH = 400
 
@@ -2624,12 +4009,6 @@ class AboutDialog(QDialog):
         root.addLayout(row)
 
 
-# =============================================================================
-#  KEYBOARD SHORTCUTS REFERENCE
-# =============================================================================
-# =============================================================================
-#  KEYBOARD SHORTCUTS REFERENCE
-# =============================================================================
 class ShortcutsDialog(QDialog):
     def __init__(self, parent, groups: Optional[Dict[str, List[Tuple[str, str]]]] = None):
         super().__init__(parent)
@@ -2700,129 +4079,91 @@ class ShortcutsDialog(QDialog):
         row.addStretch(1)
         root.addLayout(row)
 
-# =============================================================================
-#  CENTRALIZED KEYBOARD SHORTCUT MANAGER
-# =============================================================================
-# =============================================================================
-#  CENTRALIZED KEYBOARD SHORTCUT MANAGER
-# =============================================================================
-class ShortcutManager:
-    """One place that defines what every app-wide key combination does. A shortcut either always means the same thing
-    (register_global) or means something different on each page (register_contextual: Ctrl+N is "new invoice" on the
-    Dashboard, "new client" on Clients, "new catalog item" on Catalog). Registering the same sequence twice for the same
-    scope -- or mixing a global and a contextual registration of one sequence -- raises ValueError at once, so a
-    copy-paste slip is caught the moment the app starts instead of showing up later as "that key stopped working".
 
-    Qt notes (what replaced the Tk build's machinery):
-      * exactly one QShortcut per key sequence, owned by the main window with the WindowShortcut context. Routing to the
-        right handler for whichever page is showing happens in _dispatch(), exactly as in the Tk build.
-      * WindowShortcut also gives "no firing under an open dialog" for free: a QShortcut is only live while the main
-        window is the active window, and Settings / About / Shortcuts / the PDF viewer are windows of their own. The
-        Tk build needed an explicit toplevel check for this.
-      * the Tk build had to re-bind Tk's own Ctrl+D / Ctrl+O class bindings (install_class_overrides); Qt text fields
-        have no such bindings, and the editing keys they do own (Ctrl+A = select all, Ctrl+C/V/X/Z/Y ...) win while a
-        text field has the focus, via Qt's ShortcutOverride -- which is what a user typing in a box expects.
-      * Qt key-sequence strings ("Ctrl+N", "F2") already are the readable form shown in the reference card, so no
-        _humanize_sequence(); the few keys with several physical forms (Ctrl+Plus) pass their own display= text.
-      * auto-repeat is off by default (holding Ctrl+D must not stamp out dozens of duplicate invoices); the two
-        row-adding / removing shortcuts on the invoice form switch it on, since repeating them is useful.
-    """
+def _logo_pixmap_for(widget: QWidget, max_width: int) -> Optional[QPixmap]:
+    """The bundled logo, at most `max_width` logical pixels wide, rendered at the screen's native resolution so it stays
+    crisp on 125% / 150% / 200% displays. A logo that is already smaller than that is shown 1:1, never enlarged."""
+    dpr = widget.devicePixelRatioF() or 1.0
+    wanted = int(round(max_width * dpr))
+    pixmap = load_app_logo_pixmap(wanted)
+    if pixmap is not None and dpr > 1.01 and pixmap.width() == wanted:
+        pixmap.setDevicePixelRatio(dpr)
+    return pixmap
 
-    def __init__(self, app: "InvoiceApp"):
-        self.app = app
-        self._owner: Dict[str, str] = {}                                # sequence -> "global" | "contextual"
-        self._global_handlers: Dict[str, Callable[[], None]] = {}
-        self._contextual_handlers: Dict[str, Dict[Type, Callable[[], None]]] = {}
-        self._qshortcuts: Dict[str, QShortcut] = {}
-        self._reference: List[Dict[str, str]] = []                      # feeds ShortcutsDialog
 
-    @staticmethod
-    def canonical(sequence: str) -> str:
-        """The portable text of a key sequence ("ctrl+n" -> "Ctrl+N"); ValueError when Qt does not understand it."""
-        text = QKeySequence(sequence).toString(QKeySequence.SequenceFormat.PortableText)
-        if not text:
-            raise ValueError(f"Not a valid key sequence: {sequence!r}")
-        return text
+class _AssetRow(QWidget):
+    """One upload row (Company Logo / Authorized Signature / UPI QR Code): a preview thumbnail, a status line and
+    Browse / Clear buttons. The chosen file is copied into Vyaprix's own data folder straight away, so the app keeps
+    working even if the original is moved or deleted; the file name is deliberately not shown."""
 
-    @classmethod
-    def _sequences(cls, sequences) -> Tuple[str, ...]:
-        seqs = (sequences,) if isinstance(sequences, str) else tuple(sequences)
-        return tuple(cls.canonical(s) for s in seqs)
+    THUMB = 64
 
-    # ---- registration --------------------------------------------------- #
-    def register_global(self, sequences, handler: Callable[[], None], description: str,
-                        group: str, display: Optional[str] = None, auto_repeat: bool = False):
-        """Registers a shortcut whose action never changes, whichever page is showing. `sequences` is one key sequence
-        or a tuple of equivalent ones (they are one shortcut, so they share one reference-card entry)."""
-        seqs = self._sequences(sequences)
-        for s in seqs:
-            if s in self._owner:
-                raise ValueError(f"Shortcut conflict: {s} is already registered ({self._owner[s]}).")
-        for s in seqs:
-            self._owner[s] = "global"
-            self._global_handlers[s] = handler
-            self._bind(s, auto_repeat)
-        self._reference.append({"keys": display or seqs[0], "description": description, "group": group})
+    def __init__(self, config_key: str, label: str, dest_filename: str):
+        super().__init__()
+        self.config_key = config_key
+        self.dest_filename = dest_filename
+        self.rel_path = ""
 
-    def register_contextual(self, sequences, frame_class: Type, handler: Callable[[], None],
-                            description: str, group: str, display: Optional[str] = None,
-                            show_in_reference: bool = True, auto_repeat: bool = False):
-        """Registers a shortcut whose action depends on which page is showing. The same sequence can be registered for
-        several page classes (that is the point), but not twice for the same one, and never mixed with a global
-        registration of the same sequence."""
-        seqs = self._sequences(sequences)
-        for s in seqs:
-            if self._owner.get(s, "contextual") != "contextual":
-                raise ValueError(f"Shortcut conflict: {s} is already registered ({self._owner[s]}).")
-            if frame_class in self._contextual_handlers.get(s, {}):
-                raise ValueError(f"Shortcut conflict: {s} is already registered for {frame_class.__name__}.")
-        for s in seqs:
-            self._owner[s] = "contextual"
-            self._contextual_handlers.setdefault(s, {})[frame_class] = handler
-            self._bind(s, auto_repeat)
-        if show_in_reference:
-            page = frame_class.__name__.replace("Frame", "") or frame_class.__name__
-            self._reference.append({"keys": display or seqs[0],
-                                    "description": f"{description} ({page})", "group": group})
+        row = QHBoxLayout(self)
+        row.setContentsMargins(0, 8, 0, 8)
+        row.setSpacing(12)
 
-    def register_info(self, display: str, description: str, group: str):
-        """Documents a key that a widget handles natively (Tab order, per-field Enter-to-advance ...) rather than through
-        this registry -- purely so the reference card stays the one complete list of what the keyboard can do."""
-        self._reference.append({"keys": display, "description": description, "group": group})
+        self.thumb = make_label("—", "thumb", align=Qt.AlignmentFlag.AlignCenter)
+        self.thumb.setFixedSize(self.THUMB, self.THUMB)
+        row.addWidget(self.thumb)
 
-    def _bind(self, sequence: str, auto_repeat: bool = False):
-        existing = self._qshortcuts.get(sequence)
-        if existing is not None:
-            existing.setAutoRepeat(existing.autoRepeat() or auto_repeat)
+        info = QVBoxLayout()
+        info.setSpacing(2)
+        info.addStretch(1)
+        info.addWidget(make_label(label, "h3"))
+        self.status = make_label("", "muted")
+        info.addWidget(self.status)
+        info.addStretch(1)
+        row.addLayout(info, 1)
+
+        self.browse_btn = make_button("Browse…", "secondary-outline", self.browse)
+        self.clear_btn = make_button("✕ Clear", "danger-outline", self.clear)
+        _no_default_button(self.browse_btn, self.clear_btn)
+        row.addWidget(self.browse_btn)
+        row.addWidget(self.clear_btn)
+
+    def set_path(self, rel_path: str) -> None:
+        self.rel_path = rel_path or ""
+        self.refresh()
+
+    def refresh(self) -> None:
+        dpr = self.devicePixelRatioF() or 1.0
+        pixmap = None
+        if self.rel_path:
+            pixmap = load_thumbnail_pixmap(DATA_DIR / self.rel_path, max_size=int(round(44 * dpr)))
+        if pixmap is not None:
+            pixmap.setDevicePixelRatio(dpr)
+            self.thumb.setPixmap(pixmap)
+            self.status.setText("Custom file uploaded")
+        else:
+            self.thumb.clear()
+            self.thumb.setText("—")
+            self.status.setText("No file selected — using default")
+
+    def browse(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(self.window(), "Choose an Image", str(_start_dir("asset_dir")),
+                                              "Image Files (*.png *.jpg *.jpeg)")
+        if not path:
             return
-        shortcut = QShortcut(QKeySequence(sequence), self.app)
-        shortcut.setContext(Qt.ShortcutContext.WindowShortcut)
-        shortcut.setAutoRepeat(auto_repeat)
-        shortcut.activated.connect(lambda seq=sequence: self._dispatch(seq))
-        self._qshortcuts[sequence] = shortcut
+        _remember_dir("asset_dir", path)
+        try:
+            dest = ASSETS_DIR / self.dest_filename
+            if not (dest.exists() and _same_file(Path(path), dest)):
+                shutil.copy(path, dest)
+        except Exception as exc:
+            Messagebox.show_error("Error", f"Could not save file: {exc}", parent=self.window())
+            return
+        self.set_path(f"assets/{self.dest_filename}")
 
-    # ---- dispatch -------------------------------------------------------- #
-    def _dispatch(self, sequence: str) -> None:
-        handler = self._global_handlers.get(sequence)
-        if handler is None:
-            per_frame = self._contextual_handlers.get(sequence)
-            if per_frame:
-                handler = per_frame.get(self.app.active_frame_class())
-        if handler:
-            handler()
+    def clear(self) -> None:
+        self.set_path("")
 
-    # ---- introspection, used by ShortcutsDialog --------------------------- #
-    def grouped_reference(self) -> Dict[str, List[Tuple[str, str]]]:
-        """{group name: [(key label, description), ...]} built straight from the live registry, in registration order,
-        so the Shortcuts reference can never drift out of sync with what the keys actually do."""
-        groups: Dict[str, List[Tuple[str, str]]] = {}
-        for entry in self._reference:
-            groups.setdefault(entry["group"], []).append((entry["keys"], entry["description"]))
-        return groups
 
-# =============================================================================
-#  SETTINGS DIALOG
-# =============================================================================
 class SettingsDialog(QDialog):
     CURRENCY_OPTIONS: List[Tuple[str, str, str]] = [
         ("₹",   "INR", "Indian Rupee"),
@@ -3287,1362 +4628,14 @@ class SettingsDialog(QDialog):
         finally:
             self.accept()
 
-# =============================================================================
-#  SPLASH SCREEN
-# =============================================================================
-# =============================================================================
-#  SPLASH SCREEN
-# =============================================================================
-class SplashScreen(QWidget):
-    SIZE = 420
-    FADE_STEP = 0.05
-    FADE_INTERVAL_MS = 15
-    FADE_TARGET = 0.97          # a very subtle, modern transparency
-    MESSAGE_INTERVAL_MS = 400   # six messages: the last one appears right as the 2.5 s splash ends
-    LOADING_MESSAGES: List[str] = [
-        "Waking up the database...",
-        "Calculating dashboard stats...",
-        "Preparing invoice registry...",
-        "Loading your address book...",
-        "Polishing the interface...",
-        "Almost ready...",
-    ]
-
-    def __init__(self):
-        super().__init__(None, Qt.WindowType.SplashScreen | Qt.WindowType.FramelessWindowHint
-                         | Qt.WindowType.WindowStaysOnTopHint)
-        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
-        self.setWindowTitle(APP_NAME)
-        self.setFixedSize(self.SIZE, self.SIZE)
-        self.setWindowOpacity(0.0)                  # starts invisible for the fade-in
-        self.loading_messages = list(self.LOADING_MESSAGES)
-        self.msg_index = 0
-        self._build()
-        self._center_on_screen()
-
-        self._fade_timer = QTimer(self)
-        self._fade_timer.setInterval(self.FADE_INTERVAL_MS)
-        self._fade_timer.timeout.connect(self._fade_in)
-        self._fade_timer.start()
-        self._message_timer = QTimer(self)
-        self._message_timer.setInterval(self.MESSAGE_INTERVAL_MS)
-        self._message_timer.timeout.connect(self._cycle_messages)
-        self._cycle_messages()
-
-    def _center_on_screen(self) -> None:
-        screen = QApplication.primaryScreen()
-        if screen is not None:
-            geo = screen.geometry()
-            self.move(geo.center() - QPoint(self.SIZE // 2, self.SIZE // 2))
-
-    def _build(self):
-        # A 2 px border in the accent colour: a frameless window has no OS outline or shadow, and this keeps the splash
-        # from bleeding into a white desktop.
-        outer = QVBoxLayout(self)
-        outer.setContentsMargins(0, 0, 0, 0)
-        border = QFrame()
-        border.setProperty("role", "splash-border")
-        outer.addWidget(border)
-        border_col = QVBoxLayout(border)
-        border_col.setContentsMargins(2, 2, 2, 2)
-        panel = QFrame()
-        panel.setProperty("role", "splash")
-        border_col.addWidget(panel)
-
-        col = QVBoxLayout(panel)
-        col.setContentsMargins(0, 0, 0, 0)
-        col.setSpacing(0)
-
-        # Branding, a little above the exact centre for better visual balance.
-        col.addStretch(9)
-        logo = _logo_pixmap_for(self, 160)
-        self.logo_label: Optional[QLabel] = None
-        if logo is not None:
-            self.logo_label = QLabel()
-            self.logo_label.setPixmap(logo)
-            self.logo_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            col.addWidget(self.logo_label)
-            col.addSpacing(20)
-        col.addWidget(make_label(APP_NAME, "display", align=Qt.AlignmentFlag.AlignCenter))
-        col.addSpacing(5)
-        col.addWidget(make_label(APP_TAGLINE, "muted", align=Qt.AlignmentFlag.AlignCenter))
-        col.addStretch(11)
-
-        # Loading status.
-        self.progress = QProgressBar()
-        self.progress.setRange(0, 0)                # indeterminate
-        self.progress.setTextVisible(False)
-        bar_row = QHBoxLayout()
-        bar_row.setContentsMargins(20, 0, 20, 0)
-        bar_row.addWidget(self.progress)
-        col.addLayout(bar_row)
-
-        bottom = QHBoxLayout()
-        bottom.setContentsMargins(20, 12, 20, 15)
-        self.status_lbl = make_label("Starting up...", "section")
-        bottom.addWidget(self.status_lbl)
-        bottom.addStretch(1)
-        bottom.addWidget(make_label(APP_VERSION, "small"))
-        col.addLayout(bottom)
-
-    def _fade_in(self) -> None:
-        opacity = min(self.FADE_TARGET, self.windowOpacity() + self.FADE_STEP)
-        self.setWindowOpacity(opacity)
-        if opacity >= self.FADE_TARGET:
-            self._fade_timer.stop()
-
-    def _cycle_messages(self) -> None:
-        """Walks through the friendly loading messages so the app feels alive while it starts."""
-        if self.msg_index < len(self.loading_messages):
-            self.status_lbl.setText(self.loading_messages[self.msg_index])
-            self.msg_index += 1
-            self._message_timer.start()
-        else:
-            self._message_timer.stop()
-
-    def closeEvent(self, event):
-        self._fade_timer.stop()
-        self._message_timer.stop()
-        super().closeEvent(event)
-
 
 # =============================================================================
-#  APPLICATION SHELL  (sidebar navigation + page container)
+#  15. SCREENS
 # =============================================================================
-# =============================================================================
-#  SIDEBAR
-# =============================================================================
-class Sidebar(QFrame):
-    NAV_ITEMS: List[Tuple[str, str]] = [
-        ("⊞   Dashboard", "DashboardFrame"),
-        ("👥   Clients",   "ClientsFrame"),
-        ("📑   Catalog",   "CatalogFrame"),
-    ]
-    WIDTH = 240
 
-    def __init__(self, parent, controller):
-        super().__init__(parent)
-        self.controller = controller
-        self.setProperty("role", "sidebar")
-        self.setFixedWidth(self.WIDTH)
-        self._nav_btns: Dict[str, QPushButton] = {}
-        self._build()
-
-    @staticmethod
-    def _left_aligned(btn: QPushButton) -> QPushButton:
-        btn.setProperty("align", "left")
-        return btn
-
-    def _build(self):
-        root = QVBoxLayout(self)
-        root.setContentsMargins(0, 0, 0, 0)
-        root.setSpacing(0)
-
-        # --- branding header ---------------------------------------------
-        header = QVBoxLayout()
-        header.setContentsMargins(20, 25, 20, 10)
-        header.setSpacing(0)
-        logo = _logo_pixmap_for(self, 160)
-        self.logo_label: Optional[QLabel] = None
-        if logo is not None:
-            self.logo_label = QLabel()
-            self.logo_label.setPixmap(logo)
-            self.logo_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            header.addWidget(self.logo_label)
-            header.addSpacing(10)
-        header.addWidget(make_label("Vyaprix", "h1", align=Qt.AlignmentFlag.AlignCenter))
-        header.addWidget(make_label("by EllowLabs", "section", align=Qt.AlignmentFlag.AlignCenter))
-        root.addLayout(header)
-
-        divider = QVBoxLayout()
-        divider.setContentsMargins(20, 15, 20, 15)
-        divider.addWidget(hline())
-        root.addLayout(divider)
-
-        # --- quick action --------------------------------------------------
-        quick = QVBoxLayout()
-        quick.setContentsMargins(20, 0, 20, 15)
-        self.new_invoice_btn = make_button(
-            "＋  New Invoice", "success", lambda: self.controller.show_frame_by_name("InvoiceFormFrame"),
-            tooltip="Instantly start a new invoice (Ctrl+N)", min_height=44)
-        quick.addWidget(self.new_invoice_btn)
-        root.addLayout(quick)
-
-        # --- main navigation -----------------------------------------------
-        nav = QVBoxLayout()
-        nav.setContentsMargins(20, 0, 20, 0)
-        nav.setSpacing(6)
-        menu_label = make_label("MAIN MENU", "section")
-        menu_label.setContentsMargins(4, 0, 0, 2)
-        nav.addWidget(menu_label)
-        for label, frame_name in self.NAV_ITEMS:
-            btn = make_button(label, "secondary-outline", lambda n=frame_name: self.controller.show_frame_by_name(n))
-            self._left_aligned(btn)
-            nav.addWidget(btn)
-            self._nav_btns[frame_name] = btn
-        root.addLayout(nav)
-
-        root.addStretch(1)
-
-        # --- system / bottom -----------------------------------------------
-        bottom = QVBoxLayout()
-        bottom.setContentsMargins(20, 15, 20, 15)
-        bottom.setSpacing(4)
-        system_label = make_label("SYSTEM", "section")
-        system_label.setContentsMargins(4, 0, 0, 4)
-        bottom.addWidget(system_label)
-        self.settings_btn = self._left_aligned(make_button("⚙️  Settings", "info-outline",
-                                                           lambda: self.controller.open_settings()))
-        self.shortcuts_btn = self._left_aligned(make_button("⌨️  Shortcuts", "info-outline",
-                                                            lambda: self.controller.open_shortcuts()))
-        self.about_btn = self._left_aligned(make_button("ℹ️  About", "info-outline",
-                                                        lambda: self.controller.open_about()))
-        for btn in (self.settings_btn, self.shortcuts_btn, self.about_btn):
-            bottom.addWidget(btn)
-        bottom.addSpacing(11)
-        bottom.addWidget(make_label(f"Version {APP_VERSION}", "small", align=Qt.AlignmentFlag.AlignCenter))
-        root.addLayout(bottom)
-
-    def set_active(self, frame_name: str) -> None:
-        """Highlights the navigation button of the page being shown: solid for the active page, outlined for the rest."""
-        for name, btn in self._nav_btns.items():
-            set_role(btn, "primary" if name == frame_name else "secondary-outline")
-
-
-PDF_FIT_FILL: float = 0.97                # Tk: the fitted page fills 97% of the canvas
-
-PDF_ZOOM_STEP: float = 0.15
-
-PDF_PRINT_MAX_DPI: int = 300
-
-PDF_MAX_RENDER_PIXELS: int = 64_000_000   # safety net for the biggest zoom on a 4K / HiDPI screen
-
-_VIEWER_STATE: Dict[str, Any] = {"save_dir": None}      # folder of the last "Save a copy" (this session)
-
-# =============================================================================
-#  SMALL HELPERS
-# =============================================================================
-def _is_windows() -> bool:
-    """A tiny seam, so the Windows-only printing path can be exercised by tests on any OS."""
-    return sys.platform == "win32"
-
-def _load_qtpdf():
-    """The QPdfDocument class, or None when PySide6's QtPdf module is not installed (it ships in the
-    PySide6-Addons wheel, which a plain `pip install PySide6` includes). Imported on first use so the
-    application still starts without it -- the invoice is then simply opened in the default PDF program."""
-    try:
-        from PySide6.QtPdf import QPdfDocument
-    except ImportError:
-        return None
-    return QPdfDocument
-
-def _load_print_support():
-    """(QPrintDialog, QPrinter, QPrinterInfo) from QtPrintSupport, or None when that module is missing."""
-    try:
-        from PySide6.QtPrintSupport import QPrintDialog, QPrinter, QPrinterInfo
-    except ImportError:
-        return None
-    return QPrintDialog, QPrinter, QPrinterInfo
-
-def open_in_system_viewer(path) -> bool:
-    """Open a file in the operating system's default program for it (Tk: os.startfile). True when the OS
-    accepted the request."""
-    return bool(QDesktopServices.openUrl(QUrl.fromLocalFile(str(path))))
-
-def _pdf_error_text(QPdfDocument, error) -> str:
-    """Plain-English reason for a QPdfDocument.load() failure."""
-    E = QPdfDocument.Error
-    return {
-        E.FileNotFound: "The file was not found.",
-        E.InvalidFileFormat: "This is not a valid PDF document.",
-        E.IncorrectPassword: "This PDF is password-protected.",
-        E.UnsupportedSecurityScheme: "This PDF uses an unsupported security scheme.",
-    }.get(error, "The PDF could not be loaded.")
-
-def _render_on_white(doc, page: int, size: QSize) -> QImage:
-    """One PDF page as an opaque image on white paper. PDFium renders onto a *transparent* bitmap, so everything
-    the PDF leaves unpainted (most of an invoice's paper) would show whatever is behind the image -- the page's
-    shadow in the viewer, or an undefined background on a print-to-PDF printer. Composite it on white instead."""
-    rendered = doc.render(page, size)
-    paper = QImage(rendered.size(), QImage.Format.Format_RGB32)
-    paper.fill(QColor("#FFFFFF"))
-    painter = QPainter(paper)
-    painter.drawImage(0, 0, rendered)
-    painter.end()
-    return paper
-
-def _default_save_dir() -> Path:
-    last = _VIEWER_STATE.get("save_dir")
-    if last and Path(last).is_dir():
-        return Path(last)
-    return documents_dir()
-
-# =============================================================================
-#  PAGE CANVAS  (Tk: a tk.Canvas with a shadow rectangle, a border rectangle and the page image)
-# =============================================================================
-class _PageCanvas(QWidget):
-    """The viewer's drawing surface: a neutral backdrop, the page's drop shadow and 1 px edge, and the rendered
-    page, centred. It lives in a QScrollArea, so a page zoomed beyond the window can be scrolled. The backdrop,
-    shadow and edge colours come from the active theme (the Tk canvas used one fixed grey)."""
-    zoom_wheel = Signal(int)            # +1 / -1: Ctrl + mouse wheel
-    SHADOW = 4
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self._image: Optional[QImage] = None
-        self._page_px = QSize(0, 0)        # the page's size in logical pixels
-        self.setMinimumSize(1, 1)
-
-    @property
-    def page_size(self) -> QSize:
-        return QSize(self._page_px)
-
-    def set_image(self, image: Optional[QImage]) -> None:
-        self._image = image
-        if image is None:
-            self._page_px = QSize(0, 0)
-            self.setMinimumSize(1, 1)
-        else:
-            dpr = image.devicePixelRatio() or 1.0
-            self._page_px = QSize(round(image.width() / dpr), round(image.height() / dpr))
-            # Never smaller than the page (plus its shadow and edge), so a page zoomed beyond the window gets scroll
-            # bars. At "fit" the page is at most 97% of the viewport, so this never forces scroll bars there.
-            self.setMinimumSize(self._page_px.width() + self.SHADOW + 1, self._page_px.height() + self.SHADOW + 1)
-        self.update()
-
-    def paintEvent(self, event):
-        p = QPainter(self)
-        p.fillRect(self.rect(), QColor(theme_color("backdrop")))
-        if self._image is None:
-            return
-        w, h = self._page_px.width(), self._page_px.height()
-        x = max((self.width() - w) // 2, 0)
-        y = max((self.height() - h) // 2, 0)
-        shadow = QColor(theme_color("shadow"))
-        shadow.setAlpha(110)
-        p.fillRect(x, y, w + self.SHADOW, h + self.SHADOW, shadow)       # soft drop shadow, offset to the bottom right
-        p.setPen(QPen(QColor(theme_color("border_strong")), 1))
-        p.drawRect(x - 1, y - 1, w + 1, h + 1)                            # crisp 1 px edge exactly around the page
-        p.drawImage(QPoint(x, y), self._image)
-
-    def wheelEvent(self, event):
-        if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
-            step = event.angleDelta().y()
-            if step:
-                self.zoom_wheel.emit(1 if step > 0 else -1)
-            event.accept()
-            return
-        # Plain wheel: hand it straight to the enclosing scroll area's scroll bar (like the form's wheel guard does) --
-        # relying on Qt's implicit propagation to the parent is not dependable for every kind of event source.
-        area = self.parentWidget()
-        while area is not None and not isinstance(area, QAbstractScrollArea):
-            area = area.parentWidget()
-        if area is None:
-            event.ignore()
-            return
-        delta = event.angleDelta()
-        bar = area.verticalScrollBar() if (delta.y() or not delta.x()) else area.horizontalScrollBar()
-        QApplication.sendEvent(bar, event)
-        event.accept()
-
-# =============================================================================
-#  SELECT PRINTER  (Tk: a hand-built 400x260 Toplevel inside PDFViewer._print)
-# =============================================================================
-class _PrinterDialog(QDialog):
-    """`choice` is None (cancelled) or ("print", <printer name>) / ("system", None) / ("manual", None)."""
-
-    def __init__(self, parent, printers: List[str], default_printer: str = ""):
-        super().__init__(parent)
-        self.setWindowTitle("Select Printer")
-        self.setModal(True)
-        self.choice: Optional[Tuple[str, Optional[str]]] = None
-        self._printers = list(printers)
-
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(20, 15, 20, 15)
-        lay.setSpacing(8)
-        lay.setSizeConstraint(QLayout.SizeConstraint.SetFixedSize)           # Tk: resizable(False, False)
-
-        lay.addWidget(make_label("🖨️ Choose a printer destination:", "h3"))
-
-        self.combo = QComboBox()
-        self.combo.setMinimumWidth(360)                                       # => a 400 px wide dialog, as in Tk
-        if self._printers:
-            self.combo.addItems(self._printers)
-            self.combo.setCurrentText(default_printer if default_printer in self._printers else self._printers[0])
-        else:
-            self.combo.addItem("No printers detected")
-            self.combo.setEnabled(False)
-        lay.addWidget(self.combo)
-
-        row = QHBoxLayout()
-        row.setContentsMargins(0, 2, 0, 2)
-        row.addStretch(1)
-        self.print_btn = make_button("Print Document", "success", self._on_print)
-        self.cancel_btn = make_button("Cancel", "secondary-outline", self.reject)
-        row.addWidget(self.print_btn)
-        row.addSpacing(10)
-        row.addWidget(self.cancel_btn)
-        lay.addLayout(row)
-        self.print_btn.setEnabled(bool(self._printers))
-
-        lay.addWidget(hline())
-        self.system_btn = make_button("⚙️ Use System Print Dialog", "info-outline", self._on_system_dialog)
-        self.manual_btn = make_button("🌐 Open PDF Manually (Browser/Viewer)", "primary-outline", self._on_manual_open)
-        lay.addWidget(self.system_btn)
-        lay.addWidget(self.manual_btn)
-
-        for btn in (self.print_btn, self.cancel_btn, self.system_btn, self.manual_btn):
-            btn.setAutoDefault(False)
-        if self._printers:
-            self.print_btn.setDefault(True)                                   # Enter prints to the selected printer
-
-    def _on_print(self):
-        if not self._printers:
-            return
-        self.choice = ("print", self.combo.currentText())
-        self.accept()
-
-    def _on_system_dialog(self):
-        self.choice = ("system", None)
-        self.accept()
-
-    def _on_manual_open(self):
-        self.choice = ("manual", None)
-        self.accept()
-
-# =============================================================================
-#  PDF VIEWER
-# =============================================================================
-class PDFViewer(QDialog):
-    MIN_ZOOM = 0.4
-    MAX_ZOOM = 3.5
-
-    def __init__(self, parent, pdf_path: Path, invoice_data: Optional[Dict] = None):
-        super().__init__(parent)
-        self.pdf_path = Path(pdf_path)
-        self.invoice_data = invoice_data
-        self.doc = None
-        self.page_idx = 0
-        self.total = 0
-        self.zoom = 1.0
-        self._failed = False        # the PDF could not be opened: show()/exec() become no-ops
-        self._released = False
-        self._placed = False
-
-        self.setWindowTitle(f"Preview  —  {self.pdf_path.name}")
-        self.setModal(True)                                       # Tk: transient + grab_set() (non-blocking show())
-        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)    # nobody keeps a reference: free it when it closes
-        self.setWindowFlag(Qt.WindowType.WindowMaximizeButtonHint, True)
-
-        # --- Size (Tk: 900x720, also the minimum; centred on the screen on first show) ---
-        self.setMinimumSize(900, 720)
-        self.resize(900, 720)
-
-        if not self._open_document():
-            return
-
-        self._resize_timer = QTimer(self)                         # Tk: after(130, _render) debounce on <Configure>
-        self._resize_timer.setSingleShot(True)
-        self._resize_timer.timeout.connect(self._render)
-
-        self._build()
-        self._bind_keys()
-
-    # ------------------------------------------------------------------ #
-    #  Opening the document
-    # ------------------------------------------------------------------ #
-    def _open_document(self) -> bool:
-        QPdfDocument = _load_qtpdf()
-        if QPdfDocument is None:
-            return self._give_up(
-                "The built-in preview needs PySide6's QtPdf module (it is part of `pip install PySide6`).\n"
-                "The invoice will open in your default PDF viewer instead.", external=True)
-        doc = QPdfDocument(self)
-        error = doc.load(str(self.pdf_path))
-        if error != QPdfDocument.Error.None_:
-            doc.close()
-            return self._give_up(f"Cannot open file:\n{self.pdf_path}\n\n{_pdf_error_text(QPdfDocument, error)}")
-        if doc.pageCount() < 1:
-            doc.close()
-            return self._give_up(f"Cannot open file:\n{self.pdf_path}\n\nThe PDF has no pages.")
-        self.doc = doc
-        self.total = doc.pageCount()
-        return True
-
-    def _give_up(self, message: str, external: bool = False) -> bool:
-        """Tk: Messagebox.show_error("PDF Error", ...); self.destroy(); return."""
-        self._failed = True
-        Messagebox.show_error("PDF Error", message, parent=self.parentWidget())
-        if external:
-            open_in_system_viewer(self.pdf_path)
-        self.deleteLater()
-        return False
-
-    def setVisible(self, visible: bool):
-        if visible and self._failed:
-            return                                                 # the Tk window was destroyed in __init__
-        super().setVisible(visible)
-
-    def exec(self):
-        if self._failed:
-            return int(QDialog.DialogCode.Rejected)
-        return super().exec()
-
-    # ------------------------------------------------------------------ #
-    #  UI
-    # ------------------------------------------------------------------ #
-    def _build(self):
-        root = QVBoxLayout(self)
-        root.setContentsMargins(0, 0, 0, 0)
-        root.setSpacing(0)
-
-        bar = QWidget()
-        tb = QHBoxLayout(bar)
-        tb.setContentsMargins(10, 7, 10, 7)
-        tb.setSpacing(4)
-
-        self.prev_btn = make_button("◀  Prev", "primary", self._prev, "Previous page (← or Page Up)")
-        self.next_btn = make_button("Next  ▶", "primary", self._next, "Next page (→ or Page Down)")
-        for b in (self.prev_btn, self.next_btn):
-            b.setMinimumWidth(88)
-        tb.addWidget(self.prev_btn)
-        tb.addWidget(self.next_btn)
-        tb.addSpacing(10)
-        self.page_lbl = QLabel("")
-        tb.addWidget(self.page_lbl)
-        tb.addStretch(1)
-
-        # Right-hand group, left to right: Fit  ⊖  ⊕  100%  |  Print  Save  Share  Close   (Tk packed it right to left)
-        self.fit_btn = make_button("Fit", "secondary-outline", self._reset_zoom, "Fit the page to the window (Ctrl+0)")
-        self.zoom_out_btn = make_button("⊖", "secondary-outline", self._zoom_out, "Zoom out (Ctrl + −)")
-        self.zoom_in_btn = make_button("⊕", "secondary-outline", self._zoom_in, "Zoom in (Ctrl + +)")
-        self.fit_btn.setMinimumWidth(48)
-        for b in (self.zoom_out_btn, self.zoom_in_btn):
-            b.setMinimumWidth(40)
-        self.zoom_lbl = QLabel("100%")
-        self.zoom_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.zoom_lbl.setMinimumWidth(52)
-        self.print_btn = make_button("🖨  Print", "success", self._print, "Print this PDF (Ctrl+P)")
-        self.save_btn = make_button("💾  Save", "secondary", self._save_copy, "Save a copy of this PDF (Ctrl+E)")
-        self.share_btn = make_button("📤 Share", "info", self._open_share, "Share this invoice by WhatsApp or e-mail")
-        self.close_btn = make_button("✕  Close", "danger", self._close, "Close this viewer (Esc)")
-        for b in (self.print_btn, self.save_btn, self.share_btn, self.close_btn):
-            b.setMinimumWidth(88)
-
-        for w in (self.fit_btn, self.zoom_out_btn, self.zoom_in_btn, self.zoom_lbl):
-            tb.addWidget(w)
-        tb.addSpacing(6)
-        tb.addWidget(vline())
-        tb.addSpacing(6)
-        for w in (self.print_btn, self.save_btn, self.share_btn, self.close_btn):
-            tb.addWidget(w)
-        for b in bar.findChildren(QPushButton):
-            b.setAutoDefault(False)                                  # Enter must not "click" a random toolbar button
-
-        root.addWidget(bar)
-        root.addWidget(hline())
-
-        self.scroll = QScrollArea()
-        self.scroll.setWidgetResizable(True)
-        self.scroll.setFrameShape(QFrame.Shape.NoFrame)
-        self.scroll.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.canvas = _PageCanvas()
-        self.canvas.zoom_wheel.connect(self._wheel_zoom)
-        self.scroll.setWidget(self.canvas)
-        root.addWidget(self.scroll, 1)
-
-        hint = make_label("← → or Page Up/Down to navigate  •  Ctrl + / − zoom  •  Ctrl+0 fit  •  "
-                          "Ctrl+P print  •  Ctrl+E save  •  Esc close", "small", align=Qt.AlignmentFlag.AlignCenter)
-        hint.setContentsMargins(0, 3, 0, 3)
-        root.addWidget(hint)
-
-        self._update_nav_state()
-
-    def _bind_keys(self):
-        """Local shortcuts (Tk: self.bind). WidgetWithChildren context = active whenever this window has the focus."""
-        self._shortcuts = []
-        for keys, slot in (
-            (("Left", "PgUp"), self._prev),
-            (("Right", "PgDown"), self._next),
-            (("Ctrl+=", "Ctrl++"), self._zoom_in),
-            (("Ctrl+-",), self._zoom_out),
-            (("Ctrl+0",), self._reset_zoom),
-            (("Ctrl+P",), self._print),
-            (("Ctrl+E",), self._save_copy),
-        ):
-            for key in keys:
-                sc = QShortcut(QKeySequence(key), self)
-                sc.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
-                sc.activated.connect(slot)
-                self._shortcuts.append(sc)
-
-    # ------------------------------------------------------------------ #
-    #  Window events
-    # ------------------------------------------------------------------ #
-    def showEvent(self, event):
-        super().showEvent(event)
-        if not self._placed:
-            self._placed = True
-            parent = self.parentWidget()
-            screen = parent.screen() if parent is not None else QGuiApplication.primaryScreen()
-            if screen is not None:                                     # Tk: centred on the screen
-                area = screen.availableGeometry()
-                self.move(area.center() - QPoint(self.width() // 2, self.height() // 2))
-        self.scroll.setFocus()
-        self._schedule_render(30)                                      # first picture as soon as the window has its size
-
-    def resizeEvent(self, event):
-        super().resizeEvent(event)
-        if not self._failed:
-            self._schedule_render(130)                                 # re-render once the user stops resizing
-
-    def _schedule_render(self, delay_ms: int):
-        """(Re)start the debounce timer. QTimer.start(msec) also *changes* the interval, so the delay is passed
-        every time instead of being set once."""
-        self._resize_timer.start(delay_ms)
-
-    def _release_document(self):
-        """Let go of the PDF file (on Windows an open handle would block deleting / overwriting the invoice)."""
-        if self._released:
-            return
-        self._released = True
-        self._resize_timer.stop()
-        if self.doc is not None:
-            self.doc.close()
-
-    def done(self, result):
-        self._release_document()
-        super().done(result)
-
-    def closeEvent(self, event):
-        self._release_document()
-        super().closeEvent(event)
-
-    def _close(self):
-        self.close()
-
-    # ------------------------------------------------------------------ #
-    #  Rendering
-    # ------------------------------------------------------------------ #
-    def _render(self, reset_scroll: bool = False):
-        if self._released or self.doc is None:
-            return
-        viewport = self.scroll.maximumViewportSize()      # the viewport as if there were no scroll bars: stable fit
-        cw, ch = viewport.width(), viewport.height()
-        if cw <= 1 or ch <= 1:
-            return
-        page_pt = self.doc.pagePointSize(self.page_idx)
-        if page_pt.width() <= 0 or page_pt.height() <= 0:
-            return
-        fit_z = min(cw / page_pt.width(), ch / page_pt.height()) * PDF_FIT_FILL
-        z = fit_z * self.zoom
-        w = max(int(page_pt.width() * z), 1)
-        h = max(int(page_pt.height() * z), 1)
-
-        dpr = self.devicePixelRatioF() or 1.0
-        pw, ph = max(round(w * dpr), 1), max(round(h * dpr), 1)
-        if pw * ph > PDF_MAX_RENDER_PIXELS:                 # never ask PDFium for an absurdly large bitmap
-            shrink = (PDF_MAX_RENDER_PIXELS / (pw * ph)) ** 0.5
-            pw, ph = max(int(pw * shrink), 1), max(int(ph * shrink), 1)
-        image = _render_on_white(self.doc, self.page_idx, QSize(pw, ph))
-        image.setDevicePixelRatio(pw / w)                    # logical size stays w x h whatever the bitmap size
-
-        # Keep the point at the middle of the window where it is while zooming / resizing.
-        hbar, vbar = self.scroll.horizontalScrollBar(), self.scroll.verticalScrollBar()
-        view = self.scroll.viewport().size()
-        old = self.canvas.size()
-        cx = (hbar.value() + view.width() / 2) / max(old.width(), 1)
-        cy = (vbar.value() + view.height() / 2) / max(old.height(), 1)
-
-        self.canvas.set_image(image)
-        self.canvas.resize(viewport.expandedTo(self.canvas.minimumSize()))   # adopt the new size now (updates the bars)
-        QApplication.sendPostedEvents(None, int(QEvent.Type.LayoutRequest))
-        new = self.canvas.size()
-        view = self.scroll.viewport().size()
-        if reset_scroll:
-            hbar.setValue(0)
-            vbar.setValue(0)
-        else:
-            hbar.setValue(round(cx * new.width() - view.width() / 2))
-            vbar.setValue(round(cy * new.height() - view.height() / 2))
-
-        self.page_lbl.setText(f"Page {self.page_idx + 1} / {self.total}")
-        self.zoom_lbl.setText(f"{round(self.zoom * 100)}%")     # Tk: int() -> 1.3 showed as "129%"
-        self._update_nav_state()
-
-    def _update_nav_state(self):
-        self.prev_btn.setEnabled(self.page_idx > 0)
-        self.next_btn.setEnabled(self.page_idx < self.total - 1)
-
-    # ------------------------------------------------------------------ #
-    #  Navigation / zoom
-    # ------------------------------------------------------------------ #
-    def _next(self):
-        if self.page_idx < self.total - 1:
-            self.page_idx += 1
-            self._render(reset_scroll=True)
-
-    def _prev(self):
-        if self.page_idx > 0:
-            self.page_idx -= 1
-            self._render(reset_scroll=True)
-
-    def _zoom(self, delta: float):
-        self.zoom = round(max(self.MIN_ZOOM, min(self.MAX_ZOOM, self.zoom + delta)), 4)
-        self._render()
-
-    def _zoom_in(self):
-        self._zoom(+PDF_ZOOM_STEP)
-
-    def _zoom_out(self):
-        self._zoom(-PDF_ZOOM_STEP)
-
-    def _wheel_zoom(self, direction: int):
-        self._zoom(PDF_ZOOM_STEP * direction)
-
-    def _reset_zoom(self):
-        self.zoom = 1.0
-        self._render()
-
-    # ------------------------------------------------------------------ #
-    #  Printing
-    # ------------------------------------------------------------------ #
-    def _print(self):
-        if not _is_windows():
-            try:
-                subprocess.run(["lp", str(self.pdf_path)], check=True)
-            except Exception as exc:
-                Messagebox.show_error("Print Error", str(exc), parent=self)
-            return
-
-        support = _load_print_support()
-        if support is None:
-            self._print_via_shell()      # Tk: the "PyQt5 is missing" fallback
-            return
-        QPrinterInfo = support[2]
-        printers = list(QPrinterInfo.availablePrinterNames())
-        default_printer = QPrinterInfo.defaultPrinterName()
-
-        dialog = _PrinterDialog(self, printers, default_printer)
-        run_dialog(dialog)
-        choice = dialog.choice
-        if choice is None:
-            return
-        kind, name = choice
-        if kind == "print":
-            self._print_with_qt(printer_name=name)
-        elif kind == "system":
-            self._print_with_qt(show_dialog=True)
-        else:
-            self._open_manually()
-
-    def _print_via_shell(self):
-        """Last resort when QtPrintSupport is unavailable: ask Windows to print the file with its default PDF program."""
-        try:
-            os.startfile(self.pdf_path, "print")
-        except OSError:
-            Messagebox.show_warning(
-                "Manual Print Required",
-                "A PDF reader is not set as default.\n"
-                "The file will open — press Ctrl+P to print.", parent=self)
-            self._open_manually()
-
-    def _open_manually(self):
-        if not open_in_system_viewer(self.pdf_path):
-            Messagebox.show_error("Open Error", f"Windows could not open the PDF:\n{self.pdf_path}", parent=self)
-
-    def _print_with_qt(self, printer_name: Optional[str] = None, show_dialog: bool = False):
-        """Both ways of printing: straight to a named printer, or through the system print dialog."""
-        support = _load_print_support()
-        if support is None:
-            self._print_via_shell()
-            return
-        QPrintDialog, QPrinter, _ = support
-
-        painter = None
-        busy = False
-        try:
-            printer = QPrinter(QPrinter.PrinterMode.HighResolution)
-            if show_dialog:
-                print_dialog = QPrintDialog(printer, self)
-                accepted = run_dialog(print_dialog) == int(QDialog.DialogCode.Accepted)
-                if not accepted:
-                    return
-            else:
-                printer.setPrinterName(printer_name)
-
-            QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
-            busy = True
-            painter = QPainter()
-            if not painter.begin(printer):
-                raise RuntimeError("The print job could not be started.\n"
-                                   "Check that the printer is switched on and not in use by another program.")
-            dpi = min(printer.resolution() or PDF_PRINT_MAX_DPI, PDF_PRINT_MAX_DPI)
-            scale = dpi / 72.0
-            for page_index in range(self.total):
-                if page_index > 0:
-                    printer.newPage()
-                size_pt = self.doc.pagePointSize(page_index)
-                image = _render_on_white(self.doc, page_index, QSize(max(round(size_pt.width() * scale), 1),
-                                                                     max(round(size_pt.height() * scale), 1)))
-                # Fit the page into the printable area, centred. (Tk moved the painter's viewport cumulatively, so
-                # every page after the first was drawn at the wrong offset.)
-                area = painter.viewport()
-                fitted = image.size().scaled(area.size(), Qt.AspectRatioMode.KeepAspectRatio)
-                target = QRect(area.x() + (area.width() - fitted.width()) // 2,
-                               area.y() + (area.height() - fitted.height()) // 2,
-                               fitted.width(), fitted.height())
-                painter.drawImage(target, image)
-        except Exception as exc:
-            if busy:
-                QApplication.restoreOverrideCursor()
-                busy = False
-            Messagebox.show_error("Print Error", str(exc), parent=self)
-            return
-        finally:
-            # Tk BUG FIX kept: cleanup is on every path (a failure part-way used to leave the painter attached to
-            # the print spooler).
-            if painter is not None and painter.isActive():
-                painter.end()
-            if busy:
-                QApplication.restoreOverrideCursor()
-        if not show_dialog:
-            Messagebox.show_info("Success", f"Document sent to {printer_name}!", parent=self)
-
-    # ------------------------------------------------------------------ #
-    #  Save a copy / share
-    # ------------------------------------------------------------------ #
-    def _save_copy(self):
-        start = str(_default_save_dir() / self.pdf_path.name)
-        path, _ = QFileDialog.getSaveFileName(self, "Save As", start, "PDF Documents (*.pdf)")
-        if not path:
-            return
-        if not Path(path).suffix:                    # Tk: defaultextension=".pdf"
-            path += ".pdf"
-        try:
-            shutil.copy(self.pdf_path, path)
-            _VIEWER_STATE["save_dir"] = str(Path(path).parent)
-            Messagebox.show_info("Saved", f"Invoice saved to:\n{path}", parent=self)
-        except Exception as exc:
-            Messagebox.show_error("Save Error", str(exc), parent=self)
-
-    def _open_share(self):
-        run_dialog(ShareDialog(self, self.pdf_path, self.invoice_data))
-
-# =============================================================================
-#  SHARE DIALOG
-# =============================================================================
-class ShareDialog(QDialog):
-    """Mini dialog to share the invoice via WhatsApp or the default e-mail program."""
-
-    def __init__(self, parent, pdf_path: Path, invoice_data: Optional[Dict]):
-        super().__init__(parent)
-        self.pdf_path = pdf_path
-        self.invoice_data = dict(invoice_data) if invoice_data else {}
-
-        self.setWindowTitle("Share Invoice")
-        self.setModal(True)
-        self._build()
-        self._prefill_data()
-        self.phone_entry.setFocus()
-
-    def _build(self):
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(20, 20, 20, 20)
-        lay.setSpacing(0)
-        lay.setSizeConstraint(QLayout.SizeConstraint.SetFixedSize)         # Tk: 420x340, not resizable
-
-        lay.addWidget(make_label("📤 Share Invoice", "h2"))
-        lay.addSpacing(15)
-
-        lay.addWidget(make_label("WhatsApp Number (with Country Code):", "caption"))
-        lay.addSpacing(2)
-        self.phone_entry = QLineEdit()
-        self.phone_entry.setMinimumWidth(380)                                # => a 420 px wide dialog, as in Tk
-        self.phone_entry.setPlaceholderText("e.g. +91 98765 43210")
-        self.phone_entry.returnPressed.connect(self._send_whatsapp)
-        lay.addWidget(self.phone_entry)
-        lay.addSpacing(10)
-
-        lay.addWidget(make_label("Client Email Address:", "caption"))
-        lay.addSpacing(2)
-        self.email_entry = QLineEdit()
-        self.email_entry.setPlaceholderText("e.g. accounts@client.com")
-        self.email_entry.returnPressed.connect(self._send_email)
-        lay.addWidget(self.email_entry)
-        lay.addSpacing(15)
-
-        row = QHBoxLayout()
-        row.setSpacing(10)
-        self.whatsapp_btn = make_button("💬 WhatsApp", "success", self._send_whatsapp, min_height=32)
-        self.email_btn = make_button("✉️ Email", "primary", self._send_email, min_height=32)
-        row.addWidget(self.whatsapp_btn, 1)
-        row.addWidget(self.email_btn, 1)
-        lay.addLayout(row)
-        lay.addSpacing(15)
-
-        note = make_label("Note: The PDF file path will be copied to your clipboard.\n"
-                          "Simply paste (Ctrl+V) when attaching the file.", "small",
-                          align=Qt.AlignmentFlag.AlignCenter)
-        lay.addWidget(note)
-        for btn in (self.whatsapp_btn, self.email_btn):
-            btn.setAutoDefault(False)
-
-    def _prefill_data(self):
-        contact_info = self.invoice_data.get("client_contact", "") or ""
-        if not contact_info:
-            return
-        # Basic regex to pull an e-mail address and a phone number out of the free-text contact box
-        email_match = re.search(r'[\w\.-]+@[\w\.-]+', contact_info)
-        if email_match:
-            self.email_entry.setText(email_match.group(0))
-        phone_match = re.search(r'\+?\d[\d\s-]{8,}\d', contact_info)
-        if phone_match:
-            self.phone_entry.setText(re.sub(r'[^\d+]', '', phone_match.group(0)))   # digits and a leading + only
-
-    def _copy_path_to_clipboard(self):
-        QGuiApplication.clipboard().setText(str(self.pdf_path))
-
-    def _send_whatsapp(self):
-        phone = self.phone_entry.text().strip()
-        clean_phone = re.sub(r'[^\d]', '', phone)
-        if not clean_phone:                       # empty, or nothing but punctuation / letters
-            Messagebox.show_warning("Missing Info", "Please enter a WhatsApp number.", parent=self)
-            return
-
-        self._copy_path_to_clipboard()
-
-        inv_num = self.invoice_data.get('invoice_number', 'Invoice')
-        msg = f"Hello! Please find attached {inv_num}. Thank you for your business."
-        safe_msg = urllib.parse.quote(msg)
-        self._open_link(f"https://wa.me/{clean_phone}?text={safe_msg}")
-
-    def _send_email(self):
-        email = self.email_entry.text().strip()
-        if not email:
-            Messagebox.show_warning("Missing Info", "Please enter an email address.", parent=self)
-            return
-
-        self._copy_path_to_clipboard()
-
-        inv_num = self.invoice_data.get('invoice_number', 'Invoice')
-        subject = urllib.parse.quote(f"Invoice {inv_num} from {self.invoice_data.get('your_name', 'Us')}")
-        body = urllib.parse.quote(f"Hello,\n\nPlease find attached {inv_num}.\n\nThank you!")
-        self._open_link(f"mailto:{email}?subject={subject}&body={body}")
-
-    def _open_link(self, url: str):
-        if webbrowser.open(url):
-            self.accept()                          # Tk: destroy() -- the job is done
-        else:
-            Messagebox.show_warning(
-                "Share", "Could not open your browser / e-mail program.\n"
-                "The PDF path is on the clipboard, so you can still paste it into a message.", parent=self)
-
-# =============================================================================
-#  EDIT DIALOGS  (Add/Edit Client, Add/Edit Catalog Item, invoice Note)
-# =============================================================================
-class _EditDialog(QDialog):
-    """Shared chrome for the small modal edit dialogs: a bold header, labelled fields,
-    a hairline, and a right-aligned [Save][Cancel] row -- the same arrangement as the
-    Tkinter build. Enter saves (the Save button is the dialog's default button) except
-    inside a multi-line box, where Enter inserts a new line -- Qt's own behaviour, so the
-    Tk build's hand-written <Return> handler is no longer needed. Esc cancels."""
-
-    def __init__(self, parent, window_title: str, header: str, width: int = 440):
-        super().__init__(parent)
-        self.setWindowTitle(window_title)
-        self.setModal(True)
-        self.setMinimumWidth(width)
-        self._root = QVBoxLayout(self)
-        self._root.setContentsMargins(20, 20, 20, 20)
-        self._root.setSpacing(0)
-        self._root.addWidget(make_label(header, "h2"))
-        self._root.addSpacing(14)
-
-    def _add_field(self, label: str, widget: QWidget, space_after: int = 12) -> None:
-        self._root.addWidget(make_label(label, "h3"))
-        self._root.addSpacing(4)
-        self._root.addWidget(widget)
-        self._root.addSpacing(space_after)
-
-    @staticmethod
-    def _multiline(placeholder: str, rows: int) -> PlaceholderText:
-        box = PlaceholderText(placeholder=placeholder, height=rows)
-        box.setTabChangesFocus(True)
-        box.setAcceptRichText(False)
-        return box
-
-    def _add_buttons(self, save_text: str, save_slot: Callable) -> None:
-        self._root.addWidget(hline())
-        self._root.addSpacing(10)
-        row = QHBoxLayout()
-        row.addStretch()
-        self.save_btn = make_button(save_text, "success", save_slot)
-        self.save_btn.setDefault(True)
-        self.cancel_btn = make_button("✕ Cancel", "secondary-outline", self.reject)
-        self.cancel_btn.setAutoDefault(False)
-        row.addWidget(self.save_btn)
-        row.addSpacing(8)
-        row.addWidget(self.cancel_btn)
-        self._root.addLayout(row)
-
-class ClientDialog(_EditDialog):
-    """Add or edit a single Address Book entry."""
-
-    def __init__(self, parent, db_manager: "DatabaseManager", client: Optional[Dict], on_saved: Callable):
-        super().__init__(parent, "Edit Client" if client else "Add Client",
-                         "Edit Client Details" if client else "New Client Details")
-        self.db_manager = db_manager
-        self.client = client
-        self.on_saved = on_saved
-
-        self.name_entry = PlaceholderEntry(placeholder="Enter client name")
-        self._add_field("Client / Company Name *", self.name_entry)
-        self.contact_text = self._multiline("+91 98765 43210\nname@email.com\nCity, State", 4)
-        self._add_field("Contact Info", self.contact_text)
-        self.gstin_entry = PlaceholderEntry(placeholder="e.g., 22ABCDE1234F1Z5")
-        self._add_field("GSTIN (Optional)", self.gstin_entry, space_after=15)
-
-        if client:
-            self.name_entry.setText(client.get("name", ""))
-            self.contact_text.setPlainText(client.get("contact", "") or "")
-            self.gstin_entry.setText(client.get("gstin", "") or "")
-
-        self._add_buttons("💾 Save", self._save)
-        self.name_entry.setFocus()
-
-    def _save(self):
-        name = self.name_entry.text().strip()
-        if not name:
-            return Messagebox.show_error("Validation", "Client name is required.", parent=self)
-        contact = self.contact_text.toPlainText().strip()
-        gstin = self.gstin_entry.text().strip()
-        # IMPROVEMENT over the Tk build: the invoice form refuses to save an invoice whose client
-        # GSTIN is malformed, so catch it here instead of at invoicing time.
-        if gstin and not is_valid_gstin(gstin):
-            return Messagebox.show_error(
-                "Invalid GST Number",
-                f'"{gstin}" is not a valid GSTIN.\nA GSTIN is 15 characters, for example 22ABCDE1234F1Z5.',
-                parent=self)
-        cid = self.client.get("id") if self.client else None
-        ok, err = self.db_manager.upsert_client_by_id(cid, name, contact, gstin)
-        if ok:
-            self.on_saved()
-            self.accept()
-        else:
-            Messagebox.show_error("Could Not Save", err, parent=self)
-
-class CatalogItemDialog(_EditDialog):
-    """Add or edit a single Product & Service Catalog entry."""
-
-    def __init__(self, parent, db_manager: "DatabaseManager", item: Optional[Dict], on_saved: Callable):
-        super().__init__(parent, "Edit Catalog Item" if item else "Add Catalog Item",
-                         "Edit Catalog Item" if item else "New Catalog Item")
-        self.db_manager = db_manager
-        self.item = item
-        self.on_saved = on_saved
-
-        self.title_entry = PlaceholderEntry(placeholder="Enter item / service name")
-        self._add_field("Item / Service Title *", self.title_entry)
-        self.desc_text = self._multiline("Description (optional)", 4)
-        self._add_field("Description", self.desc_text)
-        self.amount_entry = QLineEdit()
-        # UX polish: strict numeric controls (same as the Tk build)
-        restrict_to_decimal(self.amount_entry)
-        format_as_decimal_on_blur(self.amount_entry)
-        self._add_field(f"Default Amount ({CURRENCY_SYMBOL})", self.amount_entry, space_after=15)
-
-        if item:
-            self.title_entry.setText(item.get("title", ""))
-            self.desc_text.setPlainText(item.get("description", "") or "")
-            self.amount_entry.setText(f"{float(item.get('amount', 0) or 0):.2f}")
-        else:
-            self.amount_entry.setText("0.00")
-
-        self._add_buttons("💾 Save", self._save)
-        self.title_entry.setFocus()
-
-    def _save(self):
-        title = self.title_entry.text().strip()
-        if not title:
-            return Messagebox.show_error("Validation", "Item title is required.", parent=self)
-        try:
-            amount = float(self.amount_entry.text() or 0)
-        except ValueError:
-            return Messagebox.show_error("Validation", "Amount must be a valid number.", parent=self)
-        desc = self.desc_text.toPlainText().strip()
-        iid = self.item.get("id") if self.item else None
-        ok, err = self.db_manager.upsert_catalog_item_by_id(iid, title, desc, amount)
-        if ok:
-            self.on_saved()
-            self.accept()
-        else:
-            Messagebox.show_error("Could Not Save", err, parent=self)
-
-class NoteDialog(_EditDialog):
-    """Quick popup to add/edit an invoice's internal note straight from the
-    invoice list, without opening the full invoice form."""
-
-    def __init__(self, parent, db_manager: "DatabaseManager", invoice_number: str,
-                 current_note: str, on_saved: Callable):
-        super().__init__(parent, f"Note  —  Invoice #{invoice_number}", f"Invoice #{invoice_number}")
-        self.db_manager = db_manager
-        self.invoice_number = invoice_number
-        self.on_saved = on_saved
-        self.setMinimumHeight(320)
-
-        # The header above is followed by a muted explanation, exactly as in the Tk build.
-        self._root.insertWidget(1, make_label("Internal note (not printed on the customer's PDF)", "muted"))
-        self.text = PlaceholderText(placeholder="Add an internal note...")
-        self.text.setTabChangesFocus(True)
-        self.text.setAcceptRichText(False)
-        self.text.setPlainText(current_note or "")
-        self._root.addWidget(self.text, 1)
-        self._root.addSpacing(15)
-
-        self._add_buttons("💾 Save Note", self._save)
-        self.save_btn.setDefault(False)       # Enter inserts a new line in the note, it does not save
-        self.save_btn.setAutoDefault(False)
-        self.text.setFocus()
-
-    def _save(self):
-        note = self.text.toPlainText().strip()
-        self.db_manager.update_notes(self.invoice_number, note)
-        self.on_saved()
-        self.accept()
-
-# =============================================================================
-#  BULK PROGRESS DIALOG
-# =============================================================================
-class BulkProgressDialog(QDialog):
-    """Modal progress window for long bulk jobs (delete / export / print / PDF generation).
-
-    `work_fn(items, report, is_aborted) -> dict` runs on a background thread and must
-    never touch a widget; it calls `report(current, total, status_text, log_line=None,
-    success_delta=0, failed_delta=0)` to post progress. A QTimer on the GUI thread drains
-    the queue every 100 ms -- the only code here allowed to touch widgets -- and calls
-    `on_done(result)` exactly once when the job ends. Use as `dlg.exec()`.
-
-    Window X / Esc while running == Cancel (the job stops after the current item); once the
-    job has finished they simply close the window, as in the Tkinter build."""
-
-    def __init__(self, parent, title: str, items: list, work_fn: Callable,
-                 on_done: Optional[Callable[[dict], None]] = None):
-        super().__init__(parent)
-        self.setWindowTitle(title)
-        self.setModal(True)
-        self.resize(580, 480)
-        self.setMinimumSize(520, 440)
-
-        self._items = items
-        self._work_fn = work_fn
-        self._on_done = on_done
-        self._total = len(items)
-        self._abort_event = threading.Event()
-        self._q: queue.Queue = queue.Queue()
-        self._start_time = time.monotonic()
-        self._done = False
-        self._success_count = 0
-        self._failed_count = 0
-        self.job_result: Optional[dict] = None     # NOT `result`: that would shadow QDialog.result()
-
-        self._build(title)
-        self._thread = threading.Thread(target=self._run_worker, daemon=True)
-        self._thread.start()
-        self._timer = QTimer(self)
-        self._timer.timeout.connect(self._poll)
-        self._timer.start(100)
-
-    def _build(self, title: str):
-        main = QVBoxLayout(self)
-        main.setContentsMargins(18, 18, 18, 18)
-
-        main.addWidget(make_label(title, "h2"))
-        self.status_lbl = make_label("Starting…", "muted")
-        main.addSpacing(4)
-        main.addWidget(self.status_lbl)
-        main.addSpacing(12)
-
-        bar_row = QHBoxLayout()
-        self.progress = QProgressBar()
-        self.progress.setProperty("tall", True)
-        self.progress.setRange(0, max(1, self._total))
-        self.progress.setValue(0)
-        self.progress.setTextVisible(False)
-        self.pct_lbl = make_label("0%", "h3", align=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        self.pct_lbl.setFixedWidth(52)
-        bar_row.addWidget(self.progress, 1)
-        bar_row.addSpacing(10)
-        bar_row.addWidget(self.pct_lbl)
-        main.addLayout(bar_row)
-
-        main.addSpacing(10)
-        stats = QHBoxLayout()
-        self.processed_lbl = QLabel(f"Processed: 0 / {self._total}")
-        self.eta_lbl = make_label("Estimating…", "muted")
-        stats.addWidget(self.processed_lbl)
-        stats.addStretch()
-        stats.addWidget(self.eta_lbl)
-        main.addLayout(stats)
-
-        main.addSpacing(4)
-        counts = QHBoxLayout()
-        self.success_lbl = make_label("✔  Success: 0", "h3", "success")
-        self.failed_lbl = make_label("✖  Failed: 0", "h3", "danger")
-        counts.addWidget(self.success_lbl)
-        counts.addSpacing(18)
-        counts.addWidget(self.failed_lbl)
-        counts.addStretch()
-        main.addLayout(counts)
-
-        main.addSpacing(12)
-        main.addWidget(make_label("Details:", "h3"))
-        main.addSpacing(2)
-        self.log_text = QPlainTextEdit()
-        self.log_text.setReadOnly(True)
-        self.log_text.setLineWrapMode(QPlainTextEdit.LineWrapMode.WidgetWidth)
-        self.log_text.setFont(QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont))
-        main.addWidget(self.log_text, 1)
-
-        main.addSpacing(14)
-        btn_row = QHBoxLayout()
-        btn_row.addStretch()
-        self.abort_btn = make_button("✕  Cancel", "danger-outline", self._on_abort_click)
-        self.close_btn = make_button("Close", "secondary", lambda: QDialog.accept(self))
-        self.close_btn.hide()                 # only shown once the operation finishes -- see _on_finished()
-        btn_row.addWidget(self.abort_btn)
-        btn_row.addWidget(self.close_btn)
-        main.addLayout(btn_row)
-
-    def _log(self, line: str):
-        self.log_text.appendPlainText(line)
-        bar = self.log_text.verticalScrollBar()
-        bar.setValue(bar.maximum())
-
-    # ---- window-close semantics -------------------------------------------- #
-    def reject(self):                         # Esc
-        self._on_abort_click()
-
-    def closeEvent(self, event):              # window X
-        if self._done:
-            event.accept()
-        else:
-            event.ignore()
-            self._on_abort_click()
-
-    def _on_abort_click(self):
-        if self._done:
-            QDialog.reject(self)
-            return
-        self._abort_event.set()
-        self.abort_btn.setEnabled(False)
-        self.abort_btn.setText("Cancelling…")
-        self.status_lbl.setText("Cancelling -- finishing the current item…")
-
-    # ------------------------------------------------------------------ #
-    #  Worker thread side -- touches only self._q, never a widget
-    # ------------------------------------------------------------------ #
-    def _run_worker(self):
-        def report(current, total, status_text, log_line=None, success_delta=0, failed_delta=0):
-            self._q.put({"type": "progress", "current": current, "total": total,
-                         "status_text": status_text, "log_line": log_line,
-                         "success_delta": success_delta, "failed_delta": failed_delta})
-        try:
-            result = self._work_fn(self._items, report, self._abort_event.is_set)
-        except Exception as exc:
-            logger.error(f"Bulk operation failed: {exc}", exc_info=True)
-            result = {"success": self._success_count, "failed": max(0, self._total - self._success_count),
-                      "aborted": False, "result": None, "error": str(exc)}
-        self._q.put({"type": "done", "result": result})
-
-    # ------------------------------------------------------------------ #
-    #  GUI-thread side
-    # ------------------------------------------------------------------ #
-    def _poll(self):
-        try:
-            while True:
-                msg = self._q.get_nowait()
-                if msg["type"] == "progress":
-                    self._on_progress(msg)
-                elif msg["type"] == "done":
-                    self._on_finished(msg["result"])
-        except queue.Empty:
-            pass
-
-    def _on_progress(self, msg: dict):
-        current, total = msg["current"], msg["total"]
-        self.progress.setRange(0, max(1, total))
-        self.progress.setValue(min(current, max(1, total)))
-        pct = int(current / total * 100) if total else 0
-        self.pct_lbl.setText(f"{pct}%")
-        self.processed_lbl.setText(f"Processed: {current} / {total}")
-        self.status_lbl.setText(msg["status_text"])
-
-        if msg.get("success_delta"):
-            self._success_count += msg["success_delta"]
-            self.success_lbl.setText(f"✔  Success: {self._success_count}")
-        if msg.get("failed_delta"):
-            self._failed_count += msg["failed_delta"]
-            self.failed_lbl.setText(f"✖  Failed: {self._failed_count}")
-        if msg.get("log_line"):
-            self._log(msg["log_line"])
-
-        elapsed = time.monotonic() - self._start_time
-        if current > 0 and elapsed > 0.4:
-            rate = current / elapsed
-            remaining = max(0, total - current)
-            eta_seconds = (remaining / rate) if rate > 0 else 0
-            self.eta_lbl.setText(f"~{self._format_duration(eta_seconds)} remaining")
-        else:
-            self.eta_lbl.setText("Estimating…")
-
-    @staticmethod
-    def _format_duration(seconds: float) -> str:
-        seconds = max(0, int(seconds))
-        if seconds < 60:
-            return f"{seconds}s"
-        minutes, seconds = divmod(seconds, 60)
-        if minutes < 60:
-            return f"{minutes}m {seconds}s"
-        hours, minutes = divmod(minutes, 60)
-        return f"{hours}h {minutes}m"
-
-    def _on_finished(self, result: dict):
-        if self._done:
-            return
-        self._done = True
-        self._timer.stop()
-        self.job_result = result
-        aborted = result.get("aborted", False)
-        success = result.get("success", self._success_count)
-        failed = result.get("failed", self._failed_count)
-        error = result.get("error")
-
-        if error:
-            self.status_lbl.setText(f"Stopped due to an error: {error}")
-            self._log(f"ERROR: {error}")
-        elif aborted:
-            self.status_lbl.setText(f"Cancelled -- {success} completed, {failed} failed before stopping.")
-        else:
-            self.status_lbl.setText(f"Done -- {success} succeeded, {failed} failed.")
-            self.progress.setValue(self.progress.maximum())
-            self.pct_lbl.setText("100%")
-        self.eta_lbl.setText("")
-
-        self.abort_btn.hide()
-        self.close_btn.show()
-        self.close_btn.setFocus()
-
-        if self._on_done:
-            try:
-                self._on_done(result)
-            except Exception as exc:
-                logger.error(f"Bulk operation on_done callback failed: {exc}", exc_info=True)
-
-# =============================================================================
-#  CLIENTS / CATALOG  (shared list-manager screen)
-# =============================================================================
+# -----------------------------------------------------------------------------
+#  Clients and Catalog
+# -----------------------------------------------------------------------------
 class _ManagerFrame(QWidget):
     """Common body of the Clients and Catalog screens: header + add button, search box
     (debounced), multi-select table, Edit/Delete buttons whose enabled state follows the
@@ -4823,685 +4816,85 @@ class _ManagerFrame(QWidget):
             self.table.select_only_row(item.row())
         self._ctx.exec(self.table.viewport().mapToGlobal(pos))
 
-#: ttkbootstrap "bootstyle" of the status badge  ->  theme tone (the Tk build's STATUS_BOOTSTYLE)
-STATUS_TONES: Dict[str, str] = {
-    "Paid": "success", "Due": "danger", "Partial": "warning", "Overpaid": "info", "Complimentary": "info",
-}
 
-# Column widths shared by the item / payment headers and their rows, so the columns always line up.
-_ROW_GAP   = 8
-
-_AMOUNT_W  = 112
-
-_DISC_W    = 92
-
-_DATE_W    = 138
-
-_MODE_W    = 140
-
-_REMOVE_W  = 34
-
-def _num_text(value: Any) -> str:
-    """A stored number as the plain text a field shows ("18", not "18.0")."""
-    text = repr(safe_float(value))
-    return text[:-2] if text.endswith(".0") else text
-
-# =============================================================================
-#  SMALL FORM WIDGETS
-# =============================================================================
-class ToggleSwitch(QCheckBox):
-    """A round on/off switch (ttkbootstrap's "round-toggle"). It is still a QCheckBox -- Space toggles it,
-    `clicked` / `toggled` work as usual, screen readers see a check box -- but painted with the live theme
-    colours, so it follows theme switches with no extra code."""
-    TRACK_W, TRACK_H, GAP = 38, 20, 10
-
-    def __init__(self, text: str = "", parent: Optional[QWidget] = None):
-        super().__init__(text, parent)
-        self.setCursor(Qt.CursorShape.PointingHandCursor)
-
-    def sizeHint(self) -> QSize:
-        self.ensurePolished()
-        fm = self.fontMetrics()
-        text_w = fm.horizontalAdvance(self.text()) + self.GAP if self.text() else 0
-        return QSize(self.TRACK_W + 4 + text_w, max(self.TRACK_H + 8, fm.height() + 8))
-
-    def minimumSizeHint(self) -> QSize:
-        return self.sizeHint()
-
-    def hitButton(self, pos) -> bool:                      # the caption toggles it too, not only the switch
-        return self.rect().contains(pos)
-
-    def paintEvent(self, _event):
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        on, enabled = self.isChecked(), self.isEnabled()
-        if not enabled:
-            track, knob, text = theme_color("border"), theme_color("surface"), theme_color("disabled_fg")
-        elif on:
-            track, knob, text = theme_color("primary"), "#FFFFFF", theme_color("fg")     # a switch knob is white on every theme
-        else:
-            track = theme_color("border_strong")
-            knob = theme_color("fg") if theme_is_dark() else theme_color("surface")
-            text = theme_color("fg")
-        w, h = self.TRACK_W, self.TRACK_H
-        top = (self.height() - h) / 2
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QColor(track))
-        painter.drawRoundedRect(QRectF(2, top, w, h), h / 2, h / 2)
-        d = h - 6
-        painter.setBrush(QColor(knob))
-        painter.drawEllipse(QRectF(2 + (w - d - 3 if on else 3), top + 3, d, d))
-        if self.hasFocus() and enabled:
-            painter.setPen(QPen(QColor(theme_color("primary")), 1.5))
-            painter.setBrush(Qt.BrushStyle.NoBrush)
-            painter.drawRoundedRect(QRectF(0.5, top - 1.5, w + 3, h + 3), h / 2 + 1.5, h / 2 + 1.5)
-        if self.text():
-            painter.setPen(QColor(text))
-            painter.drawText(QRectF(self.TRACK_W + 4 + self.GAP, 0, self.width() - self.TRACK_W - 4 - self.GAP, self.height()),
-                             int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft), self.text())
-
-class _ChevronButton(QToolButton):
-    """The little ▾ at the right end of a SuggestCombo, painted in the live theme colours."""
-
-    def __init__(self, parent: Optional[QWidget] = None):
-        super().__init__(parent)
-        self.setFixedSize(22, 22)
-        self.setCursor(Qt.CursorShape.ArrowCursor)
-        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self.setToolTip("Show suggestions")
-
-    def paintEvent(self, _event):
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        key = "disabled_fg" if not self.isEnabled() else ("fg" if self.underMouse() else "muted_text")
-        painter.setPen(QPen(QColor(theme_color(key)), 1.6, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap,
-                            Qt.PenJoinStyle.RoundJoin))
-        cx, cy = self.width() / 2, self.height() / 2
-        painter.drawPolyline([QPointF(cx - 4, cy - 2), QPointF(cx, cy + 2), QPointF(cx + 4, cy - 2)])
-
-class SuggestCombo(QLineEdit):
-    """The free-typed picker used for the client name and the item title: type anything, or choose a known
-    value. Typing pops up the known values that *contain* what was typed (case-insensitively); the ▾ button (or
-    the Down key) opens the list. `picked(text)` fires when -- and only when -- the user chooses an entry from
-    that list; just typing a value never fires it, exactly like the Tk build's <<ComboboxSelected>>.
-
-    It is a QLineEdit + QCompleter rather than an editable QComboBox on purpose: an editable combo box also
-    "activates" an item whenever the typed text happens to match one (on Enter and on losing focus), which
-    would auto-fill / overwrite the client details behind the user's back."""
-    picked = Signal(str)
-
-    def __init__(self, placeholder: str = "", values: Optional[List[str]] = None, parent: Optional[QWidget] = None):
-        super().__init__(parent)
-        if placeholder:
-            self.setPlaceholderText(placeholder)
-        self._model = QStringListModel(list(values or []), self)
-        self._completer = QCompleter(self._model, self)
-        self._completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
-        self._completer.setFilterMode(Qt.MatchFlag.MatchContains)
-        self._completer.setCompletionMode(QCompleter.CompletionMode.PopupCompletion)
-        self._completer.setMaxVisibleItems(8)
-        self.setCompleter(self._completer)
-        self._completer.activated[str].connect(self._on_completer_activated)
-        self._chevron = _ChevronButton(self)
-        self._chevron.clicked.connect(self._show_all)
-        lay = QHBoxLayout(self)
-        lay.setContentsMargins(0, 0, 3, 0)
-        lay.setSpacing(0)
-        lay.addStretch()
-        lay.addWidget(self._chevron)
-        self.setTextMargins(0, 0, 22, 0)
-
-    def _on_completer_activated(self, text: str) -> None:
-        # QLineEdit wires "suggestion chosen -> setText" only while it has keyboard focus; doing it here as well
-        # makes a pick always land, whatever the focus state is at that instant.
-        self.setText(text)
-        self.picked.emit(text)
-
-    def set_values(self, values: List[str]) -> None:
-        """Replace the list of known values (what has been typed so far is left alone)."""
-        self._model.setStringList(list(values))
-
-    def values(self) -> List[str]:
-        return self._model.stringList()
-
-    def set_text(self, text: str) -> None:
-        self.setText(text)
-        self.setCursorPosition(0)
-
-    def _show_all(self) -> None:
-        """The ▾ button: open the list -- every known value that contains the text typed so far (all of
-        them while the field is empty), like the Tk dropdown filtered by the typed text."""
-        self.setFocus()
-        self._completer.setCompletionPrefix(self.text())
-        self._completer.complete()
-
-class _ReturnToNext(QObject):
-    """Event filter: Enter / Return in a single-line field moves focus to the next field in tab order -- the
-    same field-to-field flow Tab already gives, from the key people naturally press to "confirm". Applied to
-    single-line fields only: the multi-line Contact Info / Notes boxes keep plain Enter for a new line."""
-
-    def eventFilter(self, obj, event):
-        if event.type() == QEvent.Type.KeyPress and event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
-            blocked = (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.AltModifier
-                       | Qt.KeyboardModifier.ShiftModifier | Qt.KeyboardModifier.MetaModifier)
-            if event.modifiers() & blocked:
-                return False
-            completer = obj.completer() if isinstance(obj, QLineEdit) else None
-            if completer is not None and completer.popup().isVisible() and completer.popup().currentIndex().isValid():
-                return False                                   # a highlighted suggestion: the completer takes the key
-            # A QDateEdit's own focusNextChild() first steps through its day / month / year sections; asking its
-            # parent instead moves straight on to the next field, like Enter in the Tk date entry did.
-            target = obj.parentWidget() if isinstance(obj, QAbstractSpinBox) and obj.parentWidget() is not None else obj
-            target.focusNextChild()
-            return True
-        return False
-
-def advance_on_enter(widget: QWidget) -> QWidget:
-    widget.installEventFilter(_ReturnToNext(widget))
-    return widget
-
-def make_money_edit(value: float, width: int, tooltip: str = "") -> QLineEdit:
-    """A right-aligned "0.00" amount field: digits and one decimal point only (two decimals at most),
-    re-formatted to two decimals when it loses focus."""
-    edit = QLineEdit(f"{value:.2f}")
-    edit.setAlignment(Qt.AlignmentFlag.AlignRight)
-    edit.setFixedWidth(width)
-    restrict_to_decimal(edit)
-    format_as_decimal_on_blur(edit)
-    advance_on_enter(edit)
-    if tooltip:
-        edit.setToolTip(tooltip)
-    return edit
-
-def _caption(text: str) -> QLabel:
-    return make_label(text, "caption")
-
-def _retone(widget: QWidget, tone: str) -> None:
-    """set_tone() only when the tone actually changes (re-polishing on every keystroke is wasted work)."""
-    if widget.property("tone") != tone:
-        set_tone(widget, tone)
-
-# =============================================================================
-#  ROWS
-# =============================================================================
-class _ItemRow(QWidget):
-    """One invoice line: item title (with catalog suggestions), amount, discount, description."""
-    changed = Signal()                       # amount / discount edited -> the totals must be recalculated
-    remove_requested = Signal(object)        # this row asks the form to delete it
-    title_picked = Signal(object, str)       # (row, title) -- a catalog title was chosen
-
-    def __init__(self, titles: List[str], title: str = "", description: str = "", amount: float = 0.0,
-                 discount: float = 0.0, parent: Optional[QWidget] = None):
-        super().__init__(parent)
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(0, 7, 0, 0)
-        lay.setSpacing(5)
-
-        top = QHBoxLayout()
-        top.setSpacing(_ROW_GAP)
-        self.title_edit = SuggestCombo("Item / service name", titles)
-        self.title_edit.set_text(title)
-        self.title_edit.picked.connect(self._on_picked)
-        advance_on_enter(self.title_edit)
-        top.addWidget(self.title_edit, 1)
-
-        self.amount_edit = make_money_edit(amount, _AMOUNT_W, "Item amount, before any discount")
-        self.amount_edit.textChanged.connect(self.changed)
-        top.addWidget(self.amount_edit)
-        self.disc_edit = make_money_edit(discount, _DISC_W, "Per-item discount amount")
-        self.disc_edit.textChanged.connect(self.changed)
-        top.addWidget(self.disc_edit)
-
-        self.remove_btn = make_button("✕", "danger-outline", tooltip="Remove this item (Ctrl+Shift+Del or Ctrl+Minus)")
-        self.remove_btn.setFixedWidth(_REMOVE_W)
-        set_flag(self.remove_btn, "glyph", True)
-        self.remove_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)      # Tab skips it, as in the Tk build (takefocus=False)
-        self.remove_btn.clicked.connect(self._on_remove)
-        top.addWidget(self.remove_btn)
-        lay.addLayout(top)
-
-        self.desc_edit = QLineEdit(description)
-        self.desc_edit.setPlaceholderText("Description (optional)")
-        self.desc_edit.setCursorPosition(0)
-        advance_on_enter(self.desc_edit)
-        lay.addWidget(self.desc_edit)
-        lay.addSpacing(4)
-        lay.addWidget(hline())
-
-    def _on_picked(self, text: str):
-        self.title_picked.emit(self, text)
-
-    def _on_remove(self, _checked: bool = False):
-        self.remove_requested.emit(self)
-
-    def focus_widgets(self) -> List[QWidget]:
-        return [self.title_edit, self.amount_edit, self.disc_edit, self.desc_edit]
-
-    def values(self) -> Dict[str, Any]:
-        return {
-            "title": self.title_edit.text().strip(),
-            "description": self.desc_edit.text().strip(),
-            "amount": safe_float(self.amount_edit.text()),
-            "discount": max(0.0, safe_float(self.disc_edit.text())),
-        }
-
-class _PaymentRow(QWidget):
-    """One line of the payment ledger: date, amount, mode, note."""
-    changed = Signal()
-    remove_requested = Signal(object)
-
-    def __init__(self, amount: float = 0.0, payment_date: Optional[str] = None, mode: str = "Cash", note: str = "",
-                 payment_id: Optional[int] = None, parent: Optional[QWidget] = None):
-        super().__init__(parent)
-        self.payment_id = payment_id
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(0, 6, 0, 0)
-        lay.setSpacing(6)
-        row = QHBoxLayout()
-        row.setSpacing(_ROW_GAP)
-
-        self.date_edit = make_date_edit()
-        if payment_date:
-            set_date_edit_from_db(self.date_edit, payment_date)
-        self.date_edit.setFixedWidth(_DATE_W)
-        advance_on_enter(self.date_edit)
-        row.addWidget(self.date_edit)
-
-        self.amount_edit = make_money_edit(amount, _AMOUNT_W)
-        self.amount_edit.textChanged.connect(self.changed)
-        row.addWidget(self.amount_edit)
-
-        self.mode_combo = QComboBox()
-        self.mode_combo.addItems(PAYMENT_MODES)
-        self.mode_combo.setCurrentText(mode if mode in PAYMENT_MODES else "Cash")
-        self.mode_combo.setFixedWidth(_MODE_W)
-        guard_wheel(self.mode_combo)
-        row.addWidget(self.mode_combo)
-
-        self.note_edit = QLineEdit(note)
-        self.note_edit.setPlaceholderText("Note (optional)")
-        self.note_edit.setCursorPosition(0)
-        advance_on_enter(self.note_edit)
-        row.addWidget(self.note_edit, 1)
-
-        self.remove_btn = make_button("✕", "danger-outline", tooltip="Remove this payment")
-        self.remove_btn.setFixedWidth(_REMOVE_W)
-        set_flag(self.remove_btn, "glyph", True)
-        self.remove_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self.remove_btn.clicked.connect(self._on_remove)
-        row.addWidget(self.remove_btn)
-        lay.addLayout(row)
-        lay.addSpacing(4)
-        lay.addWidget(hline())
-
-    def _on_remove(self, _checked: bool = False):
-        self.remove_requested.emit(self)
-
-    def focus_widgets(self) -> List[QWidget]:
-        return [self.date_edit, self.amount_edit, self.mode_combo, self.note_edit]
-
-    def set_editable(self, editable: bool) -> None:
-        for w in (self.date_edit, self.amount_edit, self.mode_combo, self.note_edit, self.remove_btn):
-            w.setEnabled(editable)
-
-    def values(self) -> Dict[str, Any]:
-        return {
-            "amount": safe_float(self.amount_edit.text()),
-            "payment_date": date_edit_db(self.date_edit),
-            "mode": self.mode_combo.currentText(),
-            "note": self.note_edit.text().strip(),
-            "payment_id": self.payment_id,
-        }
-
-class _SummaryRow(QWidget):
-    """One "label ............ value" line of the live totals box."""
-
-    def __init__(self, label: str = "", bold: bool = False, parent: Optional[QWidget] = None):
-        super().__init__(parent)
-        lay = QHBoxLayout(self)
-        lay.setContentsMargins(0, 2, 0, 2)
-        lay.setSpacing(15)
-        role = "h3" if bold else None
-        align = Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
-        self.label = make_label(label, role, align=align)
-        self.value = make_label("", role, align=align)
-        self.label.setMinimumWidth(190)
-        self.value.setMinimumWidth(130)
-        lay.addWidget(self.label)
-        lay.addWidget(self.value)
-
-    def set(self, value: Optional[str] = None, label: Optional[str] = None) -> None:
-        if value is not None:
-            self.value.setText(value)
-        if label is not None:
-            self.label.setText(label)
-
-# =============================================================================
-#  DATABASE BACKUP & IMPORT
-# =============================================================================
-# Every copy of the database goes through SQLite's own online-backup API instead of a raw file copy. A raw copy of a
-# WAL-mode database can silently miss recent changes that still sit in the -wal file; the backup API always produces
-# a complete, consistent file, and it works while the application has the database open.
-_FILE_DIALOG_STATE: Dict[str, Optional[str]] = {"backup_dir": None, "import_dir": None, "asset_dir": None}
-
-def _start_dir(key: str) -> Path:
-    """Where a file dialog opens: the folder used last time, else the user's Documents folder."""
-    remembered = _FILE_DIALOG_STATE.get(key)
-    if remembered and Path(remembered).is_dir():
-        return Path(remembered)
-    return documents_dir()
-
-def _remember_dir(key: str, chosen_file: Any) -> None:
-    _FILE_DIALOG_STATE[key] = str(Path(str(chosen_file)).parent)
-
-def _same_file(a: Path, b: Path) -> bool:
-    try:
-        return os.path.samefile(a, b)
-    except OSError:
-        return False
-
-def _overwrite_database(source: Path, dest: Path) -> None:
-    """Makes the SQLite database at `dest` an exact copy of the one at `source`."""
-    with closing(sqlite3.connect(str(source), timeout=10)) as src, closing(sqlite3.connect(str(dest), timeout=10)) as dst:
-        try:
-            # SQLite refuses a backup into a WAL-mode database when the two page sizes differ.
-            dst.execute("PRAGMA journal_mode = DELETE")
-        except sqlite3.Error:
-            pass
-        src.backup(dst)
-
-def _write_database_copy(source: Path, dest: Path) -> None:
-    """Writes a complete single-file copy of the database `source` to `dest`, replacing whatever is there. The copy
-    is built under a temporary name beside `dest` first, so a failure half-way never leaves a damaged file behind."""
-    source, dest = Path(source), Path(dest)
-    if not source.is_file():
-        raise FileNotFoundError(f"The database file was not found:\n{source}")
-    if dest.exists() and _same_file(source, dest):
-        raise ValueError("That is the database Vyaprix is using right now.\nPlease choose a different file.")
-    temp = dest.with_name(dest.name + ".part")
-    sidecars = ("-wal", "-shm", "-journal")
-    try:
-        _overwrite_database(source, temp)
-        try:
-            with closing(sqlite3.connect(str(temp), timeout=10)) as conn:
-                conn.execute("PRAGMA journal_mode = DELETE")        # a self-contained file: nothing left in a -wal
-        except sqlite3.Error:
-            pass
-        for suffix in sidecars:                                      # a stale -wal beside the old file must not be replayed
-            try:
-                dest.with_name(dest.name + suffix).unlink()
-            except OSError:
-                pass
-        os.replace(temp, dest)
-    finally:
-        for leftover in [temp] + [temp.with_name(temp.name + s) for s in sidecars]:
-            try:
-                leftover.unlink()
-            except OSError:
-                pass
-
-def backup_database_to(dest: Path) -> None:
-    """Saves a complete copy of the live database to `dest`."""
-    _write_database_copy(Path(DB_NAME), Path(dest))
-
-# Columns every Vyaprix database has had since the first release (newer ones are added by DatabaseManager).
-_CORE_INVOICE_COLUMNS = frozenset({"invoice_number", "bill_to", "items", "status", "invoice_date"})
-
-def validate_import_database(path: Path) -> Optional[str]:
-    """None when `path` is a usable Vyaprix database, otherwise a short human-readable reason why it is not."""
-    path = Path(path)
-    if not path.is_file():
-        return "The file could not be found."
-    try:
-        with closing(sqlite3.connect(str(path), timeout=10)) as conn:
-            tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
-            if "invoices" not in tables:
-                return "It is a database, but not a Vyaprix one (there is no invoices table in it)."
-            missing = sorted(_CORE_INVOICE_COLUMNS - {row[1] for row in conn.execute("PRAGMA table_info(invoices)")})
-            if missing:
-                return f"It is a database, but not a Vyaprix one (its invoices table has no {', '.join(missing)} column)."
-            verdict = conn.execute("PRAGMA quick_check(1)").fetchone()
-            if not verdict or verdict[0] != "ok":
-                return f"The file failed SQLite's integrity check and may be damaged ({verdict[0] if verdict else 'no result'})."
-    except sqlite3.Error as exc:
-        return str(exc)
-    return None
-
-class DatabaseImportError(Exception):
-    """Raised by import_database_from(). `stage` is "backup" (the safety copy could not be made, nothing was touched)
-    or "import" (the import failed; `restored` says whether the previous database could be put back)."""
-
-    def __init__(self, message: str, stage: str, restored: bool = True, backup_path: Optional[Path] = None):
-        super().__init__(message)
-        self.stage = stage
-        self.restored = restored
-        self.backup_path = backup_path
-
-def import_database_from(source: Path) -> Path:
-    """Replaces everything in the live database with the contents of `source`. The current database is copied to a
-    timestamped safety file first (its path is returned) and put back if anything goes wrong."""
-    source = Path(source)
-    live = Path(DB_NAME)
-    stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-    backup_path = DATA_DIR / f"Vyaprix-pre-import-backup-{stamp}.db"
-    counter = 2
-    while backup_path.exists():         # never overwrite an earlier safety copy (it may even be the file being imported)
-        backup_path = DATA_DIR / f"Vyaprix-pre-import-backup-{stamp}-{counter}.db"
-        counter += 1
-    had_live = live.exists()
-    try:
-        if had_live:
-            _write_database_copy(live, backup_path)
-    except Exception as exc:
-        raise DatabaseImportError(str(exc), "backup", backup_path=backup_path) from exc
-    try:
-        _overwrite_database(source, live)
-        DatabaseManager(live)       # adds anything an older / smaller file is missing; fails on a file that is not ours
-    except Exception as exc:
-        restored = False
-        try:
-            if had_live:
-                _overwrite_database(backup_path, live)
-                restored = True
-        except Exception:
-            logger.exception("Could not restore the previous database after a failed import")
-        raise DatabaseImportError(str(exc), "import", restored, backup_path) from exc
-    return backup_path
-
-def _fit_to_screen(dialog: QDialog, width: int, height: int, min_width: int, min_height: int) -> None:
-    """Sizes a dialog as the Tk build did, but never larger than the screen it opens on (many laptops are 768 px tall)."""
-    screen = dialog.screen() or QApplication.primaryScreen()
-    if screen is not None:
-        area = screen.availableGeometry()
-        width, height = min(width, max(320, area.width() - 40)), min(height, max(320, area.height() - 60))
-    dialog.setMinimumSize(min(min_width, width), min(min_height, height))
-    dialog.resize(width, height)
-
-def _no_default_button(*buttons: QPushButton) -> None:
-    for btn in buttons:
-        btn.setAutoDefault(False)
-        btn.setDefault(False)
-
-# =============================================================================
-#  SETTINGS DIALOG
-# =============================================================================
-class _AssetRow(QWidget):
-    """One upload row (Company Logo / Authorized Signature / UPI QR Code): a preview thumbnail, a status line and
-    Browse / Clear buttons. The chosen file is copied into Vyaprix's own data folder straight away, so the app keeps
-    working even if the original is moved or deleted; the file name is deliberately not shown."""
-
-    THUMB = 64
-
-    def __init__(self, config_key: str, label: str, dest_filename: str):
-        super().__init__()
-        self.config_key = config_key
-        self.dest_filename = dest_filename
-        self.rel_path = ""
-
-        row = QHBoxLayout(self)
-        row.setContentsMargins(0, 8, 0, 8)
-        row.setSpacing(12)
-
-        self.thumb = make_label("—", "thumb", align=Qt.AlignmentFlag.AlignCenter)
-        self.thumb.setFixedSize(self.THUMB, self.THUMB)
-        row.addWidget(self.thumb)
-
-        info = QVBoxLayout()
-        info.setSpacing(2)
-        info.addStretch(1)
-        info.addWidget(make_label(label, "h3"))
-        self.status = make_label("", "muted")
-        info.addWidget(self.status)
-        info.addStretch(1)
-        row.addLayout(info, 1)
-
-        self.browse_btn = make_button("Browse…", "secondary-outline", self.browse)
-        self.clear_btn = make_button("✕ Clear", "danger-outline", self.clear)
-        _no_default_button(self.browse_btn, self.clear_btn)
-        row.addWidget(self.browse_btn)
-        row.addWidget(self.clear_btn)
-
-    def set_path(self, rel_path: str) -> None:
-        self.rel_path = rel_path or ""
-        self.refresh()
-
-    def refresh(self) -> None:
-        dpr = self.devicePixelRatioF() or 1.0
-        pixmap = None
-        if self.rel_path:
-            pixmap = load_thumbnail_pixmap(DATA_DIR / self.rel_path, max_size=int(round(44 * dpr)))
-        if pixmap is not None:
-            pixmap.setDevicePixelRatio(dpr)
-            self.thumb.setPixmap(pixmap)
-            self.status.setText("Custom file uploaded")
-        else:
-            self.thumb.clear()
-            self.thumb.setText("—")
-            self.status.setText("No file selected — using default")
-
-    def browse(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(self.window(), "Choose an Image", str(_start_dir("asset_dir")),
-                                              "Image Files (*.png *.jpg *.jpeg)")
-        if not path:
-            return
-        _remember_dir("asset_dir", path)
-        try:
-            dest = ASSETS_DIR / self.dest_filename
-            if not (dest.exists() and _same_file(Path(path), dest)):
-                shutil.copy(path, dest)
-        except Exception as exc:
-            Messagebox.show_error("Error", f"Could not save file: {exc}", parent=self.window())
-            return
-        self.set_path(f"assets/{self.dest_filename}")
-
-    def clear(self) -> None:
-        self.set_path("")
-
-def _logo_pixmap_for(widget: QWidget, max_width: int) -> Optional[QPixmap]:
-    """The bundled logo, at most `max_width` logical pixels wide, rendered at the screen's native resolution so it stays
-    crisp on 125% / 150% / 200% displays. A logo that is already smaller than that is shown 1:1, never enlarged."""
-    dpr = widget.devicePixelRatioF() or 1.0
-    wanted = int(round(max_width * dpr))
-    pixmap = load_app_logo_pixmap(wanted)
-    if pixmap is not None and dpr > 1.01 and pixmap.width() == wanted:
-        pixmap.setDevicePixelRatio(dpr)
-    return pixmap
-
-# =============================================================================
-#  BACKGROUND WORKER
-# =============================================================================
-def startup_background_task(app_instance):
-    """Put whatever heavy lifting you need at start-up here. It runs in a thread, so it never freezes the splash screen
-    or the GUI. If it needs to update the GUI it MUST go through the app's task_queue, never touch a widget itself."""
-    logger.info("Background thread started successfully.")
-
-# =============================================================================
-#  ENTRY POINT
-# =============================================================================
-def _orderly_shutdown(app: QApplication) -> None:
-    """Closes and deletes every window in order, then flushes the pending deletions, BEFORE the interpreter exits.
-    PySide6 can crash while it destroys widgets at interpreter shutdown that are only kept alive by a Python slot
-    (lambda) connected to one of their own signals; tearing everything down here, while the event loop machinery is
-    still intact, avoids that. Qt-owned popups (completer lists, tooltips) are left alone: Qt frees those itself."""
-    for window in app.topLevelWidgets():
-        if isinstance(window, InvoiceApp):
-            window._closing_for_good = True         # no "unsaved changes" prompt while the process is going away
-        if window.windowType() in (Qt.WindowType.Popup, Qt.WindowType.ToolTip):
-            continue
-        window.close()
-        window.deleteLater()
-    app.sendPostedEvents(None, QEvent.Type.DeferredDelete)
-    app.processEvents()
-
-def _log_unhandled_exception(exc_type, exc_value, exc_tb) -> None:
-    """sys.excepthook. PySide6 reports an exception raised inside a Qt slot or event handler through sys.excepthook and
-    carries on running -- and a windowed (pythonw) build has no console to show it on. Writing it to the log file as well
-    means "I clicked it and nothing happened" always leaves a trace to look into."""
-    if issubclass(exc_type, KeyboardInterrupt):
-        sys.__excepthook__(exc_type, exc_value, exc_tb)
-        return
-    try:
-        logger.critical("Unhandled exception", exc_info=(exc_type, exc_value, exc_tb))   # file + console (stream handler)
-    except Exception:
-        sys.__excepthook__(exc_type, exc_value, exc_tb)
-
-def _log_unhandled_thread_exception(args) -> None:
-    """threading.excepthook: the same for an exception that escapes a worker thread."""
-    if args.exc_type is SystemExit:
-        return
-    try:
-        logger.critical("Unhandled exception in thread %s", getattr(args.thread, "name", "?"),
-                        exc_info=(args.exc_type, args.exc_value, args.exc_traceback))
-    except Exception:
-        pass
-
-def _close_splash_windows() -> None:
-    """The splash stays on top of every other window, so it must go before an error box can be seen."""
-    for widget in QApplication.topLevelWidgets():
-        if isinstance(widget, SplashScreen):
-            widget.close()
-
-
-# @@PARTS@@
-
-
-# =============================================================================
-#  PLACEHOLDER PAGES -- see the chat message for the delivery order. Each
-#  of these keeps the exact class name and (parent, controller) constructor
-#  signature the finished screen will have, so InvoiceApp's wiring below
-#  needs no changes at all when the real implementation replaces one --
-#  only this class body gets swapped out.
-# =============================================================================
-class _ComingSoonPage(QWidget):
-    def __init__(self, parent, controller, title: str, detail: str):
-        super().__init__(parent)
-        self.controller = controller
-        layout = QVBoxLayout(self)
-        layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        icon_lbl = QLabel("🚧")
-        icon_lbl.setStyleSheet("font-size: 40px;")
-        icon_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        title_lbl = QLabel(title)
-        title_lbl.setStyleSheet("font-size: 18px; font-weight: 700;")
-        title_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        detail_lbl = QLabel(detail)
-        set_role(detail_lbl, "muted")
-        detail_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        detail_lbl.setWordWrap(True)
-        detail_lbl.setMaximumWidth(420)
-        layout.addWidget(icon_lbl)
-        layout.addSpacing(8)
-        layout.addWidget(title_lbl)
-        layout.addSpacing(4)
-        layout.addWidget(detail_lbl)
-
-    def on_show(self, *args):
-        pass
-
-
-# =============================================================================
-#  DASHBOARD  /  INVOICE LIST
-# =============================================================================
+class ClientsFrame(_ManagerFrame):
+    TITLE = "Clients"
+    SUBTITLE = "Your address book for fast invoice billing."
+    ADD_TEXT = "＋  Add Client  (Ctrl+N)"
+    ADD_TIP = "Add a new client (Ctrl+N)"
+    SEARCH_TIP = "Search clients (Ctrl+F)"
+    HINT_NONE = "Select a client to edit or delete"
+    COL_DEFS = [
+        ("name",    "Client / Company", 260, Qt.AlignmentFlag.AlignLeft),
+        ("contact", "Contact Info",     320, Qt.AlignmentFlag.AlignLeft),
+        ("gstin",   "GSTIN",            160, Qt.AlignmentFlag.AlignLeft),
+    ]
+
+    def _fetch(self, search):
+        return self.db_manager.get_all_clients(search)
+
+    def _cells(self, c):
+        contact_preview = (c.get("contact") or "").replace("\n", "  ·  ")
+        return [c["name"], contact_preview, c.get("gstin") or ""]
+
+    def _get_by_id(self, rec_id):
+        return self.db_manager.get_client_by_id(rec_id)
+
+    def _open_editor(self, client: Optional[Dict]):
+        run_dialog(ClientDialog(self.controller, self.db_manager, client, self._populate))
+
+    def _delete_ids(self, ids):
+        self.db_manager.delete_clients(ids)
+
+    def _delete_prompt(self, n):
+        msg = f"Delete {n} client(s) from your address book?" if n > 1 else "Delete this client from your address book?"
+        return "Delete Client(s)", msg
+
+    def new_client(self):
+        """Ctrl+N on this page: open the Add Client dialog, exactly like the "＋ Add Client" button."""
+        self._open_editor(None)
+
+
+class CatalogFrame(_ManagerFrame):
+    TITLE = "Catalog"
+    SUBTITLE = "Reusable products & services for faster invoice lines."
+    ADD_TEXT = "＋  Add Item  (Ctrl+N)"
+    ADD_TIP = "Add a new catalog item (Ctrl+N)"
+    SEARCH_TIP = "Search catalog items (Ctrl+F)"
+    HINT_NONE = "Select an item to edit or delete"
+    COL_DEFS = [
+        ("title",  "Item / Service", 260, Qt.AlignmentFlag.AlignLeft),
+        ("desc",   "Description",    340, Qt.AlignmentFlag.AlignLeft),
+        ("amount", "Default Amount", 140, Qt.AlignmentFlag.AlignRight),
+    ]
+
+    def _fetch(self, search):
+        return self.db_manager.get_all_catalog_items(search)
+
+    def _cells(self, it):
+        return [it["title"], (it.get("description") or "").replace("\n", "  ·  "), fmt_money(it.get("amount"))]
+
+    def _get_by_id(self, rec_id):
+        return self.db_manager.get_catalog_item_by_id(rec_id)
+
+    def _open_editor(self, item: Optional[Dict]):
+        run_dialog(CatalogItemDialog(self.controller, self.db_manager, item, self._populate))
+
+    def _delete_ids(self, ids):
+        self.db_manager.delete_catalog_items(ids)
+
+    def _delete_prompt(self, n):
+        msg = f"Delete {n} catalog item(s)?" if n > 1 else "Delete this catalog item?"
+        return "Delete Item(s)", msg
+
+    def new_catalog_item(self):
+        """Ctrl+N on this page: open the Add Catalog Item dialog, exactly like the "＋ Add Item" button."""
+        self._open_editor(None)
+
+
+# -----------------------------------------------------------------------------
+#  Dashboard (invoice list)
+# -----------------------------------------------------------------------------
 class DashboardFrame(QWidget):
     STATUS_FILTERS = ["All", "Paid", "Due", "Partial", "Overpaid", "Complimentary"]
     SORT_ASC  = " ▲"
@@ -5686,6 +5079,7 @@ class DashboardFrame(QWidget):
             t.horizontalHeaderItem(i).setTextAlignment(align | Qt.AlignmentFlag.AlignVCenter)
         header.sectionClicked.connect(lambda idx: self._sort_by(self.COL_DEFS[idx][0]))
         self._refresh_header_arrows()              # shows the initial "Date ▼" (the Tk build sorted this way without saying so)
+        self._fit_columns()
 
         t.itemSelectionChanged.connect(self._on_select)
         t.itemDoubleClicked.connect(lambda _item: self._act_edit())
@@ -5707,6 +5101,15 @@ class DashboardFrame(QWidget):
         self._ctx_bulk.addAction("📊  Bulk Export",  self._act_bulk_export)
         self._ctx_bulk.addSeparator()
         self._ctx_bulk.addAction("🗑️  Bulk Delete",  self._act_delete)
+
+    def _fit_columns(self):
+        """Widen (never narrow) the fixed-width columns to what they have to show. The designed widths suit Segoe UI;
+        in another font, with a longer currency symbol or with a bigger amount, a cell would end in "…" -- and a
+        cut-off amount reads as a different amount. The client column stretches, so it gives up the room."""
+        dates = [datetime.date(2026, month, 28).strftime(DISPLAY_DATE_FORMAT) for month in range(1, 13)]
+        money = fmt_money(999999.99)
+        self.table.fit_columns({0: [], 2: dates, 3: list(STATUS_DISPLAY_LABELS.values()),
+                                4: [money], 5: [money], 6: [money]})
 
     def _refresh_header_arrows(self):
         for i, (cid, text, _w, _a) in enumerate(self.COL_DEFS):
@@ -5925,6 +5328,7 @@ class DashboardFrame(QWidget):
                 for r in range(t.rowCount()):
                     if t.item(r, 0).text() in keep_selected:
                         t.setRangeSelected(QTableWidgetSelectionRange(r, 0, r, ncols - 1), True)
+            self._fit_columns()                    # room for the longest date / status / amount now on this page
         finally:
             t.blockSignals(False)
             t.setUpdatesEnabled(True)
@@ -6325,84 +5729,359 @@ class DashboardFrame(QWidget):
             q.put({"status": "error", "message": str(exc)})
 
 
-class ClientsFrame(_ManagerFrame):
-    TITLE = "Clients"
-    SUBTITLE = "Your address book for fast invoice billing."
-    ADD_TEXT = "＋  Add Client  (Ctrl+N)"
-    ADD_TIP = "Add a new client (Ctrl+N)"
-    SEARCH_TIP = "Search clients (Ctrl+F)"
-    HINT_NONE = "Select a client to edit or delete"
-    COL_DEFS = [
-        ("name",    "Client / Company", 260, Qt.AlignmentFlag.AlignLeft),
-        ("contact", "Contact Info",     320, Qt.AlignmentFlag.AlignLeft),
-        ("gstin",   "GSTIN",            160, Qt.AlignmentFlag.AlignLeft),
-    ]
-
-    def _fetch(self, search):
-        return self.db_manager.get_all_clients(search)
-
-    def _cells(self, c):
-        contact_preview = (c.get("contact") or "").replace("\n", "  ·  ")
-        return [c["name"], contact_preview, c.get("gstin") or ""]
-
-    def _get_by_id(self, rec_id):
-        return self.db_manager.get_client_by_id(rec_id)
-
-    def _open_editor(self, client: Optional[Dict]):
-        run_dialog(ClientDialog(self.controller, self.db_manager, client, self._populate))
-
-    def _delete_ids(self, ids):
-        self.db_manager.delete_clients(ids)
-
-    def _delete_prompt(self, n):
-        msg = f"Delete {n} client(s) from your address book?" if n > 1 else "Delete this client from your address book?"
-        return "Delete Client(s)", msg
-
-    def new_client(self):
-        """Ctrl+N on this page: open the Add Client dialog, exactly like the "＋ Add Client" button."""
-        self._open_editor(None)
+# -----------------------------------------------------------------------------
+#  Invoice form
+# -----------------------------------------------------------------------------
+# Column widths shared by the item / payment headers and their rows, so the columns always line up.
+_ROW_GAP   = 8
+_AMOUNT_W  = 112
+_DISC_W    = 92
+_DATE_W    = 138
+_MODE_W    = 140
+_REMOVE_W  = 34
 
 
-class CatalogFrame(_ManagerFrame):
-    TITLE = "Catalog"
-    SUBTITLE = "Reusable products & services for faster invoice lines."
-    ADD_TEXT = "＋  Add Item  (Ctrl+N)"
-    ADD_TIP = "Add a new catalog item (Ctrl+N)"
-    SEARCH_TIP = "Search catalog items (Ctrl+F)"
-    HINT_NONE = "Select an item to edit or delete"
-    COL_DEFS = [
-        ("title",  "Item / Service", 260, Qt.AlignmentFlag.AlignLeft),
-        ("desc",   "Description",    340, Qt.AlignmentFlag.AlignLeft),
-        ("amount", "Default Amount", 140, Qt.AlignmentFlag.AlignRight),
-    ]
-
-    def _fetch(self, search):
-        return self.db_manager.get_all_catalog_items(search)
-
-    def _cells(self, it):
-        return [it["title"], (it.get("description") or "").replace("\n", "  ·  "), fmt_money(it.get("amount"))]
-
-    def _get_by_id(self, rec_id):
-        return self.db_manager.get_catalog_item_by_id(rec_id)
-
-    def _open_editor(self, item: Optional[Dict]):
-        run_dialog(CatalogItemDialog(self.controller, self.db_manager, item, self._populate))
-
-    def _delete_ids(self, ids):
-        self.db_manager.delete_catalog_items(ids)
-
-    def _delete_prompt(self, n):
-        msg = f"Delete {n} catalog item(s)?" if n > 1 else "Delete this catalog item?"
-        return "Delete Item(s)", msg
-
-    def new_catalog_item(self):
-        """Ctrl+N on this page: open the Add Catalog Item dialog, exactly like the "＋ Add Item" button."""
-        self._open_editor(None)
+def _num_text(value: Any) -> str:
+    """A stored number as the plain text a field shows ("18", not "18.0")."""
+    text = repr(safe_float(value))
+    return text[:-2] if text.endswith(".0") else text
 
 
-# =============================================================================
-#  INVOICE FORM
-# =============================================================================
+class ToggleSwitch(QCheckBox):
+    """A round on/off switch (ttkbootstrap's "round-toggle"). It is still a QCheckBox -- Space toggles it,
+    `clicked` / `toggled` work as usual, screen readers see a check box -- but painted with the live theme
+    colours, so it follows theme switches with no extra code."""
+    TRACK_W, TRACK_H, GAP = 38, 20, 10
+
+    def __init__(self, text: str = "", parent: Optional[QWidget] = None):
+        super().__init__(text, parent)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+
+    def sizeHint(self) -> QSize:
+        self.ensurePolished()
+        fm = self.fontMetrics()
+        text_w = fm.horizontalAdvance(self.text()) + self.GAP if self.text() else 0
+        return QSize(self.TRACK_W + 4 + text_w, max(self.TRACK_H + 8, fm.height() + 8))
+
+    def minimumSizeHint(self) -> QSize:
+        return self.sizeHint()
+
+    def hitButton(self, pos) -> bool:                      # the caption toggles it too, not only the switch
+        return self.rect().contains(pos)
+
+    def paintEvent(self, _event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        on, enabled = self.isChecked(), self.isEnabled()
+        if not enabled:
+            track, knob, text = theme_color("border"), theme_color("surface"), theme_color("disabled_fg")
+        elif on:
+            track, knob, text = theme_color("primary"), "#FFFFFF", theme_color("fg")     # a switch knob is white on every theme
+        else:
+            track = theme_color("border_strong")
+            knob = theme_color("fg") if theme_is_dark() else theme_color("surface")
+            text = theme_color("fg")
+        w, h = self.TRACK_W, self.TRACK_H
+        top = (self.height() - h) / 2
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(track))
+        painter.drawRoundedRect(QRectF(2, top, w, h), h / 2, h / 2)
+        d = h - 6
+        painter.setBrush(QColor(knob))
+        painter.drawEllipse(QRectF(2 + (w - d - 3 if on else 3), top + 3, d, d))
+        if self.hasFocus() and enabled:
+            painter.setPen(QPen(QColor(theme_color("primary")), 1.5))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawRoundedRect(QRectF(0.5, top - 1.5, w + 3, h + 3), h / 2 + 1.5, h / 2 + 1.5)
+        if self.text():
+            painter.setPen(QColor(text))
+            painter.drawText(QRectF(self.TRACK_W + 4 + self.GAP, 0, self.width() - self.TRACK_W - 4 - self.GAP, self.height()),
+                             int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft), self.text())
+
+
+class _ChevronButton(QToolButton):
+    """The little ▾ at the right end of a SuggestCombo, painted in the live theme colours."""
+
+    def __init__(self, parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        self.setFixedSize(22, 22)
+        self.setCursor(Qt.CursorShape.ArrowCursor)
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.setToolTip("Show suggestions")
+
+    def paintEvent(self, _event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        key = "disabled_fg" if not self.isEnabled() else ("fg" if self.underMouse() else "muted_text")
+        painter.setPen(QPen(QColor(theme_color(key)), 1.6, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap,
+                            Qt.PenJoinStyle.RoundJoin))
+        cx, cy = self.width() / 2, self.height() / 2
+        painter.drawPolyline([QPointF(cx - 4, cy - 2), QPointF(cx, cy + 2), QPointF(cx + 4, cy - 2)])
+
+
+class SuggestCombo(QLineEdit):
+    """The free-typed picker used for the client name and the item title: type anything, or choose a known
+    value. Typing pops up the known values that *contain* what was typed (case-insensitively); the ▾ button (or
+    the Down key) opens the list. `picked(text)` fires when -- and only when -- the user chooses an entry from
+    that list; just typing a value never fires it, exactly like the Tk build's <<ComboboxSelected>>.
+
+    It is a QLineEdit + QCompleter rather than an editable QComboBox on purpose: an editable combo box also
+    "activates" an item whenever the typed text happens to match one (on Enter and on losing focus), which
+    would auto-fill / overwrite the client details behind the user's back."""
+    picked = Signal(str)
+
+    def __init__(self, placeholder: str = "", values: Optional[List[str]] = None, parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        if placeholder:
+            self.setPlaceholderText(placeholder)
+        self._model = QStringListModel(list(values or []), self)
+        self._completer = QCompleter(self._model, self)
+        self._completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+        self._completer.setFilterMode(Qt.MatchFlag.MatchContains)
+        self._completer.setCompletionMode(QCompleter.CompletionMode.PopupCompletion)
+        self._completer.setMaxVisibleItems(8)
+        self.setCompleter(self._completer)
+        self._completer.activated[str].connect(self._on_completer_activated)
+        self._chevron = _ChevronButton(self)
+        self._chevron.clicked.connect(self._show_all)
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(0, 0, 3, 0)
+        lay.setSpacing(0)
+        lay.addStretch()
+        lay.addWidget(self._chevron)
+        self.setTextMargins(0, 0, 22, 0)
+
+    def _on_completer_activated(self, text: str) -> None:
+        # QLineEdit wires "suggestion chosen -> setText" only while it has keyboard focus; doing it here as well
+        # makes a pick always land, whatever the focus state is at that instant.
+        self.setText(text)
+        self.picked.emit(text)
+
+    def set_values(self, values: List[str]) -> None:
+        """Replace the list of known values (what has been typed so far is left alone)."""
+        self._model.setStringList(list(values))
+
+    def values(self) -> List[str]:
+        return self._model.stringList()
+
+    def set_text(self, text: str) -> None:
+        self.setText(text)
+        self.setCursorPosition(0)
+
+    def _show_all(self) -> None:
+        """The ▾ button: open the list -- every known value that contains the text typed so far (all of
+        them while the field is empty), like the Tk dropdown filtered by the typed text."""
+        self.setFocus()
+        self._completer.setCompletionPrefix(self.text())
+        self._completer.complete()
+
+
+class _ReturnToNext(QObject):
+    """Event filter: Enter / Return in a single-line field moves focus to the next field in tab order -- the
+    same field-to-field flow Tab already gives, from the key people naturally press to "confirm". Applied to
+    single-line fields only: the multi-line Contact Info / Notes boxes keep plain Enter for a new line."""
+
+    def eventFilter(self, obj, event):
+        if event.type() == QEvent.Type.KeyPress and event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            blocked = (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.AltModifier
+                       | Qt.KeyboardModifier.ShiftModifier | Qt.KeyboardModifier.MetaModifier)
+            if event.modifiers() & blocked:
+                return False
+            completer = obj.completer() if isinstance(obj, QLineEdit) else None
+            if completer is not None and completer.popup().isVisible() and completer.popup().currentIndex().isValid():
+                return False                                   # a highlighted suggestion: the completer takes the key
+            # A QDateEdit's own focusNextChild() first steps through its day / month / year sections; asking its
+            # parent instead moves straight on to the next field, like Enter in the Tk date entry did.
+            target = obj.parentWidget() if isinstance(obj, QAbstractSpinBox) and obj.parentWidget() is not None else obj
+            target.focusNextChild()
+            return True
+        return False
+
+
+def advance_on_enter(widget: QWidget) -> QWidget:
+    widget.installEventFilter(_ReturnToNext(widget))
+    return widget
+
+
+def make_money_edit(value: float, width: int, tooltip: str = "") -> QLineEdit:
+    """A right-aligned "0.00" amount field: digits and one decimal point only (two decimals at most),
+    re-formatted to two decimals when it loses focus."""
+    edit = QLineEdit(f"{value:.2f}")
+    edit.setAlignment(Qt.AlignmentFlag.AlignRight)
+    edit.setFixedWidth(width)
+    restrict_to_decimal(edit)
+    format_as_decimal_on_blur(edit)
+    advance_on_enter(edit)
+    if tooltip:
+        edit.setToolTip(tooltip)
+    return edit
+
+
+def _caption(text: str) -> QLabel:
+    return make_label(text, "caption")
+
+
+def _retone(widget: QWidget, tone: str) -> None:
+    """set_tone() only when the tone actually changes (re-polishing on every keystroke is wasted work)."""
+    if widget.property("tone") != tone:
+        set_tone(widget, tone)
+
+
+class _ItemRow(QWidget):
+    """One invoice line: item title (with catalog suggestions), amount, discount, description."""
+    changed = Signal()                       # amount / discount edited -> the totals must be recalculated
+    remove_requested = Signal(object)        # this row asks the form to delete it
+    title_picked = Signal(object, str)       # (row, title) -- a catalog title was chosen
+
+    def __init__(self, titles: List[str], title: str = "", description: str = "", amount: float = 0.0,
+                 discount: float = 0.0, parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 7, 0, 0)
+        lay.setSpacing(5)
+
+        top = QHBoxLayout()
+        top.setSpacing(_ROW_GAP)
+        self.title_edit = SuggestCombo("Item / service name", titles)
+        self.title_edit.set_text(title)
+        self.title_edit.picked.connect(self._on_picked)
+        advance_on_enter(self.title_edit)
+        top.addWidget(self.title_edit, 1)
+
+        self.amount_edit = make_money_edit(amount, _AMOUNT_W, "Item amount, before any discount")
+        self.amount_edit.textChanged.connect(self.changed)
+        top.addWidget(self.amount_edit)
+        self.disc_edit = make_money_edit(discount, _DISC_W, "Per-item discount amount")
+        self.disc_edit.textChanged.connect(self.changed)
+        top.addWidget(self.disc_edit)
+
+        self.remove_btn = make_button("✕", "danger-outline", tooltip="Remove this item (Ctrl+Shift+Del or Ctrl+Minus)")
+        self.remove_btn.setFixedWidth(_REMOVE_W)
+        set_flag(self.remove_btn, "glyph", True)
+        self.remove_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)      # Tab skips it, as in the Tk build (takefocus=False)
+        self.remove_btn.clicked.connect(self._on_remove)
+        top.addWidget(self.remove_btn)
+        lay.addLayout(top)
+
+        self.desc_edit = QLineEdit(description)
+        self.desc_edit.setPlaceholderText("Description (optional)")
+        self.desc_edit.setCursorPosition(0)
+        advance_on_enter(self.desc_edit)
+        lay.addWidget(self.desc_edit)
+        lay.addSpacing(4)
+        lay.addWidget(hline())
+
+    def _on_picked(self, text: str):
+        self.title_picked.emit(self, text)
+
+    def _on_remove(self, _checked: bool = False):
+        self.remove_requested.emit(self)
+
+    def focus_widgets(self) -> List[QWidget]:
+        return [self.title_edit, self.amount_edit, self.disc_edit, self.desc_edit]
+
+    def values(self) -> Dict[str, Any]:
+        return {
+            "title": self.title_edit.text().strip(),
+            "description": self.desc_edit.text().strip(),
+            "amount": safe_float(self.amount_edit.text()),
+            "discount": max(0.0, safe_float(self.disc_edit.text())),
+        }
+
+
+class _PaymentRow(QWidget):
+    """One line of the payment ledger: date, amount, mode, note."""
+    changed = Signal()
+    remove_requested = Signal(object)
+
+    def __init__(self, amount: float = 0.0, payment_date: Optional[str] = None, mode: str = "Cash", note: str = "",
+                 payment_id: Optional[int] = None, parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        self.payment_id = payment_id
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 6, 0, 0)
+        lay.setSpacing(6)
+        row = QHBoxLayout()
+        row.setSpacing(_ROW_GAP)
+
+        self.date_edit = make_date_edit()
+        if payment_date:
+            set_date_edit_from_db(self.date_edit, payment_date)
+        self.date_edit.setFixedWidth(_DATE_W)
+        advance_on_enter(self.date_edit)
+        row.addWidget(self.date_edit)
+
+        self.amount_edit = make_money_edit(amount, _AMOUNT_W)
+        self.amount_edit.textChanged.connect(self.changed)
+        row.addWidget(self.amount_edit)
+
+        self.mode_combo = QComboBox()
+        self.mode_combo.addItems(PAYMENT_MODES)
+        self.mode_combo.setCurrentText(mode if mode in PAYMENT_MODES else "Cash")
+        self.mode_combo.setFixedWidth(_MODE_W)
+        guard_wheel(self.mode_combo)
+        row.addWidget(self.mode_combo)
+
+        self.note_edit = QLineEdit(note)
+        self.note_edit.setPlaceholderText("Note (optional)")
+        self.note_edit.setCursorPosition(0)
+        advance_on_enter(self.note_edit)
+        row.addWidget(self.note_edit, 1)
+
+        self.remove_btn = make_button("✕", "danger-outline", tooltip="Remove this payment")
+        self.remove_btn.setFixedWidth(_REMOVE_W)
+        set_flag(self.remove_btn, "glyph", True)
+        self.remove_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.remove_btn.clicked.connect(self._on_remove)
+        row.addWidget(self.remove_btn)
+        lay.addLayout(row)
+        lay.addSpacing(4)
+        lay.addWidget(hline())
+
+    def _on_remove(self, _checked: bool = False):
+        self.remove_requested.emit(self)
+
+    def focus_widgets(self) -> List[QWidget]:
+        return [self.date_edit, self.amount_edit, self.mode_combo, self.note_edit]
+
+    def set_editable(self, editable: bool) -> None:
+        for w in (self.date_edit, self.amount_edit, self.mode_combo, self.note_edit, self.remove_btn):
+            w.setEnabled(editable)
+
+    def values(self) -> Dict[str, Any]:
+        return {
+            "amount": safe_float(self.amount_edit.text()),
+            "payment_date": date_edit_db(self.date_edit),
+            "mode": self.mode_combo.currentText(),
+            "note": self.note_edit.text().strip(),
+            "payment_id": self.payment_id,
+        }
+
+
+class _SummaryRow(QWidget):
+    """One "label ............ value" line of the live totals box."""
+
+    def __init__(self, label: str = "", bold: bool = False, parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(0, 2, 0, 2)
+        lay.setSpacing(15)
+        role = "h3" if bold else None
+        align = Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        self.label = make_label(label, role, align=align)
+        self.value = make_label("", role, align=align)
+        self.label.setMinimumWidth(190)
+        self.value.setMinimumWidth(130)
+        lay.addWidget(self.label)
+        lay.addWidget(self.value)
+
+    def set(self, value: Optional[str] = None, label: Optional[str] = None) -> None:
+        if value is not None:
+            self.value.setText(value)
+        if label is not None:
+            self.label.setText(label)
+
+
 class InvoiceFormFrame(QWidget):
     """Create / edit an invoice: billing info, items, tax & discount, and a
     payment history ledger that supports multiple partial payments."""
@@ -7269,11 +6948,333 @@ class InvoiceFormFrame(QWidget):
 
 
 # =============================================================================
-#  MAIN WINDOW
+#  16. APPLICATION SHELL
 # =============================================================================
-# =============================================================================
-#  MAIN WINDOW
-# =============================================================================
+class SplashScreen(QWidget):
+    SIZE = 420
+    FADE_STEP = 0.05
+    FADE_INTERVAL_MS = 15
+    FADE_TARGET = 0.97          # a very subtle, modern transparency
+    MESSAGE_INTERVAL_MS = 400   # six messages: the last one appears right as the 2.5 s splash ends
+    LOADING_MESSAGES: List[str] = [
+        "Waking up the database...",
+        "Calculating dashboard stats...",
+        "Preparing invoice registry...",
+        "Loading your address book...",
+        "Polishing the interface...",
+        "Almost ready...",
+    ]
+
+    def __init__(self):
+        super().__init__(None, Qt.WindowType.SplashScreen | Qt.WindowType.FramelessWindowHint
+                         | Qt.WindowType.WindowStaysOnTopHint)
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        self.setWindowTitle(APP_NAME)
+        self.setFixedSize(self.SIZE, self.SIZE)
+        self.setWindowOpacity(0.0)                  # starts invisible for the fade-in
+        self.loading_messages = list(self.LOADING_MESSAGES)
+        self.msg_index = 0
+        self._build()
+        self._center_on_screen()
+
+        self._fade_timer = QTimer(self)
+        self._fade_timer.setInterval(self.FADE_INTERVAL_MS)
+        self._fade_timer.timeout.connect(self._fade_in)
+        self._fade_timer.start()
+        self._message_timer = QTimer(self)
+        self._message_timer.setInterval(self.MESSAGE_INTERVAL_MS)
+        self._message_timer.timeout.connect(self._cycle_messages)
+        self._cycle_messages()
+
+    def _center_on_screen(self) -> None:
+        screen = QApplication.primaryScreen()
+        if screen is not None:
+            geo = screen.geometry()
+            self.move(geo.center() - QPoint(self.SIZE // 2, self.SIZE // 2))
+
+    def _build(self):
+        # A 2 px border in the accent colour: a frameless window has no OS outline or shadow, and this keeps the splash
+        # from bleeding into a white desktop.
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        border = QFrame()
+        border.setProperty("role", "splash-border")
+        outer.addWidget(border)
+        border_col = QVBoxLayout(border)
+        border_col.setContentsMargins(2, 2, 2, 2)
+        panel = QFrame()
+        panel.setProperty("role", "splash")
+        border_col.addWidget(panel)
+
+        col = QVBoxLayout(panel)
+        col.setContentsMargins(0, 0, 0, 0)
+        col.setSpacing(0)
+
+        # Branding, a little above the exact centre for better visual balance.
+        col.addStretch(9)
+        logo = _logo_pixmap_for(self, 160)
+        self.logo_label: Optional[QLabel] = None
+        if logo is not None:
+            self.logo_label = QLabel()
+            self.logo_label.setPixmap(logo)
+            self.logo_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            col.addWidget(self.logo_label)
+            col.addSpacing(20)
+        col.addWidget(make_label(APP_NAME, "display", align=Qt.AlignmentFlag.AlignCenter))
+        col.addSpacing(5)
+        col.addWidget(make_label(APP_TAGLINE, "muted", align=Qt.AlignmentFlag.AlignCenter))
+        col.addStretch(11)
+
+        # Loading status.
+        self.progress = QProgressBar()
+        self.progress.setRange(0, 0)                # indeterminate
+        self.progress.setTextVisible(False)
+        bar_row = QHBoxLayout()
+        bar_row.setContentsMargins(20, 0, 20, 0)
+        bar_row.addWidget(self.progress)
+        col.addLayout(bar_row)
+
+        bottom = QHBoxLayout()
+        bottom.setContentsMargins(20, 12, 20, 15)
+        self.status_lbl = make_label("Starting up...", "section")
+        bottom.addWidget(self.status_lbl)
+        bottom.addStretch(1)
+        bottom.addWidget(make_label(APP_VERSION, "small"))
+        col.addLayout(bottom)
+
+    def _fade_in(self) -> None:
+        opacity = min(self.FADE_TARGET, self.windowOpacity() + self.FADE_STEP)
+        self.setWindowOpacity(opacity)
+        if opacity >= self.FADE_TARGET:
+            self._fade_timer.stop()
+
+    def _cycle_messages(self) -> None:
+        """Walks through the friendly loading messages so the app feels alive while it starts."""
+        if self.msg_index < len(self.loading_messages):
+            self.status_lbl.setText(self.loading_messages[self.msg_index])
+            self.msg_index += 1
+            self._message_timer.start()
+        else:
+            self._message_timer.stop()
+
+    def closeEvent(self, event):
+        self._fade_timer.stop()
+        self._message_timer.stop()
+        super().closeEvent(event)
+
+
+class Sidebar(QFrame):
+    NAV_ITEMS: List[Tuple[str, str]] = [
+        ("⊞   Dashboard", "DashboardFrame"),
+        ("👥   Clients",   "ClientsFrame"),
+        ("📑   Catalog",   "CatalogFrame"),
+    ]
+    WIDTH = 240
+
+    def __init__(self, parent, controller):
+        super().__init__(parent)
+        self.controller = controller
+        self.setProperty("role", "sidebar")
+        self.setFixedWidth(self.WIDTH)
+        self._nav_btns: Dict[str, QPushButton] = {}
+        self._build()
+
+    @staticmethod
+    def _left_aligned(btn: QPushButton) -> QPushButton:
+        btn.setProperty("align", "left")
+        return btn
+
+    def _build(self):
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+
+        # --- branding header ---------------------------------------------
+        header = QVBoxLayout()
+        header.setContentsMargins(20, 25, 20, 10)
+        header.setSpacing(0)
+        logo = _logo_pixmap_for(self, 160)
+        self.logo_label: Optional[QLabel] = None
+        if logo is not None:
+            self.logo_label = QLabel()
+            self.logo_label.setPixmap(logo)
+            self.logo_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            header.addWidget(self.logo_label)
+            header.addSpacing(10)
+        header.addWidget(make_label("Vyaprix", "h1", align=Qt.AlignmentFlag.AlignCenter))
+        header.addWidget(make_label("by EllowLabs", "section", align=Qt.AlignmentFlag.AlignCenter))
+        root.addLayout(header)
+
+        divider = QVBoxLayout()
+        divider.setContentsMargins(20, 15, 20, 15)
+        divider.addWidget(hline())
+        root.addLayout(divider)
+
+        # --- quick action --------------------------------------------------
+        quick = QVBoxLayout()
+        quick.setContentsMargins(20, 0, 20, 15)
+        self.new_invoice_btn = make_button(
+            "＋  New Invoice", "success", lambda: self.controller.show_frame_by_name("InvoiceFormFrame"),
+            tooltip="Instantly start a new invoice (Ctrl+N)", min_height=44)
+        quick.addWidget(self.new_invoice_btn)
+        root.addLayout(quick)
+
+        # --- main navigation -----------------------------------------------
+        nav = QVBoxLayout()
+        nav.setContentsMargins(20, 0, 20, 0)
+        nav.setSpacing(6)
+        menu_label = make_label("MAIN MENU", "section")
+        menu_label.setContentsMargins(4, 0, 0, 2)
+        nav.addWidget(menu_label)
+        for label, frame_name in self.NAV_ITEMS:
+            btn = make_button(label, "secondary-outline", lambda n=frame_name: self.controller.show_frame_by_name(n))
+            self._left_aligned(btn)
+            nav.addWidget(btn)
+            self._nav_btns[frame_name] = btn
+        root.addLayout(nav)
+
+        root.addStretch(1)
+
+        # --- system / bottom -----------------------------------------------
+        bottom = QVBoxLayout()
+        bottom.setContentsMargins(20, 15, 20, 15)
+        bottom.setSpacing(4)
+        system_label = make_label("SYSTEM", "section")
+        system_label.setContentsMargins(4, 0, 0, 4)
+        bottom.addWidget(system_label)
+        self.settings_btn = self._left_aligned(make_button("⚙️  Settings", "info-outline",
+                                                           lambda: self.controller.open_settings()))
+        self.shortcuts_btn = self._left_aligned(make_button("⌨️  Shortcuts", "info-outline",
+                                                            lambda: self.controller.open_shortcuts()))
+        self.about_btn = self._left_aligned(make_button("ℹ️  About", "info-outline",
+                                                        lambda: self.controller.open_about()))
+        for btn in (self.settings_btn, self.shortcuts_btn, self.about_btn):
+            bottom.addWidget(btn)
+        bottom.addSpacing(11)
+        bottom.addWidget(make_label(f"Version {APP_VERSION}", "small", align=Qt.AlignmentFlag.AlignCenter))
+        root.addLayout(bottom)
+
+    def set_active(self, frame_name: str) -> None:
+        """Highlights the navigation button of the page being shown: solid for the active page, outlined for the rest."""
+        for name, btn in self._nav_btns.items():
+            set_role(btn, "primary" if name == frame_name else "secondary-outline")
+
+
+class ShortcutManager:
+    """One place that defines what every app-wide key combination does. A shortcut either always means the same thing
+    (register_global) or means something different on each page (register_contextual: Ctrl+N is "new invoice" on the
+    Dashboard, "new client" on Clients, "new catalog item" on Catalog). Registering the same sequence twice for the same
+    scope -- or mixing a global and a contextual registration of one sequence -- raises ValueError at once, so a
+    copy-paste slip is caught the moment the app starts instead of showing up later as "that key stopped working".
+
+    Qt notes (what replaced the Tk build's machinery):
+      * exactly one QShortcut per key sequence, owned by the main window with the WindowShortcut context. Routing to the
+        right handler for whichever page is showing happens in _dispatch(), exactly as in the Tk build.
+      * WindowShortcut also gives "no firing under an open dialog" for free: a QShortcut is only live while the main
+        window is the active window, and Settings / About / Shortcuts / the PDF viewer are windows of their own. The
+        Tk build needed an explicit toplevel check for this.
+      * the Tk build had to re-bind Tk's own Ctrl+D / Ctrl+O class bindings (install_class_overrides); Qt text fields
+        have no such bindings, and the editing keys they do own (Ctrl+A = select all, Ctrl+C/V/X/Z/Y ...) win while a
+        text field has the focus, via Qt's ShortcutOverride -- which is what a user typing in a box expects.
+      * Qt key-sequence strings ("Ctrl+N", "F2") already are the readable form shown in the reference card, so no
+        _humanize_sequence(); the few keys with several physical forms (Ctrl+Plus) pass their own display= text.
+      * auto-repeat is off by default (holding Ctrl+D must not stamp out dozens of duplicate invoices); the two
+        row-adding / removing shortcuts on the invoice form switch it on, since repeating them is useful.
+    """
+
+    def __init__(self, app: "InvoiceApp"):
+        self.app = app
+        self._owner: Dict[str, str] = {}                                # sequence -> "global" | "contextual"
+        self._global_handlers: Dict[str, Callable[[], None]] = {}
+        self._contextual_handlers: Dict[str, Dict[Type, Callable[[], None]]] = {}
+        self._qshortcuts: Dict[str, QShortcut] = {}
+        self._reference: List[Dict[str, str]] = []                      # feeds ShortcutsDialog
+
+    @staticmethod
+    def canonical(sequence: str) -> str:
+        """The portable text of a key sequence ("ctrl+n" -> "Ctrl+N"); ValueError when Qt does not understand it."""
+        text = QKeySequence(sequence).toString(QKeySequence.SequenceFormat.PortableText)
+        if not text:
+            raise ValueError(f"Not a valid key sequence: {sequence!r}")
+        return text
+
+    @classmethod
+    def _sequences(cls, sequences) -> Tuple[str, ...]:
+        seqs = (sequences,) if isinstance(sequences, str) else tuple(sequences)
+        return tuple(cls.canonical(s) for s in seqs)
+
+    # ---- registration --------------------------------------------------- #
+    def register_global(self, sequences, handler: Callable[[], None], description: str,
+                        group: str, display: Optional[str] = None, auto_repeat: bool = False):
+        """Registers a shortcut whose action never changes, whichever page is showing. `sequences` is one key sequence
+        or a tuple of equivalent ones (they are one shortcut, so they share one reference-card entry)."""
+        seqs = self._sequences(sequences)
+        for s in seqs:
+            if s in self._owner:
+                raise ValueError(f"Shortcut conflict: {s} is already registered ({self._owner[s]}).")
+        for s in seqs:
+            self._owner[s] = "global"
+            self._global_handlers[s] = handler
+            self._bind(s, auto_repeat)
+        self._reference.append({"keys": display or seqs[0], "description": description, "group": group})
+
+    def register_contextual(self, sequences, frame_class: Type, handler: Callable[[], None],
+                            description: str, group: str, display: Optional[str] = None,
+                            show_in_reference: bool = True, auto_repeat: bool = False):
+        """Registers a shortcut whose action depends on which page is showing. The same sequence can be registered for
+        several page classes (that is the point), but not twice for the same one, and never mixed with a global
+        registration of the same sequence."""
+        seqs = self._sequences(sequences)
+        for s in seqs:
+            if self._owner.get(s, "contextual") != "contextual":
+                raise ValueError(f"Shortcut conflict: {s} is already registered ({self._owner[s]}).")
+            if frame_class in self._contextual_handlers.get(s, {}):
+                raise ValueError(f"Shortcut conflict: {s} is already registered for {frame_class.__name__}.")
+        for s in seqs:
+            self._owner[s] = "contextual"
+            self._contextual_handlers.setdefault(s, {})[frame_class] = handler
+            self._bind(s, auto_repeat)
+        if show_in_reference:
+            page = frame_class.__name__.replace("Frame", "") or frame_class.__name__
+            self._reference.append({"keys": display or seqs[0],
+                                    "description": f"{description} ({page})", "group": group})
+
+    def register_info(self, display: str, description: str, group: str):
+        """Documents a key that a widget handles natively (Tab order, per-field Enter-to-advance ...) rather than through
+        this registry -- purely so the reference card stays the one complete list of what the keyboard can do."""
+        self._reference.append({"keys": display, "description": description, "group": group})
+
+    def _bind(self, sequence: str, auto_repeat: bool = False):
+        existing = self._qshortcuts.get(sequence)
+        if existing is not None:
+            existing.setAutoRepeat(existing.autoRepeat() or auto_repeat)
+            return
+        shortcut = QShortcut(QKeySequence(sequence), self.app)
+        shortcut.setContext(Qt.ShortcutContext.WindowShortcut)
+        shortcut.setAutoRepeat(auto_repeat)
+        shortcut.activated.connect(lambda seq=sequence: self._dispatch(seq))
+        self._qshortcuts[sequence] = shortcut
+
+    # ---- dispatch -------------------------------------------------------- #
+    def _dispatch(self, sequence: str) -> None:
+        handler = self._global_handlers.get(sequence)
+        if handler is None:
+            per_frame = self._contextual_handlers.get(sequence)
+            if per_frame:
+                handler = per_frame.get(self.app.active_frame_class())
+        if handler:
+            handler()
+
+    # ---- introspection, used by ShortcutsDialog --------------------------- #
+    def grouped_reference(self) -> Dict[str, List[Tuple[str, str]]]:
+        """{group name: [(key label, description), ...]} built straight from the live registry, in registration order,
+        so the Shortcuts reference can never drift out of sync with what the keys actually do."""
+        groups: Dict[str, List[Tuple[str, str]]] = {}
+        for entry in self._reference:
+            groups.setdefault(entry["group"], []).append((entry["keys"], entry["description"]))
+        return groups
+
+
 class InvoiceApp(QMainWindow):
     SPLASH_DURATION_MS = 2500
     POLL_INTERVAL_MS = 200
@@ -7647,8 +7648,73 @@ class InvoiceApp(QMainWindow):
 
 
 # =============================================================================
-#  ENTRY POINT
+#  17. START-UP, SHUTDOWN & ENTRY POINT
 # =============================================================================
+def startup_background_task(app_instance):
+    """Put whatever heavy lifting you need at start-up here. It runs in a thread, so it never freezes the splash screen
+    or the GUI. If it needs to update the GUI it MUST go through the app's task_queue, never touch a widget itself."""
+    logger.info("Background thread started successfully.")
+
+
+def _orderly_shutdown(app: QApplication) -> None:
+    """Closes and deletes every window in order, then flushes the pending deletions, BEFORE the interpreter exits.
+    PySide6 can crash while it destroys widgets at interpreter shutdown that are only kept alive by a Python slot
+    (lambda) connected to one of their own signals; tearing everything down here, while the event loop machinery is
+    still intact, avoids that. Qt-owned popups (completer lists, tooltips) are left alone: Qt frees those itself."""
+    for window in app.topLevelWidgets():
+        if isinstance(window, InvoiceApp):
+            window._closing_for_good = True         # no "unsaved changes" prompt while the process is going away
+        if window.windowType() in (Qt.WindowType.Popup, Qt.WindowType.ToolTip):
+            continue
+        window.close()
+        window.deleteLater()
+    app.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+    app.processEvents()
+
+
+def _log_unhandled_exception(exc_type, exc_value, exc_tb) -> None:
+    """sys.excepthook. PySide6 reports an exception raised inside a Qt slot or event handler through sys.excepthook and
+    carries on running -- and a windowed (pythonw) build has no console to show it on. Writing it to the log file as well
+    means "I clicked it and nothing happened" always leaves a trace to look into."""
+    if issubclass(exc_type, KeyboardInterrupt):
+        sys.__excepthook__(exc_type, exc_value, exc_tb)
+        return
+    try:
+        logger.critical("Unhandled exception", exc_info=(exc_type, exc_value, exc_tb))   # file + console (stream handler)
+    except Exception:
+        sys.__excepthook__(exc_type, exc_value, exc_tb)
+
+
+def _log_unhandled_thread_exception(args) -> None:
+    """threading.excepthook: the same for an exception that escapes a worker thread."""
+    if args.exc_type is SystemExit:
+        return
+    try:
+        logger.critical("Unhandled exception in thread %s", getattr(args.thread, "name", "?"),
+                        exc_info=(args.exc_type, args.exc_value, args.exc_traceback))
+    except Exception:
+        pass
+
+
+def _close_splash_windows() -> None:
+    """The splash stays on top of every other window, so it must go before an error box can be seen."""
+    for widget in QApplication.topLevelWidgets():
+        if isinstance(widget, SplashScreen):
+            widget.close()
+
+
+def configure_windows_app_identity() -> None:
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+            "EllowLabs.Vyaprix"
+        )
+    except Exception as exc:
+        logger.warning("Could not set Windows application identity: %s", exc)
+
+
 def main() -> int:
     app = None
     try:
