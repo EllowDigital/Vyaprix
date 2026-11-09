@@ -18,7 +18,8 @@ import re
 import sys
 
 from contextlib import closing
-from decimal import Decimal, ROUND_HALF_UP
+from dataclasses import dataclass
+from decimal import Decimal, ROUND_DOWN, ROUND_HALF_UP
 from enum import Enum
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
@@ -106,8 +107,8 @@ except ImportError:
 # =============================================================================
 APP_NAME: str          = "Vyaprix"
 APP_VERSION: str       = "v1.8"
-APP_BUILD_VERSION: str = "1.8.2"
-APP_RELEASE_DATE: str = "November 8, 2026"
+APP_BUILD_VERSION: str = "1.8.8"
+APP_RELEASE_DATE: str  = "November 9, 2026"
 APP_TAGLINE: str       = "Business Made Smarter."
 
 APP_ATTRIBUTION: str = (
@@ -334,7 +335,10 @@ def get_default_config() -> Dict[str, Any]:
         },
         # TARGET user invoice logo specifically to 'logo.png'
         "asset_paths":     {"logo": "assets/logo.png", "signature": "assets/sign.png", "upi_qr_code": "assets/upi_qr.png"},
-        "pdf_settings":    {"footer_message": "Generated with Vyaprix • Business Made Smarter.", "always_show_qr_code": False},
+        "pdf_settings":    {"footer_message": "Generated with Vyaprix • Business Made Smarter.", "always_show_qr_code": False,
+                            "amount_in_words": False,           # print "Rupees ... Only" under the invoice total
+                            "default_terms": "",                # terms & conditions every new invoice starts with
+                            "template": "classic"},             # the invoice look (see PDF_TEMPLATES)
         "currency_symbol": "₹",
     }
 
@@ -469,6 +473,176 @@ def safe_float(value: Any, fallback: float = 0.0) -> float:
         return float(value or 0)
     except (TypeError, ValueError):
         return fallback
+
+
+def _allocate_2dp(total: Decimal, weights: List[Decimal]) -> List[Decimal]:
+    """Splits `total` (a 2dp amount) over lines in proportion to `weights`. Every share is a 2dp amount, the shares
+    add up to exactly `total` (the paise lost to rounding go to the lines with the largest remainders) and no
+    share is larger than its weight -- so an overall discount spread over the items never leaves a stray paisa."""
+    weight_sum = sum(weights, Decimal("0"))
+    if total <= 0 or weight_sum <= 0:
+        return [Decimal("0.00")] * len(weights)
+    exact  = [total * w / weight_sum for w in weights]
+    shares = [e.quantize(_CENTS, rounding=ROUND_DOWN) for e in exact]
+    missing = int(((total - sum(shares, Decimal("0"))) / _CENTS).to_integral_value())
+    for i in sorted(range(len(shares)), key=lambda k: (-(exact[k] - shares[k]), k))[:missing]:
+        shares[i] += _CENTS
+    return shares
+
+
+# --- Item lines (quantity / unit / rate), GST rates, places of supply and amounts in words ---------------------
+UNIT_PRESETS: List[str] = [
+    "Nos", "Pcs", "Set", "Unit", "Day", "Hour", "Night", "Month", "Event", "Person", "Plate", "Trip", "Lot",
+    "Box", "Pack", "Dozen", "Kg", "Gm", "Ltr", "Mtr", "Sq.ft", "Sq.mtr",
+]
+# GST slabs since the 22 Sep 2025 reform (0 / 5 / 18 / 40, plus the special 0.25 and 3 for gems and gold). Any other
+# rate -- an older invoice's 12 or 28, say -- can still be typed in.
+GST_RATE_PRESETS: List[str] = ["0", "0.25", "3", "5", "18", "40"]
+TAX_MODE_OVERALL, TAX_MODE_PER_ITEM = "overall", "per_item"
+_DUE_CUSTOM = -1        # the due-date list's "pick a date" choice
+#: the due-date list: (caption, days after the invoice date) -- None: no due date, _DUE_CUSTOM: a date picked by hand
+DUE_CHOICES: List[Tuple[str, Optional[int]]] = [("None", None), ("On receipt", 0), ("7 days", 7), ("15 days", 15),
+                                                ("30 days", 30), ("45 days", 45), ("60 days", 60), ("Custom", _DUE_CUSTOM)]
+
+#: GST state / union-territory codes (the first two digits of a GSTIN) -- the "place of supply" list
+INDIAN_STATES: List[Tuple[str, str]] = [
+    ("01", "Jammu and Kashmir"), ("02", "Himachal Pradesh"), ("03", "Punjab"), ("04", "Chandigarh"),
+    ("05", "Uttarakhand"), ("06", "Haryana"), ("07", "Delhi"), ("08", "Rajasthan"), ("09", "Uttar Pradesh"),
+    ("10", "Bihar"), ("11", "Sikkim"), ("12", "Arunachal Pradesh"), ("13", "Nagaland"), ("14", "Manipur"),
+    ("15", "Mizoram"), ("16", "Tripura"), ("17", "Meghalaya"), ("18", "Assam"), ("19", "West Bengal"),
+    ("20", "Jharkhand"), ("21", "Odisha"), ("22", "Chhattisgarh"), ("23", "Madhya Pradesh"), ("24", "Gujarat"),
+    ("26", "Dadra and Nagar Haveli and Daman and Diu"), ("27", "Maharashtra"), ("29", "Karnataka"), ("30", "Goa"),
+    ("31", "Lakshadweep"), ("32", "Kerala"), ("33", "Tamil Nadu"), ("34", "Puducherry"),
+    ("35", "Andaman and Nicobar Islands"), ("36", "Telangana"), ("37", "Andhra Pradesh"), ("38", "Ladakh"),
+    ("97", "Other Territory"),
+]
+_STATE_NAME_BY_CODE: Dict[str, str] = dict(INDIAN_STATES)
+
+
+def _state_key(text: Any) -> str:
+    """A state name reduced to lower-case words ("Jammu & Kashmir" == "jammu and kashmir")."""
+    return " ".join(re.sub(r"[^a-z0-9 ]+", " ", str(text or "").lower().replace("&", " and ")).split())
+
+
+_STATE_CODE_BY_NAME: Dict[str, str] = {_state_key(n): c for c, n in INDIAN_STATES}
+_STATE_CODE_BY_NAME.update({"orissa": "21", "pondicherry": "34", "new delhi": "07", "nct of delhi": "07",
+                            "uttaranchal": "05", "telengana": "36", "daman and diu": "26",
+                            "dadra and nagar haveli": "26", "andaman nicobar islands": "35"})
+
+
+def state_code_of(text: Any) -> str:
+    """The two-digit GST code of a place written as "27-Maharashtra", "27", or just "Maharashtra" ("" if unknown)."""
+    text = str(text or "").strip()
+    head = re.match(r"^(\d{2})(?!\d)", text)
+    if head and head.group(1) in _STATE_NAME_BY_CODE:
+        return head.group(1)
+    return _STATE_CODE_BY_NAME.get(_state_key(text), "")
+
+
+def state_label(code: str) -> str:
+    """"27-Maharashtra" -- how a place of supply is written on an invoice."""
+    return f"{code}-{_STATE_NAME_BY_CODE[code]}" if code in _STATE_NAME_BY_CODE else ""
+
+
+def seller_state_code(config: Dict[str, Any]) -> str:
+    """The state the business is registered in: the first two digits of its GSTIN, else the state typed in Settings."""
+    gstin = _real_value((config.get("company_details") or {}).get("gstin"), _SAMPLE_GSTIN).upper()
+    if is_valid_gstin(gstin) and gstin[:2] in _STATE_NAME_BY_CODE:
+        return gstin[:2]
+    return state_code_of((config.get("user_details") or {}).get("state"))
+
+
+def gst_type_for_place(config: Dict[str, Any], place_of_supply: Any) -> Optional[str]:
+    """"IGST" when the place of supply is in another state than the seller's, "CGST/SGST" when it is the same one,
+    None while either is unknown (then the tax split is left for the user to choose)."""
+    seller, place = seller_state_code(config), state_code_of(place_of_supply)
+    if not seller or not place:
+        return None
+    return "CGST/SGST" if seller == place else "IGST"
+
+
+_WORDS_BELOW_20 = ("Zero", "One", "Two", "Three", "Four", "Five", "Six", "Seven", "Eight", "Nine", "Ten", "Eleven",
+                   "Twelve", "Thirteen", "Fourteen", "Fifteen", "Sixteen", "Seventeen", "Eighteen", "Nineteen")
+_WORDS_TENS = ("", "", "Twenty", "Thirty", "Forty", "Fifty", "Sixty", "Seventy", "Eighty", "Ninety")
+
+
+def _words_below_1000(n: int) -> str:
+    parts: List[str] = []
+    if n >= 100:
+        parts.append(f"{_WORDS_BELOW_20[n // 100]} Hundred")
+        n %= 100
+    if n >= 20:
+        parts.append(_WORDS_TENS[n // 10] + (f"-{_WORDS_BELOW_20[n % 10]}" if n % 10 else ""))
+    elif n > 0:
+        parts.append(_WORDS_BELOW_20[n])
+    return " ".join(parts)
+
+
+def _words_indian(n: int) -> str:
+    """A whole number in words with the Indian grouping (thousand, lakh, crore)."""
+    if n == 0:
+        return "Zero"
+    parts: List[str] = []
+    for size, name in ((10 ** 7, "Crore"), (10 ** 5, "Lakh"), (1000, "Thousand")):
+        if n >= size:
+            head, n = divmod(n, size)
+            parts.append(f"{_words_indian(head)} {name}")
+    if n:
+        parts.append(_words_below_1000(n))
+    return " ".join(parts)
+
+
+def amount_in_words(amount: Any, symbol: str = "₹") -> str:
+    """"Rupees One Thousand Two Hundred Thirty-Four and Fifty Paise Only" -- rupee amounts only ("" for any other currency)."""
+    if symbol != "₹":
+        return ""
+    value  = _round2(abs(Decimal(str(amount or 0))))
+    rupees = int(value)
+    paise  = int((value - rupees) * 100)
+    text   = f"Rupees {_words_indian(rupees)}"
+    if paise:
+        text += f" and {_words_indian(paise)} Paise"
+    return text + " Only"
+
+
+def fmt_qty(value: Any) -> str:
+    """A quantity as plain text: "2", "2.5", "0.125" (three decimals at most, never a trailing zero)."""
+    text = f"{safe_float(value, 1.0):.3f}".rstrip("0").rstrip(".")
+    return text or "0"
+
+
+def item_qty(item: Dict[str, Any]) -> float:
+    """The quantity of a stored item (1 for the plain amount-only lines every older invoice has)."""
+    raw = item.get("qty")
+    return 1.0 if raw is None or raw == "" else safe_float(raw, 1.0)
+
+
+def item_is_extended(item: Dict[str, Any]) -> bool:
+    """True when a line carries more than a title and an amount -- a quantity other than 1, a unit, an HSN/SAC code
+    or its own GST rate. Invoices made only of plain lines keep the compact two-column PDF table of earlier builds."""
+    return bool(item_qty(item) != 1.0 or str(item.get("unit") or "").strip() or str(item.get("hsn") or "").strip()
+                or item.get("tax_rate") not in (None, ""))
+
+
+_UNSET: Any = object()        # "argument not passed" (None is a real value for some of them)
+
+
+def catalog_units(entry: Dict[str, Any]) -> List[Tuple[str, float]]:
+    """Every unit a catalog item is sold in, with its rate: the main unit first (when it has one), then the other
+    units saved with it."""
+    units: List[Tuple[str, float]] = []
+    main = str(entry.get("unit") or "").strip()
+    if main:
+        units.append((main, safe_float(entry.get("amount"))))
+    try:
+        others = json.loads(entry.get("other_units") or "[]")
+    except (TypeError, ValueError):
+        others = []
+    for other in others if isinstance(others, list) else []:
+        name = str(other.get("unit") or "").strip() if isinstance(other, dict) else ""
+        if name and name.casefold() not in {u.casefold() for u, _ in units}:
+            units.append((name, safe_float(other.get("rate"))))
+    return units
 
 
 EMAIL_FORMAT_PATTERN = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]{2,}$")
@@ -647,6 +821,15 @@ class DatabaseManager:
                     "total_paid":           "REAL DEFAULT 0",
                     "balance_due":          "REAL DEFAULT 0",
                     "created_ts":           "REAL DEFAULT 0",
+                    # --- professional invoicing (items with quantity / unit / own GST rate, round off, ...) ---
+                    "tax_mode":             "TEXT DEFAULT 'overall'",     # 'overall' (one GST rate) | 'per_item'
+                    "round_off":            "INTEGER DEFAULT 0",          # round the grand total to the nearest rupee
+                    "place_of_supply":      "TEXT DEFAULT ''",
+                    "po_number":            "TEXT DEFAULT ''",            # customer's PO / reference number
+                    "due_date":             "TEXT",
+                    "reverse_charge":       "INTEGER DEFAULT 0",
+                    "customer_notes":       "TEXT DEFAULT ''",            # printed on the invoice (`notes` is internal)
+                    "terms":                "TEXT DEFAULT ''",            # terms & conditions, printed
                 }.items():
                     if col not in existing:
                         c.execute(f"ALTER TABLE invoices ADD COLUMN {col} {ctype}")
@@ -661,6 +844,16 @@ class DatabaseManager:
                     c, "catalog", "title",
                     "description TEXT, amount REAL", ["description", "amount"],
                 )
+                # --- catalog: unit, HSN/SAC, GST rate and the other units an item is sold in ------------
+                existing_catalog = {r["name"] for r in c.execute("PRAGMA table_info(catalog)").fetchall()}
+                for col, ctype in {
+                    "unit":        "TEXT DEFAULT ''",     # the item's main unit; `amount` is the rate per that unit
+                    "hsn":         "TEXT DEFAULT ''",
+                    "tax_rate":    "REAL",                # NULL = no rate saved with the item
+                    "other_units": "TEXT DEFAULT ''",     # JSON [{"unit": "Dozen", "rate": 100.0}, ...]
+                }.items():
+                    if col not in existing_catalog:
+                        c.execute(f"ALTER TABLE catalog ADD COLUMN {col} {ctype}")
 
                 # --- payments table (multiple partial payments per invoice) -
                 c.execute("""
@@ -757,47 +950,126 @@ class DatabaseManager:
     @staticmethod
     def calculate_totals(items: List[Dict], tax_rate: float,
                          global_disc_val: float = 0.0,
-                         global_disc_type: str = "amount") -> Dict[str, float]:
+                         global_disc_type: str = "amount",
+                         tax_mode: str = TAX_MODE_OVERALL,
+                         gst_type: str = "CGST/SGST",
+                         round_off: bool = False) -> Dict[str, Any]:
         """Computes every figure on the invoice summary, in this fixed
         order: Subtotal -> Discount -> Taxable Amount -> CGST/SGST ->
-        Grand Total. All arithmetic happens in Decimal with
+        (Round off ->) Grand Total. All arithmetic happens in Decimal with
         ROUND_HALF_UP, rounding to the nearest paisa/cent at each
         intermediate step rather than only at the very end -- that's
         what guarantees CGST + SGST always sum to exactly the combined
         tax shown elsewhere, instead of occasionally being a paisa off
         from ordinary floating-point drift.
 
-        Returns plain floats (already rounded to 2dp), not Decimal
-        objects -- every existing caller (SQLite writes, fmt_money(),
-        the PDF generator) keeps working exactly as before; only the
-        arithmetic *inside* this function changed.
+        Two ways to charge GST:
+          * tax_mode "overall"  -- one rate (`tax_rate`) on the whole taxable amount. This is the only mode older
+            invoices know, and its arithmetic is untouched, so every stored invoice keeps its exact totals.
+          * tax_mode "per_item" -- every line carries its own `tax_rate` (a line without one takes `tax_rate`, the
+            default). Each line's discount is taken off first, the overall discount is spread over the lines in
+            proportion to what they are worth, the taxable values are grouped by rate and CGST / SGST are computed
+            once per rate -- the way a GST invoice's tax summary is laid out. With the same rate on every line this
+            gives exactly the "overall" figures.
+
+        `round_off` rounds the grand total to the nearest rupee (half up); the difference is returned as
+        "round_off" (negative when rounding down). `gst_type` only decides what "igst" holds -- cgst and sgst are
+        always the two equal halves, as before, and IGST is their sum.
+
+        Returns plain floats (already rounded to 2dp), not Decimal objects -- every existing caller (SQLite writes,
+        fmt_money(), the PDF generator) keeps working exactly as before. Besides the original keys it returns
+        "tax" (all tax), "igst", "round_off" and "tax_groups": one {"rate", "taxable", "cgst", "sgst", "igst",
+        "tax"} dict per GST rate, lowest rate first (empty when no tax is charged).
         """
         def d(x: Any) -> Decimal:
             return Decimal(str(x or 0))
 
-        subtotal   = _round2(sum((d(i.get("amount", 0)) for i in items), Decimal("0")))
-        item_disc  = _round2(sum((d(i.get("discount", 0)) for i in items), Decimal("0")))
-        after_item = max(Decimal("0"), subtotal - item_disc)
+        zero = Decimal("0")
+        per_item = tax_mode == TAX_MODE_PER_ITEM
+        if per_item:
+            # every line is rounded on its own, and a line's discount can never be larger than the line itself
+            gross_list = [_round2(d(i.get("amount", 0))) for i in items]
+            disc_list  = [max(zero, min(_round2(d(i.get("discount", 0))), g)) for i, g in zip(items, gross_list)]
+            subtotal   = sum(gross_list, zero)
+            item_disc  = sum(disc_list, zero)
+        else:
+            subtotal   = _round2(sum((d(i.get("amount", 0)) for i in items), zero))
+            item_disc  = _round2(sum((d(i.get("discount", 0)) for i in items), zero))
+        after_item = max(zero, subtotal - item_disc)
 
         if global_disc_type == "%":
             global_disc = _round2(after_item * d(global_disc_val) / Decimal("100"))
         else:
             global_disc = _round2(d(global_disc_val))
-        global_disc = max(Decimal("0"), min(global_disc, after_item))
+        global_disc = max(zero, min(global_disc, after_item))
 
         total_disc = item_disc + global_disc
-        taxable    = max(Decimal("0"), subtotal - total_disc)
+        taxable    = max(zero, subtotal - total_disc)
 
-        half_rate  = d(tax_rate) / Decimal("2")
-        cgst = sgst = _round2(taxable * half_rate / Decimal("100"))
-        grand_total = taxable + cgst + sgst
+        # (rate, taxable value at that rate) pairs, lowest rate first
+        if per_item:
+            nets   = [g - dsc for g, dsc in zip(gross_list, disc_list)]
+            shares = _allocate_2dp(global_disc, nets)
+            bases: Dict[Decimal, Decimal] = {}
+            for item, net, share in zip(items, nets, shares):
+                raw  = item.get("tax_rate")
+                try:
+                    rate = d(tax_rate) if raw is None or raw == "" else d(raw)
+                except ArithmeticError:                      # an unreadable rate counts as "no rate": the default
+                    rate = d(tax_rate)
+                rate = max(zero, min(rate, Decimal("100")))
+                bases[rate] = bases.get(rate, zero) + (net - share)
+            groups = sorted(bases.items())
+            taxable = sum(bases.values(), zero)
+        else:
+            groups = [(d(tax_rate), taxable)] if d(tax_rate) > 0 else []
+
+        cgst = sgst = zero
+        tax_groups: List[Dict[str, float]] = []
+        for rate, base in groups:
+            half = _round2(base * (rate / Decimal("2")) / Decimal("100"))
+            cgst += half
+            sgst += half
+            tax_groups.append({"rate": float(rate), "taxable": float(base), "cgst": float(half), "sgst": float(half),
+                               "igst": float(half + half), "tax": float(half + half)})
+
+        before_round = taxable + cgst + sgst
+        if round_off:
+            grand_total = before_round.quantize(Decimal("1"), rounding=ROUND_HALF_UP)
+        else:
+            grand_total = before_round
+        tax = cgst + sgst
 
         return {
             "subtotal": float(subtotal), "item_discount": float(item_disc),
             "global_discount": float(global_disc), "total_discount": float(total_disc),
             "taxable": float(taxable), "cgst": float(cgst), "sgst": float(sgst),
             "grand_total": float(grand_total),
+            "tax": float(tax), "igst": float(tax) if gst_type == "IGST" else 0.0,
+            "round_off": float(grand_total - before_round), "tax_groups": tax_groups,
         }
+
+    @classmethod
+    def totals_for(cls, data: Dict[str, Any], items: Optional[List[Dict]] = None) -> Dict[str, Any]:
+        """The totals of one stored invoice -- `data` is its database row as a dict -- read from every column that
+        matters (GST on/off, the rate or per-item mode, the tax split, the overall discount, round off). The database
+        layer (_recompute_one), the PDF and the live invoice form all call this one function, so what is saved, printed
+        and shown while typing can never disagree. `items` may be passed to avoid parsing the JSON again."""
+        if items is None:
+            try:
+                items = json.loads(data.get("items") or "[]")
+            except (TypeError, ValueError):
+                items = []
+        is_gst = data.get("is_gst_invoice", 1)
+        return cls.calculate_totals(
+            items,
+            safe_float(data.get("tax_rate")) if is_gst else 0.0,
+            safe_float(data.get("global_discount_value")),
+            data.get("global_discount_type") or "amount",
+            tax_mode=(data.get("tax_mode") or TAX_MODE_OVERALL) if is_gst else TAX_MODE_OVERALL,
+            gst_type=data.get("gst_type") or "CGST/SGST",
+            round_off=bool(data.get("round_off")),
+        )
 
     @staticmethod
     def compute_payment_status(grand_total: float, paid: float) -> Tuple[str, float, float]:
@@ -839,16 +1111,7 @@ class DatabaseManager:
                 (InvoiceStatus.COMPLIMENTARY.value, invoice_number),
             )
             return
-        try:
-            items = json.loads(d.get("items") or "[]")
-        except json.JSONDecodeError:
-            items = []
-        tax_rate = float(d.get("tax_rate") or 0) if d.get("is_gst_invoice", 1) else 0.0
-        totals = self.calculate_totals(
-            items, tax_rate,
-            float(d.get("global_discount_value") or 0),
-            d.get("global_discount_type") or "amount",
-        )
+        totals = self.totals_for(d)
         total_paid = c.execute(
             "SELECT COALESCE(SUM(amount),0) AS s FROM payments WHERE invoice_number=?",
             (invoice_number,),
@@ -956,22 +1219,70 @@ class DatabaseManager:
             row = c.execute("SELECT * FROM catalog WHERE id=?", (item_id,)).fetchone()
             return dict(row) if row else None
 
-    def save_catalog_item(self, title: str, description: str, amount: float):
+    def save_catalog_item(self, title: str, description: str, amount: float,
+                          unit: str = "", hsn: str = "", tax_rate: Optional[float] = None):
+        """Upsert by title. The unit, HSN/SAC and GST rate are only changed when given (an empty one keeps what the
+        item already has)."""
         if not title:
             return
         with closing(self._conn()) as c:
             with c:
                 c.execute("""
-                    INSERT INTO catalog (title, description, amount)
-                    VALUES (?, ?, ?)
+                    INSERT INTO catalog (title, description, amount, unit, hsn, tax_rate)
+                    VALUES (?, ?, ?, ?, ?, ?)
                     ON CONFLICT(title) DO UPDATE SET
-                    description=excluded.description, amount=excluded.amount
-                """, (title, description, amount))
+                    description=excluded.description, amount=excluded.amount,
+                    unit=CASE WHEN excluded.unit != '' THEN excluded.unit ELSE catalog.unit END,
+                    hsn=CASE WHEN excluded.hsn != '' THEN excluded.hsn ELSE catalog.hsn END,
+                    tax_rate=COALESCE(excluded.tax_rate, catalog.tax_rate)
+                """, (title, description, amount, unit or "", hsn or "", tax_rate))
 
-    def upsert_catalog_item_by_id(self, item_id: Optional[int], title: str,
-                                   description: str, amount: float) -> Tuple[bool, Optional[str]]:
+    def remember_catalog_item(self, title: str, description: str, rate: float, unit: str = "", hsn: str = "",
+                              tax_rate: Optional[float] = None):
+        """What saving an invoice teaches the catalog about one of its lines: the description, HSN/SAC and GST rate
+        are refreshed, and `rate` is stored for the unit the line was sold in -- as the item's main rate, or as the
+        rate of one of its other units (a unit it has not been sold in before is added to them). That is how one
+        item ends up with a price per unit ("Tent": Nos 500, Day 150) without any set-up."""
+        if not title:
+            return
+        unit = (unit or "").strip()
+        with closing(self._conn()) as c:
+            with c:
+                row = c.execute("SELECT * FROM catalog WHERE title=?", (title,)).fetchone()
+                if row is None:
+                    c.execute("INSERT INTO catalog (title, description, amount, unit, hsn, tax_rate) VALUES (?,?,?,?,?,?)",
+                              (title, description, rate, unit, hsn or "", tax_rate))
+                    return
+                entry  = dict(row)
+                main   = str(entry.get("unit") or "").strip()
+                others = [{"unit": u, "rate": r} for u, r in catalog_units(entry)[1 if main else 0:]]
+                amount, new_main = entry.get("amount"), main
+                if not unit or not main or unit.casefold() == main.casefold():
+                    amount, new_main = rate, main or unit
+                else:
+                    for o in others:
+                        if o["unit"].casefold() == unit.casefold():
+                            o["rate"] = rate
+                            break
+                    else:
+                        others.append({"unit": unit, "rate": rate})
+                c.execute(
+                    "UPDATE catalog SET description=?, amount=?, unit=?, hsn=?, tax_rate=?, other_units=? WHERE id=?",
+                    (description, amount, new_main, hsn or entry.get("hsn") or "",
+                     tax_rate if tax_rate is not None else entry.get("tax_rate"),
+                     json.dumps(others) if others else "", entry["id"]))
+
+    def upsert_catalog_item_by_id(self, item_id: Optional[int], title: str, description: str, amount: float,
+                                  unit: Any = _UNSET, hsn: Any = _UNSET, tax_rate: Any = _UNSET,
+                                  other_units: Any = _UNSET) -> Tuple[bool, Optional[str]]:
+        """Used by the Catalog manager. `unit`, `hsn`, `tax_rate` (None = no rate) and `other_units` (a list of
+        (unit, rate) pairs) are left as they are when not passed."""
         if not title.strip():
             return False, "Item title is required."
+        extra = {"unit": unit, "hsn": hsn, "tax_rate": tax_rate,
+                 "other_units": _UNSET if other_units is _UNSET else
+                 (json.dumps([{"unit": u, "rate": r} for u, r in other_units]) if other_units else "")}
+        extra = {k: v for k, v in extra.items() if v is not _UNSET}
         try:
             with closing(self._conn()) as c:
                 with c:
@@ -982,11 +1293,13 @@ class DatabaseManager:
                     if dupe:
                         return False, f"An item named '{title}' already exists."
                     if item_id is None:
-                        c.execute("INSERT INTO catalog (title, description, amount) VALUES (?,?,?)",
-                                  (title, description, amount))
+                        cols = ["title", "description", "amount", *extra]
+                        c.execute(f"INSERT INTO catalog ({', '.join(cols)}) VALUES ({', '.join('?' * len(cols))})",
+                                  (title, description, amount, *extra.values()))
                     else:
-                        c.execute("UPDATE catalog SET title=?, description=?, amount=? WHERE id=?",
-                                  (title, description, amount, item_id))
+                        sets = ", ".join(f"{k}=?" for k in ("title", "description", "amount", *extra))
+                        c.execute(f"UPDATE catalog SET {sets} WHERE id=?",
+                                  (title, description, amount, *extra.values(), item_id))
             return True, None
         except sqlite3.Error as exc:
             return False, str(exc)
@@ -1452,12 +1765,46 @@ def prompt_and_backup_database(parent: Optional[QWidget] = None) -> None:
 # =============================================================================
 #  10. PDF GENERATION
 # =============================================================================
+@dataclass(frozen=True)
+class PDFTemplate:
+    """The look of a printed invoice: colours and line styles only -- what is printed (and where) is the same for
+    every template. CLASSIC holds the colours the invoice has always been printed in."""
+    key: str
+    label: str
+    blurb: str = ""
+    name_color: str  = "#1F2937"      # company name
+    title_color: str = "#111827"      # INVOICE / RECEIPT
+    rule: str        = "#E5E7EB"      # line under the letterhead
+    meta_bg: str     = "#F9FAFB"      # the invoice-number / date box
+    meta_border: str = "#E5E7EB"
+    head_bg: str     = "#1F2937"      # item table header
+    head_fg: str     = "#FFFFFF"
+    row_line: str    = "#F3F4F6"      # line between item rows
+    end_line: str    = "#D1D5DB"      # line under the last item row
+    zebra: str       = ""             # fill of every second item row ("" = none)
+    grid: bool       = False          # a full grid around the item cells
+    pay_head_bg: str = "#374151"      # payment history header
+
+
+PDF_TEMPLATE_CLASSIC = PDFTemplate("classic", "Classic", "The look Vyaprix invoices have always had.")
+PDF_TEMPLATES: Dict[str, PDFTemplate] = {PDF_TEMPLATE_CLASSIC.key: PDF_TEMPLATE_CLASSIC}
+
+
+def pdf_template_for(config: Dict[str, Any], data: Optional[Dict[str, Any]] = None) -> PDFTemplate:
+    """The template an invoice prints in: its own choice, else the one picked in Settings, else Classic."""
+    for key in ((data or {}).get("pdf_template"), (config.get("pdf_settings") or {}).get("template")):
+        if key and key in PDF_TEMPLATES:
+            return PDF_TEMPLATES[key]
+    return PDF_TEMPLATE_CLASSIC
+
+
 class PDFGenerator:
     def __init__(self, data: Dict[str, Any], config: Dict[str, Any],
                  payments: Optional[List[Dict]] = None, out_dir: Optional[Path] = None):
         self.data     = data
         self.config   = config
         self.payments = payments or []
+        self.tpl      = pdf_template_for(config, data)
 
         # --- Smart File Naming to bypass Windows file locks ---
         # Defensive re-sanitize: invoice_number is validated at save time now,
@@ -1483,6 +1830,7 @@ class PDFGenerator:
         # ------------------------------------------------------
 
         self.is_gst   = bool(data.get("is_gst_invoice", 1))
+        self.tax_mode = (data.get("tax_mode") or TAX_MODE_OVERALL) if self.is_gst else TAX_MODE_OVERALL
         self.styles   = self._setup_styles()
 
     def _asset(self, key: str) -> Optional[Path]:
@@ -1517,9 +1865,9 @@ class PDFGenerator:
         ss.add(ParagraphStyle("YourContact", parent=ss["NC"], alignment=TA_RIGHT, leading=11))
         ss.add(ParagraphStyle("BillTo",      parent=ss["NC"], leading=11))
         ss.add(ParagraphStyle("ItemDesc",    parent=ss["NC"], textColor=colors.HexColor("#6B7280"), fontSize=8, leading=10))
-        ss.add(ParagraphStyle("CompanyName", fontName=bold,   fontSize=16, textColor=colors.HexColor("#1F2937"), leading=18))
+        ss.add(ParagraphStyle("CompanyName", fontName=bold,   fontSize=16, textColor=colors.HexColor(self.tpl.name_color), leading=18))
         ss.add(ParagraphStyle("Tagline",     parent=ss["NC"], fontSize=8.5, textColor=colors.HexColor("#6B7280")))
-        ss.add(ParagraphStyle("InvoiceTitle",fontName=bold,   fontSize=18, alignment=TA_RIGHT, textColor=colors.HexColor("#111827")))
+        ss.add(ParagraphStyle("InvoiceTitle",fontName=bold,   fontSize=18, alignment=TA_RIGHT, textColor=colors.HexColor(self.tpl.title_color)))
         ss.add(ParagraphStyle("NoteBox",     parent=ss["NC"], fontSize=8, textColor=colors.HexColor("#374151")))
         return ss
 
@@ -1568,10 +1916,10 @@ class PDFGenerator:
         return Table([[left_side, title_block]], colWidths=[9.0*cm, 9.0*cm], style=[
             ("VALIGN",(0,0),(-1,-1),"TOP"), ("ALIGN",(1,0),(1,-1),"RIGHT"),
             ("LEFTPADDING",(0,0),(-1,-1),0),   ("RIGHTPADDING",(0,0),(-1,-1),0),
-            ("LINEBELOW",(0,0),(-1,-1),1,colors.HexColor("#E5E7EB")),
+            ("LINEBELOW",(0,0),(-1,-1),1,colors.HexColor(self.tpl.rule)),
             ("BOTTOMPADDING",(0,0),(-1,-1),10),
         ])
-    
+
     def _draw_footer(self, canvas, doc):
         canvas.saveState()
         canvas.setFont(PDF_FONT, 8)
@@ -1626,20 +1974,63 @@ class PDFGenerator:
     def _build_meta(self) -> Table:
         date_str = parse_date(self.data.get("invoice_date"), DB_DATE_FORMAT, DISPLAY_DATE_FORMAT)
         meta     = f"<b>Invoice #:</b> {safe_markup(self.data.get('invoice_number'))}<br/><b>Invoice Date:</b> {date_str}"
-        if not self.data.get("is_complimentary"):
+        free     = not self.data.get("is_complimentary")
+        if free and self.data.get("due_date"):
+            meta += f"<br/><b>Due Date:</b> {parse_date(self.data.get('due_date'), DB_DATE_FORMAT, DISPLAY_DATE_FORMAT)}"
+        if free:
             meta += f"<br/><b>Payment Terms:</b> {safe_markup(self.data.get('payment_terms') or 'N/A')}"
-        return Table([[Paragraph(meta, self.styles["NC"])]], style=[
-            ("BOX",(0,0),(-1,-1),1,colors.HexColor("#E5E7EB")),
-            ("BACKGROUND",(0,0),(-1,-1),colors.HexColor("#F9FAFB")),
-            ("LEFTPADDING",(0,0),(-1,-1),8), ("TOPPADDING",(0,0),(-1,-1),6),
-            ("BOTTOMPADDING",(0,0),(-1,-1),6),
-        ])
+
+        # a second column, only for the details an invoice may carry besides the number and date
+        more = []
+        if po := str(self.data.get("po_number") or "").strip():
+            more.append(f"<b>PO / Ref #:</b> {safe_markup(po)}")
+        if self.is_gst and (place := str(self.data.get("place_of_supply") or "").strip()):
+            more.append(f"<b>Place of Supply:</b> {safe_markup(place)}")
+        if self.is_gst and self.data.get("reverse_charge"):
+            more.append("<b>Reverse Charge:</b> Yes")
+        box = [("BOX",(0,0),(-1,-1),1,colors.HexColor(self.tpl.meta_border)),
+               ("BACKGROUND",(0,0),(-1,-1),colors.HexColor(self.tpl.meta_bg)),
+               ("LEFTPADDING",(0,0),(-1,-1),8), ("TOPPADDING",(0,0),(-1,-1),6),
+               ("BOTTOMPADDING",(0,0),(-1,-1),6)]
+        if more and free:
+            return Table([[Paragraph(meta, self.styles["NC"]), Paragraph("<br/>".join(more), self.styles["NC"])]],
+                         colWidths=["50%", "50%"], style=box + [("VALIGN",(0,0),(-1,-1),"TOP")])
+        return Table([[Paragraph(meta, self.styles["NC"])]], style=box)
+
+    def _items(self) -> List[Dict[str, Any]]:
+        try:
+            items = json.loads(self.data.get("items") or "[]")
+        except (TypeError, ValueError):
+            items = []
+        return items if isinstance(items, list) else []
+
+    def _items_style(self, last_row: int) -> List[Tuple]:
+        """The item table's look (the same for the compact and the full table), from the template."""
+        t = self.tpl
+        style = [
+            ("BACKGROUND",(0,0),(-1,0),colors.HexColor(t.head_bg)),
+            ("VALIGN",(0,0),(-1,-1),"TOP"),
+            ("LINEBELOW",(0,1),(-1,-2),1,colors.HexColor(t.row_line)),
+            ("LINEBELOW",(0,-1),(-1,-1),2,colors.HexColor(t.end_line)),
+            ("TOPPADDING",(0,0),(-1,-1),5),   ("BOTTOMPADDING",(0,0),(-1,-1),5),
+            ("LEFTPADDING",(0,0),(-1,-1),6),  ("RIGHTPADDING",(0,0),(-1,-1),6),
+        ]
+        if t.zebra:
+            style += [("BACKGROUND",(0,r),(-1,r),colors.HexColor(t.zebra)) for r in range(2, last_row + 1, 2)]
+        if t.grid:
+            style.append(("GRID",(0,0),(-1,-1),0.5,colors.HexColor(t.end_line)))
+        return style
 
     def _build_items(self) -> Table:
-        hs  = ParagraphStyle("HS",  parent=self.styles["NC"], textColor=colors.white)
+        items = self._items()
+        # Invoices made only of plain "title + amount" lines keep the compact two-column table they have always had;
+        # as soon as a line has a quantity, unit, HSN/SAC code or its own GST rate the full table is printed.
+        if any(item_is_extended(i) for i in items):
+            return self._build_items_full(items)
+        hs  = ParagraphStyle("HS",  parent=self.styles["NC"], textColor=colors.HexColor(self.tpl.head_fg))
         hsr = ParagraphStyle("HSR", parent=hs, alignment=TA_RIGHT)
         rows = [[Paragraph("<b>ITEM / DESCRIPTION</b>", hs), Paragraph("<b>AMOUNT</b>", hsr)]]
-        for item in json.loads(self.data.get("items") or "[]"):
+        for item in items:
             title  = item.get("title")       or ""
             desc   = item.get("description") or ""
             amount = float(item.get("amount", 0))
@@ -1650,14 +2041,68 @@ class PDFGenerator:
                 if desc.strip():
                     cell.append(Paragraph(safe_markup(desc), self.styles["ItemDesc"]))
                 rows.append([cell, Paragraph(f"{CURRENCY_SYMBOL}{amount:,.2f}", self.styles["Right"])])
-        return Table(rows, colWidths=["80%","20%"], repeatRows=1, style=TableStyle([
-            ("BACKGROUND",(0,0),(-1,0),colors.HexColor("#1F2937")),
-            ("VALIGN",(0,0),(-1,-1),"TOP"),   ("ALIGN",(1,0),(1,-1),"RIGHT"),
-            ("LINEBELOW",(0,1),(-1,-2),1,colors.HexColor("#F3F4F6")),
-            ("LINEBELOW",(0,-1),(-1,-1),2,colors.HexColor("#D1D5DB")),
-            ("TOPPADDING",(0,0),(-1,-1),5),   ("BOTTOMPADDING",(0,0),(-1,-1),5),
-            ("LEFTPADDING",(0,0),(-1,-1),6),  ("RIGHTPADDING",(0,0),(-1,-1),6),
-        ]))
+        return Table(rows, colWidths=["80%","20%"], repeatRows=1,
+                     style=TableStyle([*self._items_style(len(rows) - 1), ("ALIGN",(1,0),(1,-1),"RIGHT")]))
+
+    def _build_items_full(self, items: List[Dict[str, Any]]) -> Table:
+        """# | item (+ description, HSN/SAC) | quantity + unit | rate | discount | GST % | amount. The discount column
+        only appears when a line has a discount, the GST column only when GST is charged per item."""
+        per_item = self.is_gst and self.tax_mode == TAX_MODE_PER_ITEM
+        default_rate = safe_float(self.data.get("tax_rate"))
+        hs  = ParagraphStyle("HS",  parent=self.styles["NC"], textColor=colors.HexColor(self.tpl.head_fg))
+        hsr = ParagraphStyle("HSR", parent=hs, alignment=TA_RIGHT)
+        hsc = ParagraphStyle("HSC", parent=hs, alignment=TA_CENTER)
+        show_disc = any(safe_float(i.get("discount")) > 0 for i in items)
+        # (header, weight) -- the weights are shares of the page width
+        cols = [("#", 4), ("ITEM / DESCRIPTION", 34), ("QTY", 13), ("RATE", 15)]
+        if show_disc:
+            cols.append(("DISC.", 15))
+        if per_item:
+            cols.append(("GST", 8))
+        cols.append(("AMOUNT", 17))
+        total_w = sum(w for _, w in cols)
+        head = [Paragraph(f"<b>{h}</b>", hsc if h == "#" else (hs if h.startswith("ITEM") else hsr)) for h, _ in cols]
+        rows = [head]
+        number = 0
+        for item in items:
+            title  = str(item.get("title") or "")
+            desc   = str(item.get("description") or "")
+            gross  = safe_float(item.get("amount"))
+            if not title.strip() and not desc.strip() and gross == 0:
+                rows.append([Paragraph("", self.styles["NC"]), [Paragraph("<br/>", self.styles["NC"])]] +
+                            [Paragraph("", self.styles["Right"])] * (len(cols) - 2))
+                continue
+            number += 1
+            qty  = item_qty(item)
+            unit = str(item.get("unit") or "").strip()
+            raw_rate = item.get("rate")
+            rate = safe_float(raw_rate) if raw_rate not in (None, "") else (gross / qty if qty else gross)
+            cell = [Paragraph(f"<b>{safe_markup(title)}</b>", self.styles["NC"])]
+            if desc.strip():
+                cell.append(Paragraph(safe_markup(desc), self.styles["ItemDesc"]))
+            if hsn := str(item.get("hsn") or "").strip():
+                cell.append(Paragraph(f"HSN/SAC: {safe_markup(hsn)}", self.styles["Small"]))
+            row = [Paragraph(str(number), self.styles["Center"]), cell,
+                   Paragraph(safe_markup(fmt_qty(qty) + (f" {unit}" if unit else "")), self.styles["Right"]),
+                   Paragraph(f"{CURRENCY_SYMBOL}{rate:,.2f}", self.styles["Right"])]
+            if show_disc:
+                disc = safe_float(item.get("discount"))
+                if disc <= 0:
+                    row.append(Paragraph("-", self.styles["Right"]))
+                elif item.get("disc_type") == "percent":
+                    row.append(Paragraph(f"{CURRENCY_SYMBOL}{disc:,.2f}<br/><font size='7' color='#6B7280'>"
+                                         f"({safe_float(item.get('disc_value')):g}%)</font>", self.styles["Right"]))
+                else:
+                    row.append(Paragraph(f"{CURRENCY_SYMBOL}{disc:,.2f}", self.styles["Right"]))
+            if per_item:
+                raw_tax = item.get("tax_rate")
+                line_rate = default_rate if raw_tax in (None, "") else safe_float(raw_tax, default_rate)
+                row.append(Paragraph(f"{line_rate:g}%", self.styles["Right"]))
+            row.append(Paragraph(f"{CURRENCY_SYMBOL}{gross:,.2f}", self.styles["Right"]))
+            rows.append(row)
+        return Table(rows, colWidths=[f"{w * 100.0 / total_w:.3f}%" for _, w in cols], repeatRows=1,
+                     style=TableStyle([*self._items_style(len(rows) - 1), ("ALIGN",(2,0),(-1,-1),"RIGHT"),
+                                       ("ALIGN",(0,0),(0,-1),"CENTER")]))
 
     def _build_totals(self) -> Table:
         if self.data.get("is_complimentary"):
@@ -1667,13 +2112,10 @@ class PDFGenerator:
                 colWidths=["75%","25%"],
                 style=TableStyle([("ALIGN",(0,0),(-1,-1),"RIGHT"), ("LEFTPADDING",(0,0),(-1,-1),10)]),
             )
-        items_list = json.loads(self.data.get("items") or "[]")
-        tax_rate   = float(self.data.get("tax_rate") or 0) if self.is_gst else 0.0
-        g_disc     = float(self.data.get("global_discount_value") or 0)
-        # Same calculation engine the invoice form uses live, so the
+        # Same calculation engine the invoice form uses live (and the database stores), so the
         # printed PDF can never show different numbers than what the
         # person saw on screen when they saved.
-        totals     = DatabaseManager.calculate_totals(items_list, tax_rate, g_disc, self.data.get("global_discount_type") or "amount")
+        totals     = DatabaseManager.totals_for(self.data, self._items())
         total_paid = sum(safe_float(p.get("amount")) for p in self.payments)
         _status, balance, credit = DatabaseManager.compute_payment_status(totals["grand_total"], total_paid)
 
@@ -1684,22 +2126,29 @@ class PDFGenerator:
                          Paragraph(f"- {fmt_money(totals['total_discount'])}", self.styles["Right"])])
 
         # --- IGST vs CGST/SGST PDF Rendering Logic ---
-        if self.is_gst and tax_rate > 0:
+        # One block per GST rate: a single one when the whole invoice has one rate, one per rate when GST is
+        # charged per item.
+        taxed = [g for g in totals["tax_groups"] if g["rate"] > 0]
+        if self.is_gst and taxed:
             rows.append([Paragraph("Taxable Amount", self.styles["Right"]),
                          Paragraph(fmt_money(totals['taxable']), self.styles["Right"])])
-
-            half_rate = tax_rate / 2.0
-            if self.data.get("gst_type") == "IGST":
-                rows.append([Paragraph(f"IGST ({tax_rate:g}%)", self.styles["Right"]),
-                             Paragraph(fmt_money(totals['cgst'] + totals['sgst']), self.styles["Right"])])
-            else:
-                rows += [
-                    [Paragraph(f"CGST ({half_rate:g}%)", self.styles["Right"]),
-                     Paragraph(fmt_money(totals['cgst']), self.styles["Right"])],
-                    [Paragraph(f"SGST ({half_rate:g}%)", self.styles["Right"]),
-                     Paragraph(fmt_money(totals['sgst']), self.styles["Right"])],
-                ]
+            for g in taxed:
+                if self.data.get("gst_type") == "IGST":
+                    rows.append([Paragraph(f"IGST ({g['rate']:g}%)", self.styles["Right"]),
+                                 Paragraph(fmt_money(g["tax"]), self.styles["Right"])])
+                else:
+                    half_rate = g["rate"] / 2.0
+                    rows += [
+                        [Paragraph(f"CGST ({half_rate:g}%)", self.styles["Right"]),
+                         Paragraph(fmt_money(g["cgst"]), self.styles["Right"])],
+                        [Paragraph(f"SGST ({half_rate:g}%)", self.styles["Right"]),
+                         Paragraph(fmt_money(g["sgst"]), self.styles["Right"])],
+                    ]
         # ---------------------------------------------
+        if totals["round_off"]:
+            sign = "+" if totals["round_off"] > 0 else "-"
+            rows.append([Paragraph("Round Off", self.styles["Right"]),
+                         Paragraph(f"{sign} {fmt_money(abs(totals['round_off']))}", self.styles["Right"])])
 
         rows.append([Paragraph("<b>Invoice Total</b>", self.styles["Right"]),
                      Paragraph(f"<b>{fmt_money(totals['grand_total'])}</b>", self.styles["Right"])])
@@ -1742,7 +2191,7 @@ class PDFGenerator:
                 Paragraph(f"{CURRENCY_SYMBOL}{safe_float(p.get('amount')):,.2f}", self.styles["SmallRight"]),
             ])
         return Table(rows, colWidths=["22%","20%","33%","25%"], style=TableStyle([
-            ("BACKGROUND",(0,0),(-1,0),colors.HexColor("#374151")),
+            ("BACKGROUND",(0,0),(-1,0),colors.HexColor(self.tpl.pay_head_bg)),
             ("VALIGN",(0,0),(-1,-1),"MIDDLE"),
             ("LINEBELOW",(0,0),(-1,-2),0.5,colors.HexColor("#F3F4F6")),
             ("TOPPADDING",(0,0),(-1,-1),3),   ("BOTTOMPADDING",(0,0),(-1,-1),3),
@@ -1823,6 +2272,25 @@ class PDFGenerator:
         return Table([[qr_cell, sig_cell]], colWidths=["60%","40%"],
                      style=[("VALIGN",(0,0),(-1,-1),"BOTTOM")])
 
+    def _build_amount_in_words(self) -> Optional[Paragraph]:
+        """"Amount in words: Rupees ... Only" under the totals -- when Settings turns it on, for rupee invoices."""
+        if not self.config.get("pdf_settings", {}).get("amount_in_words", False) or self.data.get("is_complimentary"):
+            return None
+        words = amount_in_words(DatabaseManager.totals_for(self.data, self._items())["grand_total"], CURRENCY_SYMBOL)
+        if not words:
+            return None
+        return Paragraph(f"<b>Amount in words:</b> {safe_markup(words)}", self.styles["NoteBox"])
+
+    def _build_notes_terms(self) -> List[Any]:
+        """The customer-facing notes and the terms & conditions (the internal notes are never printed)."""
+        out: List[Any] = []
+        for label, key in (("Notes", "customer_notes"), ("Terms &amp; Conditions", "terms")):
+            text = str(self.data.get(key) or "").strip()
+            if text:
+                out += [Paragraph(f"<b>{label}</b>", self.styles["NoteBox"]), Spacer(1, 0.08*cm),
+                        Paragraph(safe_markup(text).replace("\n", "<br/>"), self.styles["Small"]), Spacer(1, 0.3*cm)]
+        return out
+
     def generate(self) -> Path:
         doc   = SimpleDocTemplate(str(self.filename), pagesize=A4,
                                   rightMargin=1.5*cm, leftMargin=1.5*cm,
@@ -1832,13 +2300,17 @@ class PDFGenerator:
             self._build_address(),        Spacer(1, 0.4*cm),
             self._build_meta(),           Spacer(1, 0.4*cm),
             self._build_items(),
-            self._build_totals(),         Spacer(1, 0.3*cm),
+            self._build_totals(),
         ]
+        if in_words := self._build_amount_in_words():
+            story += [Spacer(1, 0.15*cm), in_words]
+        story.append(Spacer(1, 0.3*cm))
         if history := self._build_payment_history():
             story += [Paragraph("<b>Payment History</b>", self.styles["NoteBox"]), Spacer(1, 0.15*cm),
                       history, Spacer(1, 0.3*cm)]
         # Internal notes (self.data["notes"]) are intentionally never printed
-        # on the customer-facing PDF -- they're for Vyaprix's eyes only.
+        # on the customer-facing PDF -- they're for Vyaprix's eyes only. The customer notes and the terms are.
+        story += self._build_notes_terms()
         story += [Spacer(1, 0.3*cm), self._build_footer_section()]
         doc.build(story, onFirstPage=self.on_each_page, onLaterPages=self.on_each_page)
         return self.filename
@@ -3646,35 +4118,153 @@ class ClientDialog(_EditDialog):
             Messagebox.show_error("Could Not Save", err, parent=self)
 
 
+class _UnitRateRow(QWidget):
+    """One "unit | rate | x" line of the catalog dialog's "also sold per" list."""
+    remove_requested = Signal(object)
+
+    def __init__(self, unit: str = "", rate: float = 0.0, parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(_ROW_GAP)
+        self.unit_combo = make_editable_combo(UNIT_PRESETS, _UNIT_W + 30, "Unit", 14, advance=False)
+        self.unit_combo.setCurrentText(unit)
+        self.unit_combo.setToolTip("The other unit this item is sold in (pick one or type your own)")
+        lay.addWidget(self.unit_combo)
+        self.rate_edit = make_money_edit(rate, _AMOUNT_W + 10, "The rate for one of this unit", advance=False)
+        lay.addWidget(self.rate_edit)
+        lay.addStretch()
+        self.remove_btn = make_button("✕", "danger-outline", tooltip="Remove this unit")
+        self.remove_btn.setFixedWidth(_REMOVE_W)
+        set_flag(self.remove_btn, "glyph", True)
+        self.remove_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.remove_btn.clicked.connect(self._on_remove)
+        lay.addWidget(self.remove_btn)
+
+    def _on_remove(self, _checked: bool = False):
+        self.remove_requested.emit(self)
+
+    def values(self) -> Tuple[str, float]:
+        return self.unit_combo.currentText().strip(), safe_float(self.rate_edit.text())
+
+
+class _UnitRatesEditor(QWidget):
+    """The "also sold per ..." list: the other units one catalog item is sold in, each with its own rate
+    ("Tent": Nos 500 -- Day 150 -- Week 800)."""
+
+    def __init__(self, parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        self.rows: List[_UnitRateRow] = []
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(6)
+        self._rows_layout = QVBoxLayout()
+        self._rows_layout.setSpacing(6)
+        lay.addLayout(self._rows_layout)
+        bar = QHBoxLayout()
+        self.add_btn = make_button("＋  Add another unit", "secondary-outline", self._add_clicked,
+                                   tooltip="Sell this item in one more unit, with its own rate")
+        bar.addWidget(self.add_btn)
+        bar.addStretch()
+        lay.addLayout(bar)
+
+    def _add_clicked(self):
+        self.add_row().unit_combo.setFocus()
+
+    def add_row(self, unit: str = "", rate: float = 0.0) -> _UnitRateRow:
+        row = _UnitRateRow(unit, rate)
+        row.remove_requested.connect(self.remove_row)
+        self._rows_layout.addWidget(row)
+        self.rows.append(row)
+        return row
+
+    def remove_row(self, row: _UnitRateRow):
+        if row in self.rows:
+            self.rows.remove(row)
+            self._rows_layout.removeWidget(row)
+            row.setParent(None)
+            row.deleteLater()
+
+    def set_units(self, units: List[Tuple[str, float]]):
+        for row in list(self.rows):
+            self.remove_row(row)
+        for unit, rate in units:
+            self.add_row(unit, rate)
+
+    def units(self) -> List[Tuple[str, float]]:
+        """The (unit, rate) pairs that have a unit name -- a row left blank is ignored."""
+        return [vals for vals in (row.values() for row in self.rows) if vals[0]]
+
+
 class CatalogItemDialog(_EditDialog):
-    """Add or edit a single Product & Service Catalog entry."""
+    """Add or edit a single Product & Service Catalog entry: its name, description, unit and rate, the HSN/SAC code and
+    GST rate it is invoiced with, and any other units it is sold in (each with its own rate)."""
 
     def __init__(self, parent, db_manager: "DatabaseManager", item: Optional[Dict], on_saved: Callable):
         super().__init__(parent, "Edit Catalog Item" if item else "Add Catalog Item",
-                         "Edit Catalog Item" if item else "New Catalog Item")
+                         "Edit Catalog Item" if item else "New Catalog Item", width=540)
         self.db_manager = db_manager
         self.item = item
         self.on_saved = on_saved
 
         self.title_entry = PlaceholderEntry(placeholder="Enter item / service name")
         self._add_field("Item / Service Title *", self.title_entry)
-        self.desc_text = self._multiline("Description (optional)", 4)
+        self.desc_text = self._multiline("Description (optional)", 3)
         self._add_field("Description", self.desc_text)
+
+        self.unit_combo = make_editable_combo(UNIT_PRESETS, 190, "e.g. Nos, Day, Plate", 14, advance=False)
+        self.unit_combo.setToolTip("The unit the default rate below is for (pick one or type your own)")
         self.amount_entry = QLineEdit()
         # UX polish: strict numeric controls (same as the Tk build)
         restrict_to_decimal(self.amount_entry)
         format_as_decimal_on_blur(self.amount_entry)
-        self._add_field(f"Default Amount ({CURRENCY_SYMBOL})", self.amount_entry, space_after=15)
+        self._add_pair(("Unit", self.unit_combo), (f"Default Rate ({CURRENCY_SYMBOL}) per unit", self.amount_entry))
+
+        self.hsn_entry = QLineEdit()
+        self.hsn_entry.setPlaceholderText("optional, 2 to 8 digits")
+        restrict_to_digits(self.hsn_entry, 8)
+        self.gst_combo = make_editable_combo(GST_RATE_PRESETS, 190, "not set", 6, advance=False)
+        self.gst_combo.lineEdit().setValidator(_DecimalValidator(2, self.gst_combo))
+        self.gst_combo.setToolTip("The GST rate this item is usually charged at (left empty: the invoice's own rate is used)")
+        self._add_pair(("HSN / SAC Code", self.hsn_entry), ("GST Rate (%)", self.gst_combo))
+
+        self._root.addWidget(make_label("Also Sold Per", "h3"))
+        self._root.addSpacing(2)
+        self._root.addWidget(make_label("The same item in another unit, with its own rate. On an invoice, choosing that "
+                                        "unit fills in its rate.", "muted", wrap=True))
+        self._root.addSpacing(6)
+        self.units_editor = _UnitRatesEditor()
+        self._root.addWidget(self.units_editor)
+        self._root.addSpacing(15)
 
         if item:
             self.title_entry.setText(item.get("title", ""))
             self.desc_text.setPlainText(item.get("description", "") or "")
             self.amount_entry.setText(f"{float(item.get('amount', 0) or 0):.2f}")
+            self.unit_combo.setCurrentText(str(item.get("unit") or ""))
+            self.hsn_entry.setText(str(item.get("hsn") or ""))
+            self.gst_combo.setCurrentText("" if item.get("tax_rate") is None else _num_text(item.get("tax_rate")))
+            units = catalog_units(item)
+            self.units_editor.set_units(units[1:] if str(item.get("unit") or "").strip() else units)
         else:
             self.amount_entry.setText("0.00")
+            self.gst_combo.setCurrentText("")
 
         self._add_buttons("💾 Save", self._save)
         self.title_entry.setFocus()
+
+    def _add_pair(self, left: Tuple[str, QWidget], right: Tuple[str, QWidget], space_after: int = 12) -> None:
+        """Two labelled fields side by side."""
+        row = QHBoxLayout()
+        row.setSpacing(14)
+        for label, widget in (left, right):
+            col = QVBoxLayout()
+            col.setSpacing(4)
+            col.addWidget(make_label(label, "h3"))
+            col.addWidget(widget)
+            row.addLayout(col, 1)
+        self._root.addLayout(row)
+        self._root.addSpacing(space_after)
 
     def _save(self):
         title = self.title_entry.text().strip()
@@ -3685,8 +4275,26 @@ class CatalogItemDialog(_EditDialog):
         except ValueError:
             return Messagebox.show_error("Validation", "Amount must be a valid number.", parent=self)
         desc = self.desc_text.toPlainText().strip()
+        unit = self.unit_combo.currentText().strip()
+        hsn = self.hsn_entry.text().strip()
+        if hsn and not 2 <= len(hsn) <= 8:
+            return Messagebox.show_error("Validation", "The HSN / SAC code must be 2 to 8 digits.", parent=self)
+        gst_text = self.gst_combo.currentText().strip()
+        tax_rate = safe_float(gst_text) if gst_text else None
+        if tax_rate is not None and not 0 <= tax_rate <= 100:
+            return Messagebox.show_error("Validation", "The GST rate must be between 0 and 100.", parent=self)
+        others = self.units_editor.units()
+        if others and not unit:
+            return Messagebox.show_error("Validation", "Set the item's main unit first: the other units are alternatives to it.",
+                                         parent=self)
+        seen = {unit.casefold()} if unit else set()
+        for name, _rate in others:
+            if name.casefold() in seen:
+                return Messagebox.show_error("Validation", f'The unit "{name}" is listed more than once.', parent=self)
+            seen.add(name.casefold())
         iid = self.item.get("id") if self.item else None
-        ok, err = self.db_manager.upsert_catalog_item_by_id(iid, title, desc, amount)
+        ok, err = self.db_manager.upsert_catalog_item_by_id(iid, title, desc, amount, unit=unit, hsn=hsn,
+                                                            tax_rate=tax_rate, other_units=others)
         if ok:
             self.on_saved()
             self.accept()
@@ -4329,6 +4937,11 @@ class SettingsDialog(QDialog):
         self.ud_address = self._entry("Street / building / area")
         self.ud_city = self._entry("e.g. Lucknow")
         self.ud_state = self._entry("e.g. Uttar Pradesh")
+        # The state decides CGST/SGST or IGST when an invoice's place of supply is chosen, so offer the standard names.
+        state_names = QCompleter([name for _code, name in INDIAN_STATES], self.ud_state)
+        state_names.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+        state_names.setFilterMode(Qt.MatchFlag.MatchContains)
+        self.ud_state.setCompleter(state_names)
         self.ud_pin = self._entry("e.g. 226001")
         restrict_to_digits(self.ud_pin, max_length=6)
         for caption, field in (("Your Name:", self.ud_name), ("Phone Number:", self.ud_phone),
@@ -4375,6 +4988,17 @@ class SettingsDialog(QDialog):
         form.addRow(self._section("PDF Footer Note"))
         self.footer_text = self._multiline("Thank you for your business!", 3)
         form.addRow(self.footer_text)
+        form.addRow(hline())
+        form.addRow(self._section("Invoice Printing"))
+        self.amount_words_check = QCheckBox("Print the invoice total in words (Rupees ... Only)")
+        form.addRow(self.amount_words_check)
+        form.addRow(self._note("Only for rupee invoices. It is printed under the totals, and is also shown while you "
+                               "fill in an invoice."))
+        form.addRow(make_label("Default Terms and Conditions:"))
+        self.default_terms_text = self._multiline(
+            "Every new invoice starts with this text in its Terms field -- e.g. payment within 15 days, "
+            "late-fee policy, cancellation terms. Leave empty to print no terms.", 4)
+        form.addRow(self.default_terms_text)
         self._form_tab("Payment && PDF", form, scroll=True)
         self._on_currency_selected()
 
@@ -4545,6 +5169,8 @@ class SettingsDialog(QDialog):
         pdf = c.get("pdf_settings", {})
         self.footer_text.setPlainText(pdf.get("footer_message", ""))
         self.always_show_qr_check.setChecked(bool(pdf.get("always_show_qr_code", False)))
+        self.amount_words_check.setChecked(bool(pdf.get("amount_in_words", False)))
+        self.default_terms_text.setPlainText(pdf.get("default_terms", ""))
 
         paths = c.get("asset_paths", {})
         for key, row in self._asset_rows.items():
@@ -4616,7 +5242,10 @@ class SettingsDialog(QDialog):
                     "payment_notes": self.payment_notes_text.toPlainText().strip(),
                 },
                 "pdf_settings": {"footer_message": self.footer_text.toPlainText().strip(),
-                                 "always_show_qr_code": self.always_show_qr_check.isChecked()},
+                                 "always_show_qr_code": self.always_show_qr_check.isChecked(),
+                                 "amount_in_words": self.amount_words_check.isChecked(),
+                                 "default_terms": self.default_terms_text.toPlainText().strip(),
+                                 "template": (self._cfg.get("pdf_settings") or {}).get("template", "classic")},
                 "asset_paths": {key: row.rel_path for key, row in self._asset_rows.items()},
                 "currency_symbol": self._currency_symbol(),
             })
@@ -4863,16 +5492,23 @@ class CatalogFrame(_ManagerFrame):
     SEARCH_TIP = "Search catalog items (Ctrl+F)"
     HINT_NONE = "Select an item to edit or delete"
     COL_DEFS = [
-        ("title",  "Item / Service", 260, Qt.AlignmentFlag.AlignLeft),
-        ("desc",   "Description",    340, Qt.AlignmentFlag.AlignLeft),
-        ("amount", "Default Amount", 140, Qt.AlignmentFlag.AlignRight),
+        ("title",  "Item / Service", 230, Qt.AlignmentFlag.AlignLeft),
+        ("desc",   "Description",    280, Qt.AlignmentFlag.AlignLeft),
+        ("amount", "Default Rate",   130, Qt.AlignmentFlag.AlignRight),
+        ("unit",   "Unit",           120, Qt.AlignmentFlag.AlignLeft),
+        ("hsn",    "HSN/SAC",         90, Qt.AlignmentFlag.AlignLeft),
+        ("gst",    "GST",             64, Qt.AlignmentFlag.AlignRight),
     ]
 
     def _fetch(self, search):
         return self.db_manager.get_all_catalog_items(search)
 
     def _cells(self, it):
-        return [it["title"], (it.get("description") or "").replace("\n", "  ·  "), fmt_money(it.get("amount"))]
+        names = [u for u, _rate in catalog_units(it)]
+        unit_text = ", ".join(names) if len(names) <= 2 else f"{names[0]}, {names[1]} +{len(names) - 2}"
+        gst = "" if it.get("tax_rate") is None else f"{safe_float(it['tax_rate']):g}%"
+        return [it["title"], (it.get("description") or "").replace("\n", "  ·  "), fmt_money(it.get("amount")),
+                unit_text, str(it.get("hsn") or ""), gst]
 
     def _get_by_id(self, rec_id):
         return self.db_manager.get_catalog_item_by_id(rec_id)
@@ -5406,6 +6042,13 @@ class DashboardFrame(QWidget):
         new_data["advance_amount"] = 0.0
         new_data["payment_date"]   = None
         new_data["advance_date"]   = None
+        if row["due_date"]:                       # the copy is due as long after its date as the original was
+            try:
+                span = (datetime.datetime.strptime(row["due_date"], DB_DATE_FORMAT)
+                        - datetime.datetime.strptime(row["invoice_date"], DB_DATE_FORMAT))
+                new_data["due_date"] = (datetime.date.today() + span).strftime(DB_DATE_FORMAT)
+            except (TypeError, ValueError):
+                new_data["due_date"] = None
 
         ok, err = self.db_manager.save_invoice(new_data, is_update=False, payments=[])
         if ok:
@@ -5734,8 +6377,13 @@ class DashboardFrame(QWidget):
 # -----------------------------------------------------------------------------
 # Column widths shared by the item / payment headers and their rows, so the columns always line up.
 _ROW_GAP   = 8
-_AMOUNT_W  = 112
+_AMOUNT_W  = 112      # an item's rate / a payment's amount
 _DISC_W    = 92
+_QTY_W     = 72
+_UNIT_W    = 100
+_LINE_W    = 116      # an item's computed amount
+_HSN_W     = 118
+_GST_W     = 92
 _DATE_W    = 138
 _MODE_W    = 140
 _REMOVE_W  = 34
@@ -5887,7 +6535,7 @@ class _ReturnToNext(QObject):
                        | Qt.KeyboardModifier.ShiftModifier | Qt.KeyboardModifier.MetaModifier)
             if event.modifiers() & blocked:
                 return False
-            completer = obj.completer() if isinstance(obj, QLineEdit) else None
+            completer = obj.completer() if isinstance(obj, (QLineEdit, QComboBox)) else None
             if completer is not None and completer.popup().isVisible() and completer.popup().currentIndex().isValid():
                 return False                                   # a highlighted suggestion: the completer takes the key
             # A QDateEdit's own focusNextChild() first steps through its day / month / year sections; asking its
@@ -5903,7 +6551,7 @@ def advance_on_enter(widget: QWidget) -> QWidget:
     return widget
 
 
-def make_money_edit(value: float, width: int, tooltip: str = "") -> QLineEdit:
+def make_money_edit(value: float, width: int, tooltip: str = "", advance: bool = True) -> QLineEdit:
     """A right-aligned "0.00" amount field: digits and one decimal point only (two decimals at most),
     re-formatted to two decimals when it loses focus."""
     edit = QLineEdit(f"{value:.2f}")
@@ -5911,7 +6559,8 @@ def make_money_edit(value: float, width: int, tooltip: str = "") -> QLineEdit:
     edit.setFixedWidth(width)
     restrict_to_decimal(edit)
     format_as_decimal_on_blur(edit)
-    advance_on_enter(edit)
+    if advance:
+        advance_on_enter(edit)
     if tooltip:
         edit.setToolTip(tooltip)
     return edit
@@ -5927,15 +6576,115 @@ def _retone(widget: QWidget, tone: str) -> None:
         set_tone(widget, tone)
 
 
+class _QtyBlurFilter(QObject):
+    """A quantity field tidies itself when it loses focus: "2.500" -> "2.5", an empty field -> "1"."""
+
+    def eventFilter(self, obj, event):
+        if event.type() == QEvent.Type.FocusOut:
+            text = obj.text().strip()
+            tidy = fmt_qty(text) if text not in ("", ".") else "1"
+            if tidy != obj.text():
+                obj.setText(tidy)
+        return False
+
+
+class _DiscountBlurFilter(QObject):
+    """A discount field ("5", "5.5" or "10%") tidies itself when it loses focus: "5" -> "5.00", "10.50%" -> "10.5%"."""
+
+    def eventFilter(self, obj, event):
+        if event.type() == QEvent.Type.FocusOut:
+            text = obj.text().strip()
+            number = safe_float(text.rstrip("%"))
+            tidy = f"{number:g}%" if text.endswith("%") and number > 0 else f"{number:.2f}"
+            if tidy != obj.text():
+                obj.setText(tidy)
+        return False
+
+
+def make_qty_edit(value: float) -> QLineEdit:
+    """A right-aligned quantity field: a plain number with up to three decimals ("2", "0.5", "12.75")."""
+    edit = QLineEdit(fmt_qty(value))
+    edit.setAlignment(Qt.AlignmentFlag.AlignRight)
+    edit.setFixedWidth(_QTY_W)
+    edit.setMaxLength(11)
+    restrict_to_decimal(edit, 3)
+    edit.installEventFilter(_QtyBlurFilter(edit))
+    advance_on_enter(edit)
+    edit.setToolTip("Quantity (e.g. 2, 0.5, 12.75)")
+    return edit
+
+
+def make_discount_edit(text: str) -> QLineEdit:
+    """A discount field: an amount ("150") or a percentage of the line ("10%")."""
+    edit = QLineEdit(text)
+    edit.setAlignment(Qt.AlignmentFlag.AlignRight)
+    edit.setFixedWidth(_DISC_W)
+    edit.setValidator(QRegularExpressionValidator(QRegularExpression(r"^\d{0,9}(\.\d{0,2})?%?$"), edit))
+    edit.installEventFilter(_DiscountBlurFilter(edit))
+    advance_on_enter(edit)
+    edit.setToolTip("Per-item discount: an amount (150) or a percentage of the line (10%)")
+    return edit
+
+
+def make_editable_combo(presets: List[str], width: int, placeholder: str, max_length: int,
+                        advance: bool = True) -> QComboBox:
+    """A combo box in which anything can be typed (the list is only a convenience): unit and GST-rate fields."""
+    combo = QComboBox()
+    combo.setEditable(True)
+    combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+    combo.setCompleter(None)                      # what is typed is what is meant -- no auto-completion surprises
+    combo.addItems(presets)
+    combo.setCurrentIndex(-1)
+    combo.lineEdit().setPlaceholderText(placeholder)
+    combo.lineEdit().setMaxLength(max_length)
+    combo.setFixedWidth(width)
+    guard_wheel(combo)
+    if advance:
+        advance_on_enter(combo)        # the combo itself holds the focus (its line edit's focus proxy)
+    return combo
+
+
+class _EnterAddsRow(QObject):
+    """Enter in the last field of the last, filled-in item row starts the next row -- the way a grid is filled in."""
+
+    def __init__(self, row: "_ItemRow", form: "InvoiceFormFrame"):
+        super().__init__(row)
+        self.row, self.form = row, form
+
+    def eventFilter(self, obj, event):
+        if event.type() == QEvent.Type.KeyPress and event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter) \
+                and not (event.modifiers() & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.AltModifier
+                                              | Qt.KeyboardModifier.ShiftModifier | Qt.KeyboardModifier.MetaModifier)):
+            rows = self.form.item_rows
+            if rows and rows[-1] is self.row and obj is self.row.last_field() and self.row.is_filled():
+                self.form.add_item()
+                return True
+        return False
+
+
 class _ItemRow(QWidget):
-    """One invoice line: item title (with catalog suggestions), amount, discount, description."""
-    changed = Signal()                       # amount / discount edited -> the totals must be recalculated
+    """One invoice line, on two rows of fields.
+
+        item / service name | qty | unit | rate | discount | line amount | x
+        description                              | HSN/SAC | GST %   (GST % only when GST is charged per item)
+
+    The old "amount" field is now the RATE (`amount_edit`): with the quantity left at 1 it is the line's amount, exactly
+    as before. The stored line keeps its old keys (title, description, amount = quantity x rate, discount) and only
+    gains qty / unit / rate / hsn / tax_rate / disc_type / disc_value when the line uses them, so a plain line is saved
+    exactly like one from an older build."""
+    changed = Signal()                       # a figure was edited -> the totals must be recalculated
     remove_requested = Signal(object)        # this row asks the form to delete it
     title_picked = Signal(object, str)       # (row, title) -- a catalog title was chosen
+    title_edited = Signal(object, str)       # (row, title) -- the title text changed (any way)
 
     def __init__(self, titles: List[str], title: str = "", description: str = "", amount: float = 0.0,
                  discount: float = 0.0, parent: Optional[QWidget] = None):
         super().__init__(parent)
+        self._per_item = False               # GST % shown / stored only when the invoice charges GST per item
+        self._gst_touched = False            # the user (or a catalog item) chose this line's rate: stop following the default
+        self._default_gst = "18"             # the invoice's default rate -- what an emptied GST field means
+        self._unit_rates: Dict[str, float] = {}      # the picked catalog item's units -> rate per unit (lower-case keys)
+        self._dropdown_units: List[str] = []         # what the unit list currently offers besides the presets
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 7, 0, 0)
         lay.setSpacing(5)
@@ -5945,15 +6694,27 @@ class _ItemRow(QWidget):
         self.title_edit = SuggestCombo("Item / service name", titles)
         self.title_edit.set_text(title)
         self.title_edit.picked.connect(self._on_picked)
+        self.title_edit.textChanged.connect(self._on_title_text)
         advance_on_enter(self.title_edit)
         top.addWidget(self.title_edit, 1)
 
-        self.amount_edit = make_money_edit(amount, _AMOUNT_W, "Item amount, before any discount")
-        self.amount_edit.textChanged.connect(self.changed)
+        self.qty_edit = make_qty_edit(1.0)
+        self.qty_edit.textChanged.connect(self._on_edited)
+        top.addWidget(self.qty_edit)
+        self.unit_combo = make_editable_combo(UNIT_PRESETS, _UNIT_W, "Unit", 14)
+        self.unit_combo.setToolTip("Unit of measure: pick one or type your own (Nos, Day, Plate, Sq.ft ...)")
+        self.unit_combo.activated.connect(self._on_unit_activated)
+        top.addWidget(self.unit_combo)
+        self.amount_edit = make_money_edit(amount, _AMOUNT_W, "Rate: the price of one unit (before any discount)")
+        self.amount_edit.textChanged.connect(self._on_edited)
         top.addWidget(self.amount_edit)
-        self.disc_edit = make_money_edit(discount, _DISC_W, "Per-item discount amount")
-        self.disc_edit.textChanged.connect(self.changed)
+        self.disc_edit = make_discount_edit(f"{discount:.2f}")
+        self.disc_edit.textChanged.connect(self._on_edited)
         top.addWidget(self.disc_edit)
+        self.line_lbl = make_label("", "muted", align=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self.line_lbl.setFixedWidth(_LINE_W)
+        self.line_lbl.setToolTip("Quantity x rate, less this line's discount")
+        top.addWidget(self.line_lbl)
 
         self.remove_btn = make_button("✕", "danger-outline", tooltip="Remove this item (Ctrl+Shift+Del or Ctrl+Minus)")
         self.remove_btn.setFixedWidth(_REMOVE_W)
@@ -5963,30 +6724,190 @@ class _ItemRow(QWidget):
         top.addWidget(self.remove_btn)
         lay.addLayout(top)
 
+        second = QHBoxLayout()
+        second.setSpacing(_ROW_GAP)
         self.desc_edit = QLineEdit(description)
         self.desc_edit.setPlaceholderText("Description (optional)")
         self.desc_edit.setCursorPosition(0)
         advance_on_enter(self.desc_edit)
-        lay.addWidget(self.desc_edit)
+        second.addWidget(self.desc_edit, 1)
+        self.hsn_caption = make_label("HSN/SAC", "muted")
+        second.addWidget(self.hsn_caption)
+        self.hsn_edit = QLineEdit()
+        self.hsn_edit.setFixedWidth(_HSN_W)
+        self.hsn_edit.setPlaceholderText("optional")
+        self.hsn_edit.setToolTip("HSN code (goods) or SAC code (services): 2 to 8 digits, printed under the item")
+        restrict_to_digits(self.hsn_edit, 8)
+        advance_on_enter(self.hsn_edit)
+        second.addWidget(self.hsn_edit)
+        self.gst_caption = make_label("GST %", "muted")
+        second.addWidget(self.gst_caption)
+        self.gst_combo = make_editable_combo(GST_RATE_PRESETS, _GST_W, "%", 6)
+        self.gst_combo.lineEdit().setValidator(_DecimalValidator(2, self.gst_combo))
+        self.gst_combo.setToolTip("GST rate of this item (pick one or type your own)")
+        self.gst_combo.setCurrentText("18")
+        self.gst_combo.lineEdit().textEdited.connect(self._on_gst_touched)
+        self.gst_combo.activated.connect(self._on_gst_touched)
+        self.gst_combo.currentTextChanged.connect(self._on_edited)
+        second.addWidget(self.gst_combo)
+        second.addSpacing(_REMOVE_W)         # line the right edge up with the line above
+        lay.addLayout(second)
         lay.addSpacing(4)
         lay.addWidget(hline())
+        self.set_per_item(False)
+        self._refresh_line()
 
+    # ---- signals ------------------------------------------------------------ #
     def _on_picked(self, text: str):
         self.title_picked.emit(self, text)
+
+    def _on_title_text(self, text: str):
+        self.title_edited.emit(self, text)
 
     def _on_remove(self, _checked: bool = False):
         self.remove_requested.emit(self)
 
+    def _on_edited(self, *_):
+        self._refresh_line()
+        self.changed.emit()
+
+    def _on_gst_touched(self, *_):
+        self._gst_touched = True
+
+    def _on_unit_activated(self, index: int):
+        """A unit chosen from the list loads that unit's saved rate when the catalog has one for this item."""
+        rate = self._unit_rates.get(self.unit_combo.itemText(index).strip().casefold())
+        if rate is not None:
+            self.amount_edit.setText(f"{rate:.2f}")
+
+    # ---- what the row shows -------------------------------------------------- #
+    def _numbers(self) -> Tuple[float, float, float, str, float]:
+        """(quantity, rate, line amount, discount kind, discount typed) -- the amount is quantity x rate to the paisa."""
+        qty, rate = safe_float(self.qty_edit.text()), safe_float(self.amount_edit.text())
+        gross = float(_round2(Decimal(str(qty)) * Decimal(str(rate))))
+        text = self.disc_edit.text().strip()
+        typed = safe_float(text.rstrip("%"))
+        return qty, rate, gross, ("percent" if text.endswith("%") else "amount"), typed
+
+    def _discount(self) -> Tuple[float, str, float]:
+        """(discount amount, kind, the number typed) for the current line."""
+        _qty, _rate, gross, kind, typed = self._numbers()
+        if kind == "percent":
+            return float(_round2(Decimal(str(gross)) * Decimal(str(typed)) / Decimal("100"))), kind, typed
+        return max(0.0, typed), kind, typed
+
+    def _refresh_line(self):
+        _qty, _rate, gross, _kind, _typed = self._numbers()
+        self.line_lbl.setText(fmt_money(max(0.0, gross - self._discount()[0])))
+
+    def refresh_line(self) -> None:
+        """Redraw the line amount (the currency symbol may have changed in Settings)."""
+        self._refresh_line()
+
+    def set_per_item(self, per_item: bool) -> None:
+        """Show / hide this line's own GST rate (only an invoice that charges GST per item has one)."""
+        self._per_item = per_item
+        self.gst_caption.setVisible(per_item)
+        self.gst_combo.setVisible(per_item)
+
+    def set_default_gst(self, text: str) -> None:
+        """The invoice's default GST rate changed: a line whose rate was never chosen follows it."""
+        self._default_gst = text
+        if not self._gst_touched and self.gst_combo.currentText() != text:
+            self.gst_combo.setCurrentText(text)
+
+    def set_gst(self, text: str) -> None:
+        """Give this line its own GST rate (a catalog item's, say) -- it no longer follows the invoice's default."""
+        self._gst_touched = True
+        self.gst_combo.setCurrentText(text)
+
+    def set_units(self, units: List[Tuple[str, float]]) -> None:
+        """Offer the units a catalog item is sold in (first), then the usual ones; remember each unit's rate."""
+        self._unit_rates = {u.casefold(): r for u, r in units}
+        wanted = [u for u, _ in units]
+        if wanted == self._dropdown_units:
+            return
+        self._dropdown_units = wanted
+        current = self.unit_combo.currentText()
+        self.unit_combo.blockSignals(True)
+        self.unit_combo.clear()
+        self.unit_combo.addItems(wanted + [u for u in UNIT_PRESETS if u.casefold() not in {w.casefold() for w in wanted}])
+        self.unit_combo.setCurrentIndex(-1)
+        self.unit_combo.setCurrentText(current)
+        self.unit_combo.blockSignals(False)
+
+    def apply_catalog(self, entry: Dict[str, Any]) -> None:
+        """Fill the line from a catalog item: rate, unit, HSN/SAC and GST rate (a quantity already typed stays)."""
+        self.set_units(catalog_units(entry))
+        self.amount_edit.setText(f"{safe_float(entry.get('amount')):.2f}")
+        if unit := str(entry.get("unit") or "").strip():
+            self.unit_combo.setCurrentText(unit)
+        if hsn := str(entry.get("hsn") or "").strip():
+            self.hsn_edit.setText(hsn)
+        if entry.get("tax_rate") is not None:
+            self.set_gst(_num_text(entry["tax_rate"]))
+
+    def load_item(self, item: Dict[str, Any]) -> None:
+        """Fill the line from a stored item (older invoices simply have no quantity / unit / HSN / rate)."""
+        self.title_edit.set_text(str(item.get("title") or ""))
+        self.desc_edit.setText(str(item.get("description") or ""))
+        self.desc_edit.setCursorPosition(0)
+        qty = item_qty(item)
+        raw_rate = item.get("rate")
+        gross = safe_float(item.get("amount"))
+        rate = safe_float(raw_rate) if raw_rate not in (None, "") else (gross / qty if qty else gross)
+        self.qty_edit.setText(fmt_qty(qty))
+        self.unit_combo.setCurrentText(str(item.get("unit") or ""))
+        self.amount_edit.setText(f"{rate:.2f}")
+        if item.get("disc_type") == "percent":
+            self.disc_edit.setText(f"{safe_float(item.get('disc_value')):g}%")
+        else:
+            self.disc_edit.setText(f"{max(0.0, safe_float(item.get('discount'))):.2f}")
+        self.hsn_edit.setText(str(item.get("hsn") or ""))
+        if item.get("tax_rate") not in (None, ""):
+            self.set_gst(_num_text(item["tax_rate"]))
+
+    def is_filled(self) -> bool:
+        """Whether anything has been entered on this line (an untouched row is ignored when the invoice is saved)."""
+        return bool(self.title_edit.text().strip() or self.desc_edit.text().strip() or self.hsn_edit.text().strip()
+                    or safe_float(self.amount_edit.text()) > 0)
+
+    def last_field(self) -> QWidget:
+        return self.gst_combo if self._per_item else self.hsn_edit
+
+    def raw_gst(self) -> float:
+        """This line's GST rate as typed (an empty field means the invoice's default), before any clamping."""
+        return safe_float(self.gst_combo.currentText().strip() or self._default_gst)
+
     def focus_widgets(self) -> List[QWidget]:
-        return [self.title_edit, self.amount_edit, self.disc_edit, self.desc_edit]
+        chain = [self.title_edit, self.qty_edit, self.unit_combo, self.amount_edit, self.disc_edit, self.desc_edit, self.hsn_edit]
+        if self._per_item:
+            chain.append(self.gst_combo)
+        return chain
 
     def values(self) -> Dict[str, Any]:
-        return {
+        qty, rate, gross, kind, typed = self._numbers()
+        discount = self._discount()[0]
+        item: Dict[str, Any] = {
             "title": self.title_edit.text().strip(),
             "description": self.desc_edit.text().strip(),
-            "amount": safe_float(self.amount_edit.text()),
-            "discount": max(0.0, safe_float(self.disc_edit.text())),
+            "amount": gross,
+            "discount": discount,
         }
+        unit, hsn = self.unit_combo.currentText().strip(), self.hsn_edit.text().strip()
+        tax_rate = (min(100.0, safe_float(self.gst_combo.currentText().strip() or self._default_gst))
+                    if self._per_item else None)
+        if qty != 1.0 or unit or hsn or tax_rate is not None:           # more than a title and an amount: keep the detail
+            item["qty"], item["rate"] = qty, rate
+            if unit:
+                item["unit"] = unit
+            if hsn:
+                item["hsn"] = hsn
+            if tax_rate is not None:
+                item["tax_rate"] = tax_rate
+        if kind == "percent":
+            item["disc_type"], item["disc_value"] = "percent", typed
+        return item
 
 
 class _PaymentRow(QWidget):
@@ -6096,6 +7017,11 @@ class InvoiceFormFrame(QWidget):
         self._catalog_cache: List[Dict] = []
         self._client_cache:  List[Dict] = []
         self._initial_snapshot: Optional[str] = None
+        self._catalog_exact: Dict[str, Dict] = {}     # catalog items by title (exact spelling / ignoring case)
+        self._catalog_fold:  Dict[str, Dict] = {}
+        self._place_auto = False         # the place of supply was filled in from the customer's GSTIN, not typed
+        self._due_days: Optional[int] = None       # the due date was set as "n days after the invoice date" (None: by hand)
+        self._setting_due = False
         self._loading = False            # True while the fields are being (re)filled: no live recalculation, no "dirty" checks
         self._build()
 
@@ -6141,6 +7067,7 @@ class InvoiceFormFrame(QWidget):
         self._section_details(self.body_layout)
         self._section_items(self.body_layout)
         self._section_payments(self.body_layout)
+        self._section_print_notes(self.body_layout)
         self._section_notes(self.body_layout)
         self._section_totals(self.body_layout)
         self._section_save_bar(self.body_layout)
@@ -6169,6 +7096,7 @@ class InvoiceFormFrame(QWidget):
         label.setFixedWidth(label_width)
         lay.addWidget(label)
         lay.addWidget(widget, 1)
+        row.label = label                      # so a caption can be changed later (e.g. "Default GST Rate")
         return row
 
     @staticmethod
@@ -6201,6 +7129,7 @@ class InvoiceFormFrame(QWidget):
         self.client_gstin_entry = QLineEdit()
         self.client_gstin_entry.setPlaceholderText("22ABCDE1234F1Z5 (optional)")
         advance_on_enter(self.client_gstin_entry)
+        self.client_gstin_entry.textChanged.connect(self._autofill_place_from_gstin)
         lay.addWidget(self.client_gstin_entry)
         lay.addStretch()
         row.addWidget(left, 1)
@@ -6234,13 +7163,38 @@ class InvoiceFormFrame(QWidget):
         lay.addWidget(self._labeled("Invoice Number *", self.invoice_number_entry))
 
         self.invoice_date_edit = make_date_edit()
+        self.invoice_date_edit.dateChanged.connect(self._on_invoice_date_changed)
         advance_on_enter(self.invoice_date_edit)
         lay.addWidget(self._labeled("Invoice Date *", self.invoice_date_edit))
+
+        self.due_combo = QComboBox()
+        for text, days in DUE_CHOICES:
+            self.due_combo.addItem(text, days)
+        self.due_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        self.due_combo.setMinimumContentsLength(10)
+        self.due_combo.setToolTip("When payment is due: a number of days after the invoice date, or a date you pick.\n"
+                                  "The due date is printed on the invoice.")
+        self.due_combo.activated.connect(self._on_due_chosen)
+        guard_wheel(self.due_combo)
+        lay.addWidget(self._labeled("Due Date", self.due_combo))
+        self.due_date_edit = make_date_edit()
+        self.due_date_edit.setEnabled(False)
+        self.due_date_edit.dateChanged.connect(self._on_due_date_edited)
+        advance_on_enter(self.due_date_edit)
+        self._due_date_row = self._labeled("Due On", self.due_date_edit)       # shown only while there is a due date
+        self._due_date_row.setVisible(False)
+        lay.addWidget(self._due_date_row)
 
         self.payment_terms_entry = QLineEdit()
         self.payment_terms_entry.setPlaceholderText("e.g. Due on Receipt, Net 15")
         advance_on_enter(self.payment_terms_entry)
         lay.addWidget(self._labeled("Payment Terms", self.payment_terms_entry))
+
+        self.po_entry = QLineEdit()
+        self.po_entry.setMaxLength(60)
+        self.po_entry.setPlaceholderText("Your customer's PO / reference number (optional)")
+        advance_on_enter(self.po_entry)
+        lay.addWidget(self._labeled("PO / Reference No.", self.po_entry))
 
         lay.addSpacing(4)
         self.no_charge_toggle = ToggleSwitch("Mark as Complimentary (No Charge)")
@@ -6249,6 +7203,9 @@ class InvoiceFormFrame(QWidget):
         self.show_qr_toggle = ToggleSwitch("Show UPI QR Code on PDF")
         self.show_qr_toggle.setChecked(True)
         lay.addWidget(self.show_qr_toggle)
+        self.reverse_toggle = ToggleSwitch("Reverse charge applies")
+        self.reverse_toggle.setToolTip("The tax is paid by the customer, not by you: prints \"Reverse Charge: Yes\" on a GST invoice")
+        lay.addWidget(self.reverse_toggle)
         lay.addStretch()
         row.addWidget(left, 1)
 
@@ -6259,18 +7216,51 @@ class InvoiceFormFrame(QWidget):
         self.gst_toggle.clicked.connect(self._on_gst_toggle)          # toggling GST immediately recalculates the totals
         lay.addWidget(self.gst_toggle)
 
+        self.tax_mode_combo = QComboBox()
+        self.tax_mode_combo.addItem("One rate for the whole invoice", TAX_MODE_OVERALL)
+        self.tax_mode_combo.addItem("A rate for each item", TAX_MODE_PER_ITEM)
+        self.tax_mode_combo.setToolTip("Overall: one GST rate on everything.  Per item: every item line gets its own GST % "
+                                       "and the totals show tax per rate.")
+        self.tax_mode_combo.currentIndexChanged.connect(self._on_tax_mode_changed)
+        self.tax_mode_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        self.tax_mode_combo.setMinimumContentsLength(12)
+        guard_wheel(self.tax_mode_combo)
+        lay.addWidget(self._labeled("GST Applied", self.tax_mode_combo))
+
         self.tax_rate_entry = QLineEdit("18")
         restrict_to_decimal(self.tax_rate_entry, 2)
         format_as_decimal_on_blur(self.tax_rate_entry)
-        self.tax_rate_entry.textChanged.connect(self._recalc_totals)
+        self.tax_rate_entry.textChanged.connect(self._on_default_rate_changed)
         advance_on_enter(self.tax_rate_entry)
-        lay.addWidget(self._labeled("GST / Tax Rate (%)", self.tax_rate_entry))
+        self._tax_rate_row = self._labeled("GST / Tax Rate (%)", self.tax_rate_entry)
+        lay.addWidget(self._tax_rate_row)
 
         self.gst_type_combo = QComboBox()
         self.gst_type_combo.addItems(["CGST/SGST", "IGST"])
         self.gst_type_combo.currentTextChanged.connect(self._recalc_totals)   # live update when switching CGST <-> IGST
         guard_wheel(self.gst_type_combo)
         lay.addWidget(self._labeled("Tax Split Type", self.gst_type_combo))
+
+        self.place_combo = QComboBox()
+        self.place_combo.setEditable(True)
+        self.place_combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        self.place_combo.addItems([state_label(code) for code, _name in INDIAN_STATES])
+        self.place_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        self.place_combo.setMinimumContentsLength(12)
+        self.place_combo.setCurrentIndex(-1)
+        self.place_combo.lineEdit().setPlaceholderText("State the supply is made to (optional)")
+        self.place_combo.lineEdit().setMaxLength(60)
+        place_completer = QCompleter(self.place_combo.model(), self.place_combo)
+        place_completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+        place_completer.setFilterMode(Qt.MatchFlag.MatchContains)
+        self.place_combo.setCompleter(place_completer)
+        self.place_combo.setToolTip("Another state than yours switches the tax split to IGST; your own state to CGST/SGST")
+        self.place_combo.currentTextChanged.connect(self._on_place_changed)
+        self.place_combo.lineEdit().textEdited.connect(self._on_place_typed)
+        self.place_combo.activated.connect(self._on_place_typed)
+        guard_wheel(self.place_combo)
+        advance_on_enter(self.place_combo)
+        lay.addWidget(self._labeled("Place of Supply", self.place_combo))
 
         disc_wrap = QWidget()
         dl = QHBoxLayout(disc_wrap)
@@ -6289,11 +7279,16 @@ class InvoiceFormFrame(QWidget):
         guard_wheel(self.disc_type_combo)
         dl.addWidget(self.disc_type_combo)
         lay.addWidget(self._labeled("Overall Discount", disc_wrap))
+
+        self.round_off_toggle = ToggleSwitch("Round off to the nearest rupee")
+        self.round_off_toggle.clicked.connect(self._recalc_totals)
+        lay.addWidget(self.round_off_toggle)
         lay.addStretch()
         row.addWidget(right, 1)
         parent.addLayout(row)
 
-        self.gst_dependents = [self.tax_rate_entry, self.gst_type_combo]
+        self.gst_dependents = [self.tax_mode_combo, self.tax_rate_entry, self.gst_type_combo, self.place_combo,
+                               self.reverse_toggle]
 
     def _toggle_no_charge(self, _checked: bool = False):
         self._apply_field_states()
@@ -6303,27 +7298,151 @@ class InvoiceFormFrame(QWidget):
         self._apply_field_states()
         self._recalc_totals()
 
+    def _on_tax_mode_changed(self, _index: int = 0):
+        self._apply_field_states()
+        self._recalc_totals()
+
+    def _on_default_rate_changed(self, *_):
+        """The invoice's (default) GST rate was edited: lines whose own rate was never chosen follow it."""
+        text = _num_text(safe_float(self.tax_rate_entry.text()))
+        for item_row in self.item_rows:
+            item_row.set_default_gst(text)
+        self._recalc_totals()
+
+    def _on_place_changed(self, text: str):
+        """Choosing where the supply goes decides the tax split: another state than the seller's is IGST, the
+        seller's own state CGST/SGST. (Loading a saved invoice never changes what was saved.)"""
+        if self._loading:
+            return
+        kind = gst_type_for_place(CONFIG, text)
+        if kind and kind != self.gst_type_combo.currentText():
+            self.gst_type_combo.setCurrentText(kind)
+
+    def _on_place_typed(self, *_):
+        self._place_auto = False             # the user chose the place: a customer's GSTIN no longer overrides it
+
+    def _autofill_place_from_gstin(self, *_):
+        """A valid customer GSTIN names the customer's state: it becomes the place of supply, unless the user chose
+        one (a place filled in this way follows the GSTIN when another customer is picked)."""
+        gstin = self.client_gstin_entry.text().strip().upper()
+        if self._loading or not is_valid_gstin(gstin):
+            return
+        if self.place_combo.currentText().strip() and not self._place_auto:
+            return
+        if label := state_label(gstin[:2]):
+            self._place_auto = True
+            self.place_combo.setCurrentText(label)
+
+    def _default_due_days(self) -> int:
+        """How many days after the invoice date a due date starts at: read from the payment terms ("Net 15",
+        "30 days"), 0 for "on receipt", else 15."""
+        terms = self.payment_terms_entry.text()
+        found = re.search(r"\bnet\s*(\d{1,3})\b|\b(\d{1,3})\s*days?\b", terms, re.IGNORECASE)
+        if found:
+            return int(found.group(1) or found.group(2))
+        return 0 if re.search(r"receipt|immediate|advance", terms, re.IGNORECASE) else 15
+
+    def _set_due_in(self, days: int):
+        due = date_edit_value(self.invoice_date_edit) + datetime.timedelta(days=days)
+        self._due_days, self._setting_due = days, True
+        try:
+            self.due_date_edit.setDate(QDate(due.year, due.month, due.day))
+        finally:
+            self._setting_due = False
+
+    def _due_on(self) -> bool:
+        return self.due_combo.currentData() is not None
+
+    def _set_due_active(self, active: bool):
+        """The "Due On" date field exists (and is editable) only while the invoice has a due date."""
+        self.due_date_edit.setEnabled(active)
+        self._due_date_row.setVisible(active)
+
+    def _on_due_date_edited(self, _date=None):
+        """A due date picked in the date field is a "Custom" one: it no longer follows the invoice date."""
+        if self._setting_due:
+            return
+        self._due_days = None
+        if self._due_on() and not self._loading:
+            self.due_combo.setCurrentIndex(self.due_combo.findData(_DUE_CUSTOM))
+
+    def _on_invoice_date_changed(self, _date=None):
+        """A due date set as "n days after the invoice date" keeps that distance when the invoice date moves."""
+        if self._due_days is not None and self._due_on() and not self._loading:
+            self._set_due_in(self._due_days)
+
+    def _on_due_chosen(self, index: int):
+        days = self.due_combo.itemData(index)
+        was_on = self.due_date_edit.isEnabled()
+        self._set_due_active(days is not None)
+        if days is None:
+            self._due_days = None
+        elif days == _DUE_CUSTOM:
+            if not was_on:
+                self._set_due_in(self._default_due_days())
+            self._due_days = None
+        else:
+            self._set_due_in(days)
+
+    def _show_stored_due(self, invoice_date: Optional[str], due: Optional[str]):
+        """Show a stored due date: as "n days" when it is exactly that long after the invoice date, else as a custom one."""
+        self._due_days = None
+        if not due:
+            self.due_combo.setCurrentIndex(0)
+            self._set_due_active(False)
+            set_date_edit_from_db(self.due_date_edit, None)
+            return
+        set_date_edit_from_db(self.due_date_edit, due)
+        self._set_due_active(True)
+        try:
+            days = (datetime.datetime.strptime(due, DB_DATE_FORMAT)
+                    - datetime.datetime.strptime(invoice_date or "", DB_DATE_FORMAT)).days
+        except (TypeError, ValueError):
+            days = -1
+        index = self.due_combo.findData(days) if days >= 0 else -1
+        if index > 0:
+            self.due_combo.setCurrentIndex(index)
+            self._due_days = days
+        else:
+            self.due_combo.setCurrentIndex(self.due_combo.findData(_DUE_CUSTOM))
+
+    def _per_item_active(self) -> bool:
+        """True when GST is charged per item (and there is GST to charge at all)."""
+        return (self.gst_toggle.isChecked() and not self.no_charge_toggle.isChecked()
+                and self.tax_mode_combo.currentData() == TAX_MODE_PER_ITEM)
+
     def _apply_field_states(self):
         no_charge = self.no_charge_toggle.isChecked()
         is_gst    = self.gst_toggle.isChecked() and not no_charge
         for w in self.gst_dependents:
             w.setEnabled(is_gst)
+        self.round_off_toggle.setEnabled(not no_charge)
+        per_item = self._per_item_active()
+        for item_row in self.item_rows:
+            item_row.set_per_item(per_item)
+        self._tax_rate_row.label.setText("Default GST Rate (%)" if self.tax_mode_combo.currentData() == TAX_MODE_PER_ITEM
+                                         else "GST / Tax Rate (%)")
         self.add_payment_btn.setEnabled(not no_charge)
         for row in self.payment_rows:
             row.set_editable(not no_charge)
+        self._restore_tab_order()
 
+    # ---- Items ---------------------------------------------------------- #
     # ---- Items ---------------------------------------------------------- #
     def _section_items(self, parent: QVBoxLayout):
         card, lay = self._card("Items")
+        lay.addWidget(make_label("Quantity × rate is the line amount. Pick a unit or type your own; a discount can be an "
+                                 "amount (150) or a percentage (10%). Press Enter in an item's last field to start the next one.",
+                                 "muted", wrap=True))
+        lay.addSpacing(8)
         header = QHBoxLayout()
         header.setSpacing(_ROW_GAP)
         header.addWidget(make_label("ITEM / SERVICE", "section"), 1)
-        amount_hdr = make_label("AMOUNT", "section", align=Qt.AlignmentFlag.AlignCenter)
-        amount_hdr.setFixedWidth(_AMOUNT_W)
-        disc_hdr = make_label("DISCOUNT", "section", align=Qt.AlignmentFlag.AlignCenter)
-        disc_hdr.setFixedWidth(_DISC_W)
-        header.addWidget(amount_hdr)
-        header.addWidget(disc_hdr)
+        for text, width in (("QTY", _QTY_W), ("UNIT", _UNIT_W), ("RATE", _AMOUNT_W), ("DISCOUNT", _DISC_W),
+                            ("AMOUNT", _LINE_W)):
+            caption = make_label(text, "section", align=Qt.AlignmentFlag.AlignCenter)
+            caption.setFixedWidth(width)
+            header.addWidget(caption)
         header.addSpacing(_REMOVE_W)
         lay.addLayout(header)
         lay.addSpacing(4)
@@ -6344,12 +7463,20 @@ class InvoiceFormFrame(QWidget):
     def _add_item_row_clicked(self):
         self._add_item_row()
 
-    def _add_item_row(self, title: str = "", description: str = "", amount: float = 0.0,
-                      discount: float = 0.0) -> _ItemRow:
-        row = _ItemRow([c["title"] for c in self._catalog_cache], title, description, amount, discount)
+    def _add_item_row(self, item: Optional[Dict[str, Any]] = None) -> _ItemRow:
+        """Adds an item line: blank, or filled in from a stored item (`item`)."""
+        row = _ItemRow([c["title"] for c in self._catalog_cache])
+        row.set_default_gst(_num_text(safe_float(self.tax_rate_entry.text())))
+        row.set_per_item(self._per_item_active())
+        if item is not None:
+            row.load_item(item)
+            self._on_item_title_edited(row, row.title_edit.text())          # offer the units its catalog item is sold in
         row.changed.connect(self._recalc_totals)
         row.remove_requested.connect(self._remove_item_row)
         row.title_picked.connect(self._on_catalog_picked)
+        row.title_edited.connect(self._on_item_title_edited)
+        for last in (row.hsn_edit, row.gst_combo):                            # Enter in the last field starts the next row
+            last.installEventFilter(_EnterAddsRow(row, self))
         self.items_layout.addWidget(row)
         self.item_rows.append(row)
         self._restore_tab_order()
@@ -6366,16 +7493,26 @@ class InvoiceFormFrame(QWidget):
         self._restore_tab_order()
         self._recalc_totals()
 
+    def _catalog_entry(self, title: str) -> Optional[Dict[str, Any]]:
+        """The catalog item called `title` (the exact spelling first, then ignoring upper / lower case)."""
+        entry = self._catalog_exact.get(title)
+        return entry if entry is not None else self._catalog_fold.get(title.strip().casefold())
+
     def _on_catalog_picked(self, row: _ItemRow, chosen: str):
         # Matched against the text the user actually chose, so a still-visible placeholder can never be
         # mistaken for a catalog title.
-        for c in self._catalog_cache:
-            if c["title"] == chosen:
-                row.desc_edit.setText(c.get("description") or "")
-                row.desc_edit.setCursorPosition(0)
-                row.amount_edit.setText(f"{float(c.get('amount') or 0):.2f}")
-                break
+        entry = self._catalog_exact.get(chosen)
+        if entry is not None:
+            row.desc_edit.setText(entry.get("description") or "")
+            row.desc_edit.setCursorPosition(0)
+            row.apply_catalog(entry)                  # rate, unit, HSN/SAC and GST rate of the item
         self._recalc_totals()
+
+    def _on_item_title_edited(self, row: _ItemRow, text: str):
+        """Whatever is typed as an item's name: when the catalog knows that item, its units (and their rates) are
+        what the row's unit list offers."""
+        entry = self._catalog_entry(text)
+        row.set_units(catalog_units(entry) if entry is not None else [])
 
     # ---- Payment History ------------------------------------------------ #
     def _section_payments(self, parent: QVBoxLayout):
@@ -6435,6 +7572,50 @@ class InvoiceFormFrame(QWidget):
         self._restore_tab_order()
         self._recalc_totals()
 
+    # ---- Notes & Terms (printed) ------------------------------------------ #
+    def _section_print_notes(self, parent: QVBoxLayout):
+        card, lay = self._card("Notes & Terms")
+        lay.addWidget(make_label("Printed on the invoice, under the totals. Leave a box empty to print nothing.", "muted", wrap=True))
+        lay.addSpacing(8)
+        row = QHBoxLayout()
+        row.setSpacing(16)
+
+        left = QVBoxLayout()
+        left.setSpacing(2)
+        left.addWidget(_caption("Note to the customer"))
+        self.customer_notes_text = self._text_box("e.g. Thank you for your business!")
+        left.addWidget(self.customer_notes_text)
+        row.addLayout(left, 1)
+
+        right = QVBoxLayout()
+        right.setSpacing(2)
+        head = QHBoxLayout()
+        head.addWidget(_caption("Terms & Conditions"))
+        head.addStretch()
+        self.default_terms_btn = make_button("Use default terms", "link", self._use_default_terms,
+                                             tooltip="Fill this box with the default terms from Settings > Payment & PDF")
+        self.default_terms_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        head.addWidget(self.default_terms_btn)
+        right.addLayout(head)
+        self.terms_text = self._text_box("e.g. Payment within 15 days. Late fee 2% per month.")
+        right.addWidget(self.terms_text)
+        row.addLayout(right, 1)
+        lay.addLayout(row)
+        parent.addWidget(card)
+
+    def _use_default_terms(self):
+        default = str(CONFIG.get("pdf_settings", {}).get("default_terms", "") or "").strip()
+        if not default:
+            Messagebox.show_info("No Default Terms",
+                                 "No default terms have been set yet.\nAdd them in Settings > Payment & PDF > Invoice Printing.",
+                                 parent=self.controller)
+            return
+        current = self.terms_text.toPlainText().strip()
+        if current and current != default and not Messagebox.yesno(
+                "Replace Terms?", "Replace the terms written here with the default terms?", parent=self.controller):
+            return
+        self.terms_text.setPlainText(default)
+
     # ---- Notes ------------------------------------------------------------ #
     def _section_notes(self, parent: QVBoxLayout):
         card, lay = self._card("Internal Notes")
@@ -6450,27 +7631,44 @@ class InvoiceFormFrame(QWidget):
         wrap.setContentsMargins(16, 0, 16, 0)
         wrap.addStretch()
         self.summary_box = QWidget()
-        box_layout = QVBoxLayout(self.summary_box)
-        box_layout.setContentsMargins(0, 0, 0, 0)
-        box_layout.setSpacing(0)
+        self.summary_layout = QVBoxLayout(self.summary_box)
+        self.summary_layout.setContentsMargins(0, 0, 0, 0)
+        self.summary_layout.setSpacing(0)
 
         self.row_subtotal    = _SummaryRow("Subtotal:")
         self.row_disc        = _SummaryRow("Discount:")
         self.row_taxable     = _SummaryRow("Taxable Amount:")
-        self.row_cgst        = _SummaryRow("CGST:")
-        self.row_sgst        = _SummaryRow("SGST:")
-        self.row_igst        = _SummaryRow("IGST:")
+        self.row_round       = _SummaryRow("Round Off:")
         self.row_grand_total = _SummaryRow("Grand Total:", bold=True)
         self.row_paid        = _SummaryRow("Total Paid:")
         self.row_balance     = _SummaryRow("Balance Due:", bold=True)     # flips to "Advance / Credit:" when overpaid
-        self._summary_rows = (self.row_subtotal, self.row_disc, self.row_taxable, self.row_cgst, self.row_sgst,
-                              self.row_igst, self.row_grand_total, self.row_paid, self.row_balance)
+        # The tax lines (CGST + SGST, or IGST -- one set per GST rate on the invoice) are made on demand and slotted in
+        # between "Taxable Amount" and "Round Off", so _summary_rows is always in on-screen order.
+        self._tax_pool: List[_SummaryRow] = []
+        self._summary_rows: List[_SummaryRow] = [self.row_subtotal, self.row_disc, self.row_taxable, self.row_round,
+                                                 self.row_grand_total, self.row_paid, self.row_balance]
         for r in self._summary_rows:
-            box_layout.addWidget(r)
-        # The rows are shown / hidden (never re-created) by _recalc_totals(), always in this fixed order:
-        # Subtotal, Discount, Taxable Amount, Tax, Grand Total, Total Paid, Balance Due.
+            self.summary_layout.addWidget(r)
+        self.words_lbl = make_label("", "muted", wrap=True,
+                                    align=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignTop)
+        self.words_lbl.setMaximumWidth(440)
+        self.words_lbl.setVisible(False)
+        self.summary_layout.addSpacing(4)
+        self.summary_layout.addWidget(self.words_lbl, 0, Qt.AlignmentFlag.AlignRight)
+        # The rows are shown / hidden by _recalc_totals(), always in this fixed order:
+        # Subtotal, Discount, Taxable Amount, Tax, Round Off, Grand Total, Total Paid, Balance Due.
         wrap.addWidget(self.summary_box)
         parent.addLayout(wrap)
+
+    def _tax_pool_row(self, index: int) -> _SummaryRow:
+        """The `index`-th tax line of the totals box (the pool grows when an invoice has many GST rates)."""
+        while len(self._tax_pool) <= index:
+            row = _SummaryRow()
+            row.setVisible(False)
+            self.summary_layout.insertWidget(self.summary_layout.indexOf(self.row_round), row)
+            self._summary_rows.insert(self._summary_rows.index(self.row_round), row)
+            self._tax_pool.append(row)
+        return self._tax_pool[index]
 
     def _section_save_bar(self, parent: QVBoxLayout):
         row = QHBoxLayout()
@@ -6494,16 +7692,19 @@ class InvoiceFormFrame(QWidget):
         chain: List[QWidget] = [
             self.top_back_btn, self.client_edit, self.client_contact_text, self.client_gstin_entry,
             self.your_name_entry, self.your_contact_text,
-            self.invoice_number_entry, self.invoice_date_edit, self.payment_terms_entry,
-            self.no_charge_toggle, self.show_qr_toggle,
-            self.gst_toggle, self.tax_rate_entry, self.gst_type_combo, self.global_discount_entry, self.disc_type_combo,
+            self.invoice_number_entry, self.invoice_date_edit, self.due_combo, self.due_date_edit,
+            self.payment_terms_entry, self.po_entry,
+            self.no_charge_toggle, self.show_qr_toggle, self.reverse_toggle,
+            self.gst_toggle, self.tax_mode_combo, self.tax_rate_entry, self.gst_type_combo, self.place_combo,
+            self.global_discount_entry, self.disc_type_combo, self.round_off_toggle,
         ]
         for r in self.item_rows:
             chain.extend(r.focus_widgets())
         chain.append(self.add_item_btn)
         for r in self.payment_rows:
             chain.extend(r.focus_widgets())
-        chain.extend([self.add_payment_btn, self.notes_text, self.save_btn, self.back_btn])
+        chain.extend([self.add_payment_btn, self.customer_notes_text, self.terms_text, self.notes_text,
+                      self.save_btn, self.back_btn])
         for first, second in zip(chain, chain[1:]):
             QWidget.setTabOrder(first, second)
 
@@ -6537,6 +7738,10 @@ class InvoiceFormFrame(QWidget):
     def _collect_items(self) -> List[Dict]:
         return [r.values() for r in self.item_rows]
 
+    def _filled_items(self) -> List[Dict]:
+        """The lines that make up the invoice: a row nothing has been entered in is ignored (live totals and save)."""
+        return [i for i in self._collect_items() if i["title"] or i["description"] or i["amount"]]
+
     def _collect_payments(self) -> List[Dict]:
         return [r.values() for r in self.payment_rows]
 
@@ -6552,15 +7757,23 @@ class InvoiceFormFrame(QWidget):
                 "your_name":      self.your_name_entry.text().strip(),
                 "your_contact":   self.your_contact_text.toPlainText().strip(),
                 "invoice_date":   date_edit_db(self.invoice_date_edit),
+                "due_date":       date_edit_db(self.due_date_edit) if self._due_on() else None,
                 "payment_terms":  self.payment_terms_entry.text().strip(),
+                "po_number":      self.po_entry.text().strip(),
                 "notes":          self.notes_text.toPlainText().strip(),
+                "customer_notes": self.customer_notes_text.toPlainText().strip(),
+                "terms":          self.terms_text.toPlainText().strip(),
                 "no_charge":      self.no_charge_toggle.isChecked(),
                 "show_qr":        self.show_qr_toggle.isChecked(),
+                "reverse":        self.reverse_toggle.isChecked(),
                 "gst":            self.gst_toggle.isChecked(),
+                "tax_mode":       self.tax_mode_combo.currentData(),
                 "tax_rate":       safe_float(self.tax_rate_entry.text()),
                 "gst_type":       self.gst_type_combo.currentText(),
+                "place":          self.place_combo.currentText().strip(),
                 "g_disc":         safe_float(self.global_discount_entry.text()),
                 "g_disc_type":    self.disc_type_combo.currentText(),
+                "round_off":      self.round_off_toggle.isChecked(),
                 "items":          self._collect_items(),
                 "payments":       self._collect_payments(),
             }
@@ -6594,18 +7807,19 @@ class InvoiceFormFrame(QWidget):
     def _recalc_totals(self, *_):
         """Calculates live totals and updates the summary box.
 
-        Rows are only shown / hidden -- never re-created -- so the summary always lays out in the fixed, correct
-        order (Subtotal, Discount, Taxable Amount, Tax, Grand Total, Total Paid, Balance Due) whichever rows were
-        visible on the previous call.
+        Rows are only shown / hidden -- never re-created (the tax lines excepted: they are made when an invoice first
+        needs them) -- so the summary always lays out in the fixed, correct order (Subtotal, Discount, Taxable Amount,
+        Tax, Round Off, Grand Total, Total Paid, Balance Due) whichever rows were visible on the previous call.
 
-        Balance/status math goes through DatabaseManager.compute_payment_status() -- the same function
-        _recompute_one() uses when saving and the PDF uses when printing -- so this live preview can never show a
-        different number or status than what actually gets saved.
+        The figures come from DatabaseManager.calculate_totals() -- the engine the database layer and the PDF use --
+        and the balance / status from DatabaseManager.compute_payment_status(), so this live preview can never show a
+        different number or status than what actually gets saved and printed.
         """
         if self._loading:
             return
         for row in self._summary_rows:
             row.setVisible(False)
+        self.words_lbl.setVisible(False)
 
         if self.no_charge_toggle.isChecked():
             self.row_subtotal.set(fmt_money(0))
@@ -6617,17 +7831,21 @@ class InvoiceFormFrame(QWidget):
             self._set_badge(STATUS_DISPLAY_LABELS[InvoiceStatus.COMPLIMENTARY.value], STATUS_TONES["Complimentary"])
             return
 
-        items    = self._collect_items()
+        items    = self._filled_items()
         is_gst   = self.gst_toggle.isChecked()
         tax_rate = safe_float(self.tax_rate_entry.text()) if is_gst else 0.0
         g_disc   = safe_float(self.global_discount_entry.text())
+        gst_type = self.gst_type_combo.currentText()
 
-        totals = DatabaseManager.calculate_totals(items, tax_rate, g_disc, self.disc_type_combo.currentText())
+        totals = DatabaseManager.calculate_totals(
+            items, tax_rate, g_disc, self.disc_type_combo.currentText(),
+            tax_mode=TAX_MODE_PER_ITEM if self._per_item_active() else TAX_MODE_OVERALL,
+            gst_type=gst_type, round_off=self.round_off_toggle.isChecked())
         paid   = sum(r.values()["amount"] for r in self.payment_rows)
         status, balance, credit = DatabaseManager.compute_payment_status(totals["grand_total"], paid)
 
-        # Grand Total = Subtotal - Discount + Tax: already true here, since calculate_totals() derives grand_total
-        # as taxable + cgst + sgst, where taxable is subtotal minus total_discount.
+        # Grand Total = Subtotal - Discount + Tax (+ Round Off): already true here, since calculate_totals() derives
+        # grand_total as taxable + cgst + sgst, where taxable is subtotal minus total_discount.
         self.row_subtotal.set(fmt_money(totals["subtotal"]))
         self.row_taxable.set(fmt_money(totals["taxable"]))
         self.row_grand_total.set(fmt_money(totals["grand_total"]))
@@ -6652,33 +7870,45 @@ class InvoiceFormFrame(QWidget):
 
         # 3. Taxable Amount -- Subtotal minus Discount, the base tax is actually calculated on. Only worth showing
         # once there's a discount or tax to make it different from the Subtotal above.
-        if totals["total_discount"] > 0 or (is_gst and tax_rate > 0):
+        taxed = [g for g in totals["tax_groups"] if g["rate"] > 0] if is_gst else []
+        if totals["total_discount"] > 0 or taxed:
             self.row_taxable.setVisible(True)
 
-        # 4. Tax -- CGST/SGST is split equally and shown as two separate lines (e.g. 18% -> CGST 9% + SGST 9%);
-        # IGST is shown as a single line at the full rate. calculate_totals() always splits the tax into equal
-        # cgst/sgst halves regardless of type, so IGST's single amount is just those two halves added back together.
-        if is_gst and tax_rate > 0:
-            half_rate = tax_rate / 2.0
-            if self.gst_type_combo.currentText() == "IGST":
-                self.row_igst.set(fmt_money(totals["cgst"] + totals["sgst"]), f"IGST ({tax_rate:g}%):")
-                self.row_igst.setVisible(True)
+        # 4. Tax -- one block per GST rate (a single one unless GST is charged per item). CGST/SGST is split equally
+        # and shown as two separate lines (e.g. 18% -> CGST 9% + SGST 9%); IGST is a single line at the full rate.
+        line = 0
+        for g in taxed:
+            if gst_type == "IGST":
+                lines = [(f"IGST ({g['rate']:g}%):", g["tax"])]
             else:
-                self.row_cgst.set(fmt_money(totals["cgst"]), f"CGST ({half_rate:g}%):")
-                self.row_sgst.set(fmt_money(totals["sgst"]), f"SGST ({half_rate:g}%):")
-                self.row_cgst.setVisible(True)
-                self.row_sgst.setVisible(True)
+                lines = [(f"CGST ({g['rate'] / 2.0:g}%):", g["cgst"]), (f"SGST ({g['rate'] / 2.0:g}%):", g["sgst"])]
+            for label, amount in lines:
+                tax_row = self._tax_pool_row(line)
+                tax_row.set(fmt_money(amount), label)
+                tax_row.setVisible(True)
+                line += 1
 
-        # 5. Grand Total always shows.
+        # 5. Round Off -- only when the total was actually rounded.
+        if totals["round_off"]:
+            self.row_round.set(f"{'+' if totals['round_off'] > 0 else '−'} {fmt_money(abs(totals['round_off']))}")
+            self.row_round.setVisible(True)
+
+        # 6. Grand Total always shows.
         self.row_grand_total.setVisible(True)
 
-        # 6. Total Paid -- only when something has actually been paid.
+        # 7. Total Paid -- only when something has actually been paid.
         if paid > 0:
             self.row_paid.set(f"− {fmt_money(paid)}")
             self.row_paid.setVisible(True)
 
-        # 7. Balance Due (or Advance / Credit) always shows last.
+        # 8. Balance Due (or Advance / Credit) always shows last.
         self.row_balance.setVisible(True)
+
+        # The total in words, when Settings asks for it (rupee invoices only).
+        if CONFIG.get("pdf_settings", {}).get("amount_in_words", False):
+            words = amount_in_words(totals["grand_total"], CURRENCY_SYMBOL)
+            self.words_lbl.setText(words)
+            self.words_lbl.setVisible(bool(words))
 
         # Status badge -- UNPAID / PARTIALLY PAID / PAID / OVERPAID, from the exact same status
         # compute_payment_status() just returned, so the badge can never disagree with the numbers above it.
@@ -6689,6 +7919,8 @@ class InvoiceFormFrame(QWidget):
     # ------------------------------------------------------------------ #
     def _refresh_suggestions(self):
         self._catalog_cache = self.db_manager.get_all_catalog_items()
+        self._catalog_exact = {c["title"]: c for c in self._catalog_cache}
+        self._catalog_fold  = {c["title"].casefold(): c for c in self._catalog_cache}
         self._client_cache  = self.db_manager.get_all_clients()
         self.client_edit.set_values([c["name"] for c in self._client_cache])
         titles = [c["title"] for c in self._catalog_cache]
@@ -6697,7 +7929,9 @@ class InvoiceFormFrame(QWidget):
 
     def refresh_after_settings_change(self):
         self._refresh_suggestions()
-        self._recalc_totals()                  # the currency symbol may have changed
+        for row in self.item_rows:
+            row.refresh_line()                 # the currency symbol may have changed
+        self._recalc_totals()
 
     def on_show(self, *args):
         invoice_id: Optional[str] = args[0] if args else None
@@ -6717,6 +7951,7 @@ class InvoiceFormFrame(QWidget):
                 self.payment_terms_entry.setText(CONFIG.get("payment_details", {}).get("payment_terms", ""))
                 self.your_name_entry.setText(compose_your_name(CONFIG))
                 self.your_contact_text.setPlainText(compose_your_contact(CONFIG))
+                self.terms_text.setPlainText(str(CONFIG.get("pdf_settings", {}).get("default_terms", "") or ""))
                 self._add_item_row()
         finally:
             self._loading = False
@@ -6761,6 +7996,16 @@ class InvoiceFormFrame(QWidget):
         self.gst_type_combo.setCurrentText("CGST/SGST")
         self.global_discount_entry.setText("0")
         self.disc_type_combo.setCurrentText("amount")
+        self.tax_mode_combo.setCurrentIndex(0)
+        self.round_off_toggle.setChecked(False)
+        self.place_combo.setCurrentIndex(-1)
+        self.place_combo.setEditText("")
+        self._place_auto = False
+        self._show_stored_due(None, None)
+        self.po_entry.clear()
+        self.reverse_toggle.setChecked(False)
+        self.customer_notes_text.clear()
+        self.terms_text.clear()
         self._set_badge("", "secondary")
         self._restore_tab_order()
 
@@ -6791,10 +8036,23 @@ class InvoiceFormFrame(QWidget):
         self.gst_type_combo.setCurrentText(d.get("gst_type") or "CGST/SGST")
         self.global_discount_entry.setText(_num_text(d.get("global_discount_value")))
         self.disc_type_combo.setCurrentText(d.get("global_discount_type") or "amount")
+        self.tax_mode_combo.setCurrentIndex(max(0, self.tax_mode_combo.findData(d.get("tax_mode") or TAX_MODE_OVERALL)))
+        self.round_off_toggle.setChecked(bool(d.get("round_off")))
+        self.place_combo.setEditText(d.get("place_of_supply") or "")
+        self._place_auto = False
+        self.po_entry.setText(d.get("po_number") or "")
+        self.reverse_toggle.setChecked(bool(d.get("reverse_charge")))
+        self._show_stored_due(d.get("invoice_date"), d.get("due_date"))
+        self.customer_notes_text.setPlainText(d.get("customer_notes") or "")
+        self.terms_text.setPlainText(d.get("terms") or "")
 
-        for item in json.loads(d.get("items") or "[]"):
-            self._add_item_row(item.get("title", ""), item.get("description", ""),
-                               safe_float(item.get("amount")), safe_float(item.get("discount")))
+        try:
+            stored_items = json.loads(d.get("items") or "[]")
+        except (TypeError, ValueError):
+            stored_items = []
+        for item in stored_items if isinstance(stored_items, list) else []:
+            if isinstance(item, dict):
+                self._add_item_row(item)
         if not self.item_rows:
             self._add_item_row()
 
@@ -6852,17 +8110,35 @@ class InvoiceFormFrame(QWidget):
         if self.disc_type_combo.currentText() == "%" and g_disc > 100:
             return self._error("Validation", "A percentage discount cannot exceed 100%.")
 
-        items = [i for i in self._collect_items() if i["title"] or i["description"] or i["amount"]]
+        due_date: Optional[str] = None
+        if self._due_on() and not no_charge:
+            due_date = date_edit_db(self.due_date_edit)
+            if due_date < inv_date:
+                return self._error("Validation", "The due date cannot be earlier than the invoice date.")
+
+        items = self._filled_items()
         if not no_charge and not items:
             return self._error("Validation", "Add at least one item to the invoice.")
+        per_item = self._per_item_active()
         for i in items:
+            name = i["title"] or "an item"
             if i["amount"] < 0 or i["discount"] < 0:
                 return self._error("Validation", "Item amounts and discounts cannot be negative.")
+            if i.get("qty", 1.0) <= 0:
+                return self._error("Validation", f'The quantity of "{name}" must be greater than zero.')
             if i["discount"] > i["amount"]:
                 return self._error(
                     "Validation",
-                    f'The discount on "{i["title"] or "an item"}" cannot be larger than its amount.',
+                    f'The discount on "{name}" cannot be larger than its amount.',
                 )
+        for i in items:
+            if i.get("hsn") and not 2 <= len(i["hsn"]) <= 8:
+                return self._error("Validation", f'The HSN / SAC code of "{i["title"] or "an item"}" must be 2 to 8 digits.')
+        if per_item:
+            for row in self.item_rows:
+                if row.is_filled() and not 0 <= row.raw_gst() <= 100:
+                    return self._error("Validation", f'The GST rate of "{row.title_edit.text().strip() or "an item"}" '
+                                                     "must be between 0 and 100.")
 
         payments = []
         if not no_charge:
@@ -6882,6 +8158,14 @@ class InvoiceFormFrame(QWidget):
             "global_discount_value": g_disc, "global_discount_type": self.disc_type_combo.currentText(),
             "advance_amount": 0.0, "advance_date": None, "gst_type": self.gst_type_combo.currentText(),
             "notes": self.notes_text.toPlainText().strip(),
+            "tax_mode": TAX_MODE_PER_ITEM if per_item else TAX_MODE_OVERALL,
+            "round_off": int(self.round_off_toggle.isChecked() and not no_charge),
+            "place_of_supply": self.place_combo.currentText().strip(),
+            "po_number": self.po_entry.text().strip(),
+            "due_date": due_date,
+            "reverse_charge": int(self.reverse_toggle.isChecked()),
+            "customer_notes": self.customer_notes_text.toPlainText().strip(),
+            "terms": self.terms_text.toPlainText().strip(),
         }
 
         is_update = self.editing_id is not None
@@ -6893,8 +8177,10 @@ class InvoiceFormFrame(QWidget):
         if bill_to:
             self.db_manager.save_client(bill_to, data["client_contact"], data["client_gstin"])
         for item in items:
-            if item["title"]:
-                self.db_manager.save_catalog_item(item["title"], item["description"], item["amount"])
+            if item["title"]:                      # what this line teaches the catalog: its rate in this unit, HSN/SAC, GST rate
+                self.db_manager.remember_catalog_item(item["title"], item["description"],
+                                                      safe_float(item.get("rate", item["amount"])),
+                                                      item.get("unit", ""), item.get("hsn", ""), item.get("tax_rate"))
 
         Messagebox.show_info("Saved", f"Invoice #{inv_num} saved successfully.", parent=self.controller)
         self._initial_snapshot = self._snapshot()
