@@ -1,13 +1,17 @@
 # =============================================================================
-#  Vyaprix By EllowLabs  -  Professional Edition v1.8   (PySide6 Edition)
+#  Vyaprix By EllowLabs  -  Professional Edition   (PySide6 Edition)
 #  Python 3.15  -  Native Lazy Imports (PEP 810)
 #
 #  Single-file desktop invoicing application: PySide6 (Qt 6) user interface,
 #  SQLite storage, ReportLab PDF generation, Qt's own PDF viewer and printing.
 #
-#  Needs:  Python 3.15+, PySide6 (with QtPdf + QtPrintSupport), reportlab, pypdf
-#          python-barcode is optional (invoices simply print without a barcode)
-#  Run:    python Vyaprix.py
+#  Version: the version, the build number and the release notes all come from
+#           the CHANGELOG below (About -> What's new shows the same list).
+#  Needs:   Python 3.15+, PySide6 (with QtPdf + QtPrintSupport), reportlab, pypdf
+#           python-barcode is optional (invoices simply print without a barcode)
+#           NotoSans-Regular.ttf / NotoSans-Bold.ttf in a "fonts" folder and the
+#           logo images in an "assets" folder, next to this file (as before)
+#  Run:     python Vyaprix.py
 # =============================================================================
 
 # --- Standard Library: Eager Imports ---
@@ -18,7 +22,7 @@ import re
 import sys
 
 from contextlib import closing
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from decimal import Decimal, ROUND_DOWN, ROUND_HALF_UP
 from enum import Enum
 from logging.handlers import RotatingFileHandler
@@ -54,11 +58,11 @@ from PySide6.QtGui import (
     QRegularExpressionValidator, QShortcut, QValidator,
 )
 from PySide6.QtWidgets import (
-    QAbstractItemView, QAbstractScrollArea, QAbstractSpinBox, QApplication, QCheckBox, QComboBox,
-    QCompleter, QDateEdit, QDialog, QFileDialog, QFormLayout, QFrame, QGridLayout, QHBoxLayout,
-    QHeaderView, QLabel, QLayout, QLineEdit, QMainWindow, QMenu, QMessageBox, QPlainTextEdit,
-    QProgressBar, QPushButton, QScrollArea, QSizePolicy, QStackedWidget, QTabWidget, QTableWidget,
-    QTableWidgetItem, QTableWidgetSelectionRange, QToolButton, QVBoxLayout, QWidget,
+    QAbstractItemView, QAbstractScrollArea, QAbstractSpinBox, QApplication, QButtonGroup, QCheckBox,
+    QColorDialog, QComboBox, QCompleter, QDateEdit, QDialog, QFileDialog, QFormLayout, QFrame, QGridLayout,
+    QHBoxLayout, QHeaderView, QLabel, QLayout, QLineEdit, QMainWindow, QMenu, QMessageBox, QPlainTextEdit,
+    QProgressBar, QPushButton, QRadioButton, QScrollArea, QSizePolicy, QStackedWidget, QTabWidget,
+    QTableWidget, QTableWidgetItem, QTableWidgetSelectionRange, QToolButton, QVBoxLayout, QWidget,
 )
 
 # --- ReportLab: Lazy Imports ---
@@ -68,12 +72,19 @@ lazy from reportlab.lib.fonts import addMapping
 lazy from reportlab.lib.pagesizes import A4
 lazy from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 lazy from reportlab.lib.units import cm
+lazy from reportlab.lib.utils import simpleSplit
 lazy from reportlab.pdfbase import pdfmetrics
 lazy from reportlab.pdfbase.ttfonts import TTFont
+lazy from reportlab.pdfgen.canvas import Canvas
 lazy from reportlab.platypus import (
+    BaseDocTemplate,
+    CondPageBreak,
+    Flowable,
+    Frame,
     Image,
+    KeepTogether,
+    PageTemplate,
     Paragraph,
-    SimpleDocTemplate,
     Spacer,
     Table,
     TableStyle,
@@ -105,10 +116,88 @@ except ImportError:
 # =============================================================================
 #  1. APPLICATION METADATA
 # =============================================================================
+@dataclass(frozen=True)
+class Release:
+    """One release of Vyaprix: its version, the day it was handed over, a headline and every change made in it."""
+    version: str
+    date: str
+    title: str
+    changes: Tuple[str, ...]
+
+
+# The file this project started from: Vyaprix v1.5, build 1.5.2 (the Tkinter build of 22 October 2026).
+BASE_VERSION: str       = "v1.5"
+BASE_BUILD_VERSION: str = "1.5.2"
+
+# Newest first. EVERY change made to the application adds a line below -- and a new Release whenever a new build is handed
+# over. APP_VERSION, the build number, the release date and the "What's new" window all follow from this list, so they
+# can never disagree: the build number is "<version>.<number of changes made since the uploaded v1.5 / build 1.5.2>".
+CHANGELOG: Tuple[Release, ...] = (
+    Release("v2.3", "12 November 2026", "One GST line, professional A4 invoices, sharp and responsive on every screen", (
+        "CGST and SGST (or IGST) appear once on the invoice form and on the PDF -- one combined line each, however many "
+        "GST rates the items use. Hover the line on the form to see the split by rate.",
+        "A \"GST summary\" on the PDF shows the taxable value and the tax at each rate whenever an invoice uses more than "
+        "one rate.",
+        "The invoice PDF is redesigned for A4: header, bill-to and invoice details, items, totals, payment box and "
+        "signature on even margins, in all four templates.",
+        "Long invoices run on to as many A4 pages as they need: the item headings repeat on every page, no line is "
+        "ever cut in two, and each page carries the invoice number and \"Page x of y\".",
+        "Auto-fit: an invoice that runs only a few lines onto an extra page is fitted onto fewer pages -- the gaps "
+        "tighten a little, the type stays the same size.",
+        "The item columns size themselves to what is in them -- quantity, unit, rate, HSN / SAC, GST % and amounts never "
+        "wrap or get cut, and long descriptions wrap inside their cell.",
+        "Very large amounts and very long names, addresses and notes still fit inside the page.",
+        "The template miniatures in Settings are redrawn to match the new layouts.",
+        "The application is DPI aware: a Windows scale of 125 % or 150 % is followed exactly, the logo, icons and template "
+        "miniatures stay sharp, and the invoice preview and Settings re-sharpen when you move them to another monitor.",
+        "The main window opens at a size that fits your screen, cannot be made too small to use, and fits itself again "
+        "when you move it to a smaller monitor.",
+        "The sidebar shrinks to icons in a narrow window and drops the logo in a short one, so every screen stays usable "
+        "as you resize.",
+        "The version, the build number and the \"What's new\" list all come from one change log: the build number counts "
+        "every change made since v1.5 (build 1.5.2).",
+    )),
+    Release("v2.2", "10 November 2026", "Invoice templates", (
+        "Four invoice templates -- Classic, Modern, Minimal and Corporate -- picked in Settings > Payment & PDF, with a "
+        "miniature of each and a \"Preview sample invoice\" button.",
+        "A brand colour for Modern, Minimal and Corporate: ten ready colours, or any colour of your own.",
+        "A template can be chosen for a single invoice (\"PDF Template\" on the invoice form) and is remembered with it.",
+    )),
+    Release("v2.1", "9 November 2026", "Professional invoicing", (
+        "Every invoice line has a quantity, a unit and a rate (250 Nos x Rs. 50); the line amount is worked out for you.",
+        "One catalog item can be sold in several units, each with its own rate, and Vyaprix remembers the rate per unit.",
+        "GST for the whole invoice or a different GST rate for every item, chosen per invoice.",
+        "HSN / SAC code on every item, saved with the catalog item.",
+        "Item discounts as an amount or a percentage, besides the overall discount.",
+        "The place of supply decides CGST + SGST or IGST (a customer's GSTIN fills it in).",
+        "Due date (on receipt, 7, 15, 30 ... days, or a date you pick), customer PO / reference number and a "
+        "reverse-charge flag.",
+        "Optional round off of the invoice total to the nearest rupee.",
+        "Notes for the customer and Terms & Conditions printed on the invoice, with default terms set in Settings.",
+        "The invoice total in words (Rupees ... Only), switched on in Settings.",
+        "The catalog shows and edits unit, HSN / SAC, GST % and the other units an item is sold in.",
+        "The PDF prints quantity, unit, rate, discount and GST columns whenever an invoice uses them; older invoices "
+        "print as before.",
+        "Databases and backups made by earlier versions upgrade themselves; saved invoices keep exactly their totals.",
+        "Faster entry: Enter in the last field of the last line adds a new line.",
+    )),
+    Release("v2.0", "6 November 2026", "Rebuilt on PySide6", (
+        "The whole interface is rebuilt on PySide6 (Qt 6); Tkinter, ttkbootstrap and PyMuPDF are no longer needed.",
+        "Runs on Python 3.15 and uses PEP 810 lazy imports, so the application starts faster.",
+        "Invoice preview uses Qt's own PDF viewer (zoom, page navigation, print, share).",
+        "Bulk PDF merging uses pypdf instead of PyMuPDF.",
+        "The eight colour themes, including the dark ones, are drawn from one palette each.",
+        "Every screen of the Tk build is kept: Dashboard, invoice form, Clients, Catalog, Settings, About, Keyboard "
+        "shortcuts and the splash screen.",
+        "Windows and dialogs are limited to the size of the screen they open on.",
+    )),
+)
+CHANGE_COUNT: int = sum(len(release.changes) for release in CHANGELOG)
+
 APP_NAME: str          = "Vyaprix"
-APP_VERSION: str       = "v1.8"
-APP_BUILD_VERSION: str = "1.8.8"
-APP_RELEASE_DATE: str  = "November 9, 2026"
+APP_VERSION: str       = CHANGELOG[0].version
+APP_BUILD_VERSION: str = f"{APP_VERSION.lstrip('v')}.{CHANGE_COUNT}"
+APP_RELEASE_DATE: str  = CHANGELOG[0].date
 APP_TAGLINE: str       = "Business Made Smarter."
 
 APP_ATTRIBUTION: str = (
@@ -338,7 +427,8 @@ def get_default_config() -> Dict[str, Any]:
         "pdf_settings":    {"footer_message": "Generated with Vyaprix • Business Made Smarter.", "always_show_qr_code": False,
                             "amount_in_words": False,           # print "Rupees ... Only" under the invoice total
                             "default_terms": "",                # terms & conditions every new invoice starts with
-                            "template": "classic"},             # the invoice look (see PDF_TEMPLATES)
+                            "template": "classic",              # the invoice look (see PDF_TEMPLATES)
+                            "accent_color": ""},                # brand colour for the templates that take one ("" = the template's own)
         "currency_symbol": "₹",
     }
 
@@ -693,7 +783,7 @@ def compose_your_contact(config: Dict[str, Any]) -> str:
     leave blank lines on the PDF.
 
     Deliberately does NOT include the GSTIN: it already has its own
-    dedicated line elsewhere on the same invoice (see _build_address() /
+    dedicated line elsewhere on the same invoice (see _build_parties() /
     company_details.gstin), and printing the same GSTIN a second time
     here is confusing, not helpful -- that duplication was a real bug in
     an earlier build.
@@ -830,6 +920,7 @@ class DatabaseManager:
                     "reverse_charge":       "INTEGER DEFAULT 0",
                     "customer_notes":       "TEXT DEFAULT ''",            # printed on the invoice (`notes` is internal)
                     "terms":                "TEXT DEFAULT ''",            # terms & conditions, printed
+                    "pdf_template":         "TEXT DEFAULT ''",            # this invoice's own look ('' = the Settings default)
                 }.items():
                     if col not in existing:
                         c.execute(f"ALTER TABLE invoices ADD COLUMN {col} {ctype}")
@@ -1765,46 +1856,184 @@ def prompt_and_backup_database(parent: Optional[QWidget] = None) -> None:
 # =============================================================================
 #  10. PDF GENERATION
 # =============================================================================
+_HEX_COLOR = re.compile(r"#[0-9A-Fa-f]{6}")
+
+
+def gst_breakdown_text(taxed: List[Dict[str, float]], key: str, rate_share: float) -> str:
+    """One line per GST rate for a tooltip: "9% on 1,000.00 = 90.00". `key` is the tax figure to print ("cgst",
+    "sgst" or "tax") and `rate_share` the part of the group's rate that figure stands for (half for CGST / SGST)."""
+    return "\n".join(f"{g['rate'] * rate_share:g}% on {fmt_money(g['taxable'])} = {fmt_money(g[key])}" for g in taxed)
+
+
+def normalize_hex_color(value: Any) -> str:
+    """'#2563eb' -> '#2563EB'; anything that is not a #RRGGBB colour -> ''."""
+    text = str(value or "").strip()
+    return text.upper() if _HEX_COLOR.fullmatch(text) else ""
+
+
+def _pdf_rgb(color: str) -> Tuple[int, int, int]:
+    return int(color[1:3], 16), int(color[3:5], 16), int(color[5:7], 16)
+
+
+def _pdf_mix(color: str, other: str, share: float) -> str:
+    """`color` blended with `other`: a share of 0 is all `color`, 1 is all `other`."""
+    return "#%02X%02X%02X" % tuple(round(a + (b - a) * share) for a, b in zip(_pdf_rgb(color), _pdf_rgb(other)))
+
+
+def _pdf_tint(color: str, share: float) -> str:
+    """`color` lightened towards white."""
+    return _pdf_mix(color, "#FFFFFF", share)
+
+
+def _pdf_readable_on(color: str) -> str:
+    """The text colour to print on `color`: white on a dark fill, near-black on a light one."""
+    def linear(channel: int) -> float:
+        v = channel / 255.0
+        return v / 12.92 if v <= 0.03928 else ((v + 0.055) / 1.055) ** 2.4
+    r, g, b = (linear(c) for c in _pdf_rgb(color))
+    return "#111827" if 0.2126 * r + 0.7152 * g + 0.0722 * b > 0.18 else "#FFFFFF"
+
+
 @dataclass(frozen=True)
 class PDFTemplate:
-    """The look of a printed invoice: colours and line styles only -- what is printed (and where) is the same for
-    every template. CLASSIC holds the colours the invoice has always been printed in."""
+    """The look of a printed invoice: colours, line styles and the shape of the letterhead -- what is printed (and
+    where) is the same for every template. Every field defaults to the CLASSIC look, the one invoices have always
+    had, so a template lists only what it changes. A template with a `recipe` takes a brand colour: with_accent()
+    recomputes its colours around it (the recipes are below)."""
     key: str
     label: str
     blurb: str = ""
-    name_color: str  = "#1F2937"      # company name
-    title_color: str = "#111827"      # INVOICE / RECEIPT
-    rule: str        = "#E5E7EB"      # line under the letterhead
-    meta_bg: str     = "#F9FAFB"      # the invoice-number / date box
-    meta_border: str = "#E5E7EB"
-    head_bg: str     = "#1F2937"      # item table header
-    head_fg: str     = "#FFFFFF"
-    row_line: str    = "#F3F4F6"      # line between item rows
-    end_line: str    = "#D1D5DB"      # line under the last item row
-    zebra: str       = ""             # fill of every second item row ("" = none)
-    grid: bool       = False          # a full grid around the item cells
-    pay_head_bg: str = "#374151"      # payment history header
+    # --- colours --------------------------------------------------------------------------------------------
+    name_color: str    = "#1F2937"      # company name
+    tagline_color: str = "#6B7280"      # the line under the company name
+    title_color: str   = "#111827"      # INVOICE / RECEIPT
+    label_color: str   = "#6B7280"      # FROM: / BILL TO:
+    rule: str          = "#E5E7EB"      # line under the letterhead
+    meta_bg: str       = "#F9FAFB"      # the invoice-number / date box ("" = no fill)
+    meta_border: str   = "#E5E7EB"      # its outline ("" = none)
+    meta_lines: str    = ""             # hairlines above and below it ("" = none)
+    head_bg: str       = "#1F2937"      # item table header ("" = no fill)
+    head_fg: str       = "#FFFFFF"
+    head_rule: str     = ""             # line under the item header ("" = none)
+    row_line: str      = "#F3F4F6"      # line between item rows
+    end_line: str      = "#D1D5DB"      # line under the last item row ...
+    end_width: float   = 2              # ... and its weight
+    zebra: str         = ""             # fill of every second item row ("" = none)
+    grid: bool         = False          # a full grid around the item cells ...
+    grid_line: str     = "#D1D5DB"      # ... in this colour
+    pay_head_bg: str   = "#374151"      # payment history header
+    pay_head_fg: str   = "#FFFFFF"
+    total_bg: str      = ""             # fill behind the "Invoice Total" row ("" = none)
+    total_fg: str      = "#FFFFFF"      # ... and its text
+    total_rule: str    = ""             # line above that row ("" = none)
+    # --- shape ----------------------------------------------------------------------------------------------
+    header: str          = "split"      # "split": name left, title right, a rule below  |  "band": one coloured band
+    band_bg: str         = ""           # fill of the band
+    bar: str             = ""           # colour of a strip across the top edge of every page ("" = none)
+    name_size: float     = 16
+    title_size: float    = 18
+    title_leading: float = 12
+    rule_width: float    = 1
+    # --- brand colour ---------------------------------------------------------------------------------------
+    accent: str = ""                    # the template's accent colour ("" = it takes no brand colour)
+    recipe: str = ""                    # how its colours follow the accent: "modern" | "minimal" | "corporate"
+
+    @property
+    def brandable(self) -> bool:
+        return self.recipe in _RECIPES and bool(self.accent)
+
+    def with_accent(self, accent: Any = "") -> "PDFTemplate":
+        """This template in the brand colour `accent` (#RRGGBB); without a valid colour it keeps its own accent.
+        A template with no recipe takes no brand colour and is returned unchanged."""
+        recipe = _RECIPES.get(self.recipe)
+        if recipe is None:
+            return self
+        color = normalize_hex_color(accent) or self.accent
+        return replace(self, accent=color, **recipe(color))
 
 
-PDF_TEMPLATE_CLASSIC = PDFTemplate("classic", "Classic", "The look Vyaprix invoices have always had.")
-PDF_TEMPLATES: Dict[str, PDFTemplate] = {PDF_TEMPLATE_CLASSIC.key: PDF_TEMPLATE_CLASSIC}
+def _recipe_modern(a: str) -> Dict[str, Any]:
+    on = _pdf_readable_on(a)
+    return dict(title_color=a, label_color=a, rule=a, bar=a, meta_bg=_pdf_tint(a, 0.94), meta_border=_pdf_tint(a, 0.80),
+                head_bg=a, head_fg=on, row_line=_pdf_tint(a, 0.86), end_line=a, zebra=_pdf_tint(a, 0.965),
+                pay_head_bg=a, pay_head_fg=on, total_bg=a, total_fg=on)
+
+
+def _recipe_minimal(a: str) -> Dict[str, Any]:
+    return dict(title_color=a, rule=a, meta_lines=_pdf_tint(a, 0.70), head_rule=a, end_line=a, total_rule=a)
+
+
+def _recipe_corporate(a: str) -> Dict[str, Any]:
+    on = _pdf_readable_on(a)
+    return dict(band_bg=a, name_color=on, title_color=on, tagline_color=_pdf_mix(on, a, 0.25), label_color=a,
+                meta_bg=_pdf_tint(a, 0.95), meta_border=_pdf_tint(a, 0.65), head_bg=a, head_fg=on, grid_line=_pdf_tint(a, 0.55),
+                end_line=a, pay_head_bg=a, pay_head_fg=on, total_bg=a, total_fg=on)
+
+
+_RECIPES: Dict[str, Callable[[str], Dict[str, Any]]] = {
+    "modern": _recipe_modern, "minimal": _recipe_minimal, "corporate": _recipe_corporate,
+}
+
+PDF_TEMPLATE_CLASSIC = PDFTemplate(
+    "classic", "Classic", "The look Vyaprix invoices have always had: a plain letterhead and a dark table header.")
+PDF_TEMPLATE_MODERN = PDFTemplate(
+    "modern", "Modern", "A bold accent colour: a colour bar on every page, a coloured table header, tinted rows and a "
+                        "coloured total.",
+    name_color="#111827", title_size=22, title_leading=26, rule_width=2,
+    accent="#2563EB", recipe="modern").with_accent()
+PDF_TEMPLATE_MINIMAL = PDFTemplate(
+    "minimal", "Minimal", "Clean lines and plenty of white space. Light on ink, and it photocopies well.",
+    name_color="#111827", name_size=15, title_size=14, title_leading=18, rule_width=0.6, meta_bg="", meta_border="",
+    head_bg="", head_fg="#111827", row_line="#E5E7EB", end_width=0.8, pay_head_bg="#F3F4F6", pay_head_fg="#111827",
+    accent="#111827", recipe="minimal").with_accent()
+PDF_TEMPLATE_CORPORATE = PDFTemplate(
+    "corporate", "Corporate", "A formal look: a coloured header band, a ruled table and a boxed total.",
+    header="band", name_size=17, title_size=20, title_leading=24, grid=True,
+    accent="#1E3A5F", recipe="corporate").with_accent()
+
+PDF_TEMPLATES: Dict[str, PDFTemplate] = {t.key: t for t in (
+    PDF_TEMPLATE_CLASSIC, PDF_TEMPLATE_MODERN, PDF_TEMPLATE_MINIMAL, PDF_TEMPLATE_CORPORATE)}
 
 
 def pdf_template_for(config: Dict[str, Any], data: Optional[Dict[str, Any]] = None) -> PDFTemplate:
-    """The template an invoice prints in: its own choice, else the one picked in Settings, else Classic."""
-    for key in ((data or {}).get("pdf_template"), (config.get("pdf_settings") or {}).get("template")):
+    """The template an invoice prints in: its own choice, else the one picked in Settings, else Classic -- in the
+    brand colour from Settings when the template takes one."""
+    settings = config.get("pdf_settings") or {}
+    chosen = PDF_TEMPLATE_CLASSIC
+    for key in ((data or {}).get("pdf_template"), settings.get("template")):
         if key and key in PDF_TEMPLATES:
-            return PDF_TEMPLATES[key]
-    return PDF_TEMPLATE_CLASSIC
+            chosen = PDF_TEMPLATES[key]
+            break
+    return chosen.with_accent(settings.get("accent_color"))
 
 
 class PDFGenerator:
+    """Draws one invoice as an A4 PDF.
+
+    The page: a letterhead, the two parties, a strip of reference details (number, dates, terms, PO, place of supply),
+    the item table and then the totals -- with the amount in words and, when GST is charged at several rates, a GST
+    summary by rate beside them -- followed by the payment history, notes, terms and the payment / signature block.
+
+    Every width comes from the printable width of the page, so the layout always fills A4 exactly. A long invoice flows
+    onto more pages: the item table repeats its header, a very long item description may split between pages, the
+    totals are kept in one piece, a running header names the invoice on every page after the first, and every page
+    says "Page x of y". What the page looks like (colours, letterhead, table style) comes from the template."""
+
+    MARGIN_X, MARGIN_TOP, MARGIN_BOTTOM = 1.5, 1.8, 2.3           # centimetres
+    SUMMARY_SHARE = 0.48                                          # the totals box: a share of the printable width
+    # Auto-fit: an invoice that runs only a little onto a second page is printed again with tighter gaps and row padding
+    # (never smaller type) and kept when that saves a page. "A little" = the last page is filled less than this share.
+    TIGHT_SCALE = 0.55
+    TIGHT_WHEN_LAST_PAGE_BELOW = 0.30
+
     def __init__(self, data: Dict[str, Any], config: Dict[str, Any],
                  payments: Optional[List[Dict]] = None, out_dir: Optional[Path] = None):
         self.data     = data
         self.config   = config
         self.payments = payments or []
         self.tpl      = pdf_template_for(config, data)
+        self.font     = PDF_FONT
+        self.bold     = f"{PDF_FONT}-Bold" if PDF_FONT != "Helvetica" else "Helvetica-Bold"
 
         # --- Smart File Naming to bypass Windows file locks ---
         # Defensive re-sanitize: invoice_number is validated at save time now,
@@ -1832,6 +2061,15 @@ class PDFGenerator:
         self.is_gst   = bool(data.get("is_gst_invoice", 1))
         self.tax_mode = (data.get("tax_mode") or TAX_MODE_OVERALL) if self.is_gst else TAX_MODE_OVERALL
         self.styles   = self._setup_styles()
+        self.page_height = A4[1] - (self.MARGIN_TOP + self.MARGIN_BOTTOM) * cm      # what a page can hold, in points
+        self.tight      = False                  # laying out with tighter gaps (the auto-fit pass)
+        self.tightened  = False                  # the tight layout is the one that was printed
+        self.page_count = 0                      # pages of the last layout
+        self._room_left = 0.0                    # room left under the last flowable of the last layout, in points
+
+    def _g(self, points: float) -> float:
+        """A gap or padding: as designed, or scaled down in the auto-fit pass."""
+        return points * self.TIGHT_SCALE if self.tight else points
 
     def _asset(self, key: str) -> Optional[Path]:
         configured = self.config.get("asset_paths", {}).get(key)
@@ -1854,24 +2092,44 @@ class PDFGenerator:
         return None
 
     def _setup_styles(self) -> Dict[str, ParagraphStyle]:
-        ss   = getSampleStyleSheet()
-        base = PDF_FONT
-        bold = f"{base}-Bold" if base != "Helvetica" else "Helvetica-Bold"
+        ss, base, bold, t = getSampleStyleSheet(), self.font, self.bold, self.tpl
         ss.add(ParagraphStyle("NC",          fontName=base, fontSize=9,  parent=ss["Normal"],   leading=11))
         ss.add(ParagraphStyle("Right",       parent=ss["NC"], alignment=TA_RIGHT))
         ss.add(ParagraphStyle("Center",      parent=ss["NC"], alignment=TA_CENTER))
         ss.add(ParagraphStyle("Small",       parent=ss["NC"], fontSize=7.5, textColor=colors.HexColor("#6B7280")))
         ss.add(ParagraphStyle("SmallRight",  parent=ss["Small"], alignment=TA_RIGHT))
-        ss.add(ParagraphStyle("YourContact", parent=ss["NC"], alignment=TA_RIGHT, leading=11))
-        ss.add(ParagraphStyle("BillTo",      parent=ss["NC"], leading=11))
+        ss.add(ParagraphStyle("BillTo",      parent=ss["NC"], leading=11.5))
+        ss.add(ParagraphStyle("PartyLabel",  parent=ss["NC"], fontName=bold, fontSize=7, leading=9,
+                              textColor=colors.HexColor(t.label_color)))
+        ss.add(ParagraphStyle("PartyName",   parent=ss["NC"], fontName=bold, fontSize=10.5, leading=13))
         ss.add(ParagraphStyle("ItemDesc",    parent=ss["NC"], textColor=colors.HexColor("#6B7280"), fontSize=8, leading=10))
-        ss.add(ParagraphStyle("CompanyName", fontName=bold,   fontSize=16, textColor=colors.HexColor(self.tpl.name_color), leading=18))
-        ss.add(ParagraphStyle("Tagline",     parent=ss["NC"], fontSize=8.5, textColor=colors.HexColor("#6B7280")))
-        ss.add(ParagraphStyle("InvoiceTitle",fontName=bold,   fontSize=18, alignment=TA_RIGHT, textColor=colors.HexColor(self.tpl.title_color)))
-        ss.add(ParagraphStyle("NoteBox",     parent=ss["NC"], fontSize=8, textColor=colors.HexColor("#374151")))
+        ss.add(ParagraphStyle("CompanyName", fontName=bold,   fontSize=t.name_size, textColor=colors.HexColor(t.name_color),
+                              leading=t.name_size + 2))
+        ss.add(ParagraphStyle("Tagline",     parent=ss["NC"], fontSize=8.5, textColor=colors.HexColor(t.tagline_color)))
+        ss.add(ParagraphStyle("InvoiceTitle",fontName=bold,   fontSize=t.title_size, alignment=TA_RIGHT,
+                              textColor=colors.HexColor(t.title_color), leading=t.title_leading))
+        ss.add(ParagraphStyle("NoteBox",     parent=ss["NC"], fontSize=8, leading=10.5, textColor=colors.HexColor("#374151")))
+        ss.add(ParagraphStyle("NoteText",    parent=ss["NC"], fontSize=8, leading=10.5, textColor=colors.HexColor("#4B5563")))
+        ss.add(ParagraphStyle("Caption",     parent=ss["NC"], fontName=bold, fontSize=7.5, leading=9.5,
+                              textColor=colors.HexColor(t.label_color), keepWithNext=1))
+        ss.add(ParagraphStyle("PayLabel",    parent=ss["NC"], fontSize=8, leading=10, textColor=colors.HexColor("#6B7280")))
+        ss.add(ParagraphStyle("PayValue",    parent=ss["NC"], fontSize=8.5, leading=10.5))
         return ss
 
-    def _build_header(self) -> Table:
+    def _text_width(self, text: str, size: float, bold: bool = False) -> float:
+        """How wide `text` prints, in points -- used to size the table columns from what they hold."""
+        return pdfmetrics.stringWidth(text, self.bold if bold else self.font, size)
+
+    def _head_styles(self, size: float = 8.0) -> Tuple[ParagraphStyle, ParagraphStyle, ParagraphStyle]:
+        """Table-header text: left, right and centred, in the template's header colour."""
+        left = ParagraphStyle("HS", parent=self.styles["NC"], fontSize=size, leading=size + 2,
+                              textColor=colors.HexColor(self.tpl.head_fg))
+        return left, ParagraphStyle("HSR", parent=left, alignment=TA_RIGHT), ParagraphStyle("HSC", parent=left, alignment=TA_CENTER)
+
+    # ------------------------------------------------------------------ #
+    #  Letterhead, parties, reference details
+    # ------------------------------------------------------------------ #
+    def _build_header(self, width: float) -> Table:
         comp  = self.config.get("company_details", {})
         left  = [Paragraph(safe_markup(compose_your_name(self.config)), self.styles["CompanyName"])]
         if d := comp.get("description"):
@@ -1880,7 +2138,7 @@ class PDFGenerator:
         status    = self.data.get("status")
         doc_title = ("RECEIPT"       if status in (InvoiceStatus.PAID.value, InvoiceStatus.OVERPAID.value) else
                      "COMPLIMENTARY" if status == InvoiceStatus.COMPLIMENTARY.value else "INVOICE")
-        
+
         # --- BARCODE GENERATION ---
         # Code128 only supports a limited ASCII character set, and invoice
         # numbers are user-editable free text -- so this must never be able
@@ -1903,100 +2161,108 @@ class PDFGenerator:
         title_block_rows.append([Paragraph(doc_title, self.styles["InvoiceTitle"])])
         title_block = Table(title_block_rows, style=[("ALIGN", (0,0), (-1,-1), "RIGHT")])
 
+        t = self.tpl
+        band = t.header == "band"
+        half = width / 2.0
         if logo := self._asset("logo"):
             try:
                 img = Image(str(logo), 2.0*cm, 2.0*cm, kind="proportional")
-                left_side = Table([[img, left]], colWidths=[2.5*cm, 6.5*cm],
-                                  style=[("VALIGN",(0,0),(-1,-1),"MIDDLE"), ("LEFTPADDING",(0,0),(-1,-1),0)])
+                logo_style = [("VALIGN",(0,0),(-1,-1),"MIDDLE"), ("LEFTPADDING",(0,0),(-1,-1),0)]
+                if band:        # on the coloured band the logo sits on a white tile, so any logo stays readable
+                    logo_style += [("BACKGROUND",(0,0),(0,0),colors.white), ("ALIGN",(0,0),(0,0),"CENTER"),
+                                   ("LEFTPADDING",(1,0),(1,0),10)]
+                left_side = Table([[img, left]], colWidths=[2.5*cm, half - 2.5*cm - (24 if band else 0)], style=logo_style)
             except Exception:
                 left_side = left
         else:
             left_side = left
 
-        return Table([[left_side, title_block]], colWidths=[9.0*cm, 9.0*cm], style=[
+        if band:
+            return Table([[left_side, title_block]], colWidths=[half, half], style=[
+                ("BACKGROUND",(0,0),(-1,-1),colors.HexColor(t.band_bg)),
+                ("VALIGN",(0,0),(-1,-1),"MIDDLE"), ("ALIGN",(1,0),(1,-1),"RIGHT"),
+                ("LEFTPADDING",(0,0),(-1,-1),12),   ("RIGHTPADDING",(0,0),(-1,-1),12),
+                ("TOPPADDING",(0,0),(-1,-1),self._g(12)),    ("BOTTOMPADDING",(0,0),(-1,-1),self._g(12)),
+            ])
+        return Table([[left_side, title_block]], colWidths=[half, half], style=[
             ("VALIGN",(0,0),(-1,-1),"TOP"), ("ALIGN",(1,0),(1,-1),"RIGHT"),
             ("LEFTPADDING",(0,0),(-1,-1),0),   ("RIGHTPADDING",(0,0),(-1,-1),0),
-            ("LINEBELOW",(0,0),(-1,-1),1,colors.HexColor(self.tpl.rule)),
-            ("BOTTOMPADDING",(0,0),(-1,-1),10),
+            ("LINEBELOW",(0,0),(-1,-1),t.rule_width,colors.HexColor(t.rule)),
+            ("BOTTOMPADDING",(0,0),(-1,-1),self._g(10)),
         ])
 
-    def _draw_footer(self, canvas, doc):
-        canvas.saveState()
-        canvas.setFont(PDF_FONT, 8)
-        canvas.setFillColor(colors.HexColor("#6B7280"))
-        canvas.drawCentredString(A4[0]/2, 1.0*cm,
-                                 self.config.get("pdf_settings", {}).get("footer_message", "Thank you!"))
-        canvas.drawRightString(A4[0]-1.5*cm, 1.0*cm, f"Page {doc.page}")
-        canvas.restoreState()
-
-    def _apply_watermark(self, canvas, doc):
-        wm_map = {
-            InvoiceStatus.PAID.value:          ("PAID",            "#10B981", 100),
-            InvoiceStatus.DUE.value:           ("BALANCE DUE",     "#EF4444",  50),
-            InvoiceStatus.PARTIAL.value:       ("PARTIAL PAYMENT", "#F59E0B",  50),
-            InvoiceStatus.OVERPAID.value:      ("ADVANCE / CREDIT","#8B5CF6",  50),
-            InvoiceStatus.COMPLIMENTARY.value: ("COMPLIMENTARY",   "#3B82F6",  40),
-        }
-        if (entry := wm_map.get(self.data.get("status"))):
-            txt, col, fsz = entry
-            canvas.saveState()
-            canvas.setFont("Helvetica-Bold", fsz)
-            canvas.setFillColor(colors.HexColor(col), alpha=0.08)
-            canvas.translate(A4[0]/2, A4[1]/2)
-            canvas.rotate(35)
-            canvas.drawCentredString(0, 0, txt)
-            canvas.restoreState()
-
-    def on_each_page(self, canvas, doc):
-        self._apply_watermark(canvas, doc)
-        self._draw_footer(canvas, doc)
-
-    def _build_address(self) -> Table:
+    def _build_parties(self, width: float) -> Table:
+        """BILL TO and FROM, side by side."""
         cg = yg = ""
         if self.is_gst:
             if cgstin := self.data.get("client_gstin"):
-                cg = f"<br/>GSTIN: {safe_markup(cgstin)}"
+                cg = f"GSTIN: {safe_markup(cgstin)}"
             if ygstin := _real_value(self.config.get("company_details", {}).get("gstin"), _SAMPLE_GSTIN):
-                yg = f"<br/>GSTIN: {safe_markup(ygstin)}"
+                yg = f"GSTIN: {safe_markup(ygstin)}"
         # Escape first, THEN turn newlines into <br/> -- safe_markup() only
         # touches &/</>, so it won't disturb the newlines we're about to replace.
         your_c   = safe_markup(self.data.get("your_contact")).replace("\n", "<br/>")
         client_c = safe_markup(self.data.get("client_contact")).replace("\n", "<br/>")
-        your_name = safe_markup(self.data.get("your_name"))
-        bill_to   = safe_markup(self.data.get("bill_to"))
-        your_p   = Paragraph(f"<font color='#6B7280'>FROM:</font><br/><b>{your_name}</b><br/>{your_c}{yg}",     self.styles["YourContact"])
-        bill_p   = Paragraph(f"<font color='#6B7280'>BILL TO:</font><br/><b>{bill_to}</b><br/>{client_c}{cg}", self.styles["BillTo"])
-        return Table([[bill_p, your_p]], colWidths=["50%","50%"], style=[
+
+        def block(label: str, name: str, *lines: str) -> List[Any]:
+            cell = [Paragraph(label, self.styles["PartyLabel"]), Paragraph(name, self.styles["PartyName"])]
+            body = "<br/>".join(line for line in lines if line)
+            if body:
+                cell.append(Paragraph(body, self.styles["BillTo"]))
+            return cell
+
+        bill = block("BILL TO", safe_markup(self.data.get("bill_to")), client_c, cg)
+        mine = block("FROM", safe_markup(self.data.get("your_name")), your_c, yg)
+        return Table([[bill, mine]], colWidths=[width / 2.0, width / 2.0], style=[
             ("VALIGN",(0,0),(-1,-1),"TOP"),
-            ("LEFTPADDING",(0,0),(-1,-1),0), ("RIGHTPADDING",(0,0),(-1,-1),0),
+            ("LEFTPADDING",(0,0),(0,0),0),  ("RIGHTPADDING",(0,0),(0,0),14),
+            ("LEFTPADDING",(1,0),(1,0),14), ("RIGHTPADDING",(1,0),(1,0),0),
         ])
 
-    def _build_meta(self) -> Table:
+    def _build_meta(self, width: float) -> Table:
+        """The reference details as a strip of labelled cells: invoice number and date, due date, payment terms and,
+        when they are used, the customer's PO number, the place of supply and the reverse-charge flag."""
         date_str = parse_date(self.data.get("invoice_date"), DB_DATE_FORMAT, DISPLAY_DATE_FORMAT)
-        meta     = f"<b>Invoice #:</b> {safe_markup(self.data.get('invoice_number'))}<br/><b>Invoice Date:</b> {date_str}"
         free     = not self.data.get("is_complimentary")
+        cells    = [("Invoice #", safe_markup(self.data.get("invoice_number"))), ("Invoice Date", date_str)]
         if free and self.data.get("due_date"):
-            meta += f"<br/><b>Due Date:</b> {parse_date(self.data.get('due_date'), DB_DATE_FORMAT, DISPLAY_DATE_FORMAT)}"
+            cells.append(("Due Date", parse_date(self.data.get("due_date"), DB_DATE_FORMAT, DISPLAY_DATE_FORMAT)))
         if free:
-            meta += f"<br/><b>Payment Terms:</b> {safe_markup(self.data.get('payment_terms') or 'N/A')}"
+            cells.append(("Payment Terms", safe_markup(self.data.get("payment_terms") or "N/A")))
+            if po := str(self.data.get("po_number") or "").strip():
+                cells.append(("PO / Ref #", safe_markup(po)))
+            if self.is_gst and (place := str(self.data.get("place_of_supply") or "").strip()):
+                cells.append(("Place of Supply", safe_markup(place)))
+            if self.is_gst and self.data.get("reverse_charge"):
+                cells.append(("Reverse Charge", "Yes"))
 
-        # a second column, only for the details an invoice may carry besides the number and date
-        more = []
-        if po := str(self.data.get("po_number") or "").strip():
-            more.append(f"<b>PO / Ref #:</b> {safe_markup(po)}")
-        if self.is_gst and (place := str(self.data.get("place_of_supply") or "").strip()):
-            more.append(f"<b>Place of Supply:</b> {safe_markup(place)}")
-        if self.is_gst and self.data.get("reverse_charge"):
-            more.append("<b>Reverse Charge:</b> Yes")
-        box = [("BOX",(0,0),(-1,-1),1,colors.HexColor(self.tpl.meta_border)),
-               ("BACKGROUND",(0,0),(-1,-1),colors.HexColor(self.tpl.meta_bg)),
-               ("LEFTPADDING",(0,0),(-1,-1),8), ("TOPPADDING",(0,0),(-1,-1),6),
-               ("BOTTOMPADDING",(0,0),(-1,-1),6)]
-        if more and free:
-            return Table([[Paragraph(meta, self.styles["NC"]), Paragraph("<br/>".join(more), self.styles["NC"])]],
-                         colWidths=["50%", "50%"], style=box + [("VALIGN",(0,0),(-1,-1),"TOP")])
-        return Table([[Paragraph(meta, self.styles["NC"])]], style=box)
+        t = self.tpl
+        count = len(cells)
+        per_row = count if count <= 4 else (3 if count <= 6 else 4)        # 5-6 cells: two even rows of three
+        rows: List[List[Any]] = []
+        for start in range(0, count, per_row):
+            chunk = cells[start:start + per_row]
+            row = [Paragraph(f"<font size='7' color='{t.label_color}'>{label}</font><br/><b>{value}</b>", self.styles["NC"])
+                   for label, value in chunk]
+            rows.append(row + [""] * (per_row - len(row)))
+        style: List[Tuple] = []
+        if t.meta_border:
+            style.append(("BOX",(0,0),(-1,-1),1,colors.HexColor(t.meta_border)))
+        if t.meta_bg:
+            style.append(("BACKGROUND",(0,0),(-1,-1),colors.HexColor(t.meta_bg)))
+        if t.meta_lines:
+            style += [("LINEABOVE",(0,0),(-1,0),0.6,colors.HexColor(t.meta_lines)),
+                      ("LINEBELOW",(0,-1),(-1,-1),0.6,colors.HexColor(t.meta_lines))]
+        pad = 8 if (t.meta_border or t.meta_bg) else 0          # an unboxed strip lines up with the page margin
+        style += [("VALIGN",(0,0),(-1,-1),"TOP"), ("TOPPADDING",(0,0),(-1,-1),self._g(6)), ("BOTTOMPADDING",(0,0),(-1,-1),self._g(6)),
+                  ("LEFTPADDING",(0,0),(-1,-1),pad), ("RIGHTPADDING",(0,0),(-1,-1),4)]
+        if not pad:
+            style.append(("LEFTPADDING",(1,0),(-1,-1),8))
+        return Table(rows, colWidths=[width / per_row] * per_row, style=TableStyle(style))
 
+    # ------------------------------------------------------------------ #
+    #  Items
+    # ------------------------------------------------------------------ #
     def _items(self) -> List[Dict[str, Any]]:
         try:
             items = json.loads(self.data.get("items") or "[]")
@@ -2007,33 +2273,45 @@ class PDFGenerator:
     def _items_style(self, last_row: int) -> List[Tuple]:
         """The item table's look (the same for the compact and the full table), from the template."""
         t = self.tpl
-        style = [
-            ("BACKGROUND",(0,0),(-1,0),colors.HexColor(t.head_bg)),
+        style: List[Tuple] = []
+        if t.head_bg:
+            style.append(("BACKGROUND",(0,0),(-1,0),colors.HexColor(t.head_bg)))
+        style += [
             ("VALIGN",(0,0),(-1,-1),"TOP"),
             ("LINEBELOW",(0,1),(-1,-2),1,colors.HexColor(t.row_line)),
-            ("LINEBELOW",(0,-1),(-1,-1),2,colors.HexColor(t.end_line)),
-            ("TOPPADDING",(0,0),(-1,-1),5),   ("BOTTOMPADDING",(0,0),(-1,-1),5),
+            ("LINEBELOW",(0,-1),(-1,-1),t.end_width,colors.HexColor(t.end_line)),
+            ("TOPPADDING",(0,0),(-1,-1),self._g(5)),   ("BOTTOMPADDING",(0,0),(-1,-1),self._g(5)),
             ("LEFTPADDING",(0,0),(-1,-1),6),  ("RIGHTPADDING",(0,0),(-1,-1),6),
         ]
+        if t.head_rule:
+            style.append(("LINEBELOW",(0,0),(-1,0),1.2,colors.HexColor(t.head_rule)))
         if t.zebra:
             style += [("BACKGROUND",(0,r),(-1,r),colors.HexColor(t.zebra)) for r in range(2, last_row + 1, 2)]
         if t.grid:
-            style.append(("GRID",(0,0),(-1,-1),0.5,colors.HexColor(t.end_line)))
+            style.append(("GRID",(0,0),(-1,-1),0.5,colors.HexColor(t.grid_line)))
         return style
 
-    def _build_items(self) -> Table:
+    def _items_table(self, rows: List[List[Any]], widths: List[float], style: List[Tuple]) -> Table:
+        """The item table, its header repeated on every page. A row is never cut between two pages -- unless it is
+        taller than a whole page (an enormous description), when it has to be."""
+        table = Table(rows, colWidths=widths, repeatRows=1, style=TableStyle(style))
+        table.wrap(sum(widths), self.page_height)
+        if max(getattr(table, "_rowHeights", None) or [0]) > self.page_height - 2 * cm:
+            table = Table(rows, colWidths=widths, repeatRows=1, splitInRow=1, style=TableStyle(style))
+        return table
+
+    def _build_items(self, width: float) -> Table:
         items = self._items()
         # Invoices made only of plain "title + amount" lines keep the compact two-column table they have always had;
         # as soon as a line has a quantity, unit, HSN/SAC code or its own GST rate the full table is printed.
         if any(item_is_extended(i) for i in items):
-            return self._build_items_full(items)
-        hs  = ParagraphStyle("HS",  parent=self.styles["NC"], textColor=colors.HexColor(self.tpl.head_fg))
-        hsr = ParagraphStyle("HSR", parent=hs, alignment=TA_RIGHT)
+            return self._build_items_full(items, width)
+        hs, hsr, _hsc = self._head_styles()
         rows = [[Paragraph("<b>ITEM / DESCRIPTION</b>", hs), Paragraph("<b>AMOUNT</b>", hsr)]]
         for item in items:
             title  = item.get("title")       or ""
             desc   = item.get("description") or ""
-            amount = float(item.get("amount", 0))
+            amount = safe_float(item.get("amount"))
             if not title.strip() and not desc.strip() and amount == 0:
                 rows.append([[Paragraph("<br/>", self.styles["NC"])], Paragraph("", self.styles["Right"])])
             else:
@@ -2041,145 +2319,284 @@ class PDFGenerator:
                 if desc.strip():
                     cell.append(Paragraph(safe_markup(desc), self.styles["ItemDesc"]))
                 rows.append([cell, Paragraph(f"{CURRENCY_SYMBOL}{amount:,.2f}", self.styles["Right"])])
-        return Table(rows, colWidths=["80%","20%"], repeatRows=1,
-                     style=TableStyle([*self._items_style(len(rows) - 1), ("ALIGN",(1,0),(1,-1),"RIGHT")]))
+        # the amount column is as wide as the biggest figure needs (never less than a fifth of the page)
+        figure = max([self._text_width(f"{CURRENCY_SYMBOL}{safe_float(i.get('amount')):,.2f}", 9) for i in items] + [0.0])
+        amount_w = min(max(width * 0.20, figure + 16), width * 0.5)
+        return self._items_table(rows, [width - amount_w, amount_w],
+                                 [*self._items_style(len(rows) - 1), ("ALIGN",(1,0),(1,-1),"RIGHT")])
 
-    def _build_items_full(self, items: List[Dict[str, Any]]) -> Table:
-        """# | item (+ description, HSN/SAC) | quantity + unit | rate | discount | GST % | amount. The discount column
-        only appears when a line has a discount, the GST column only when GST is charged per item."""
+    # the share of the page each number column of the full item table asks for, in per cent -- a column takes more
+    # when its figures need it (see _build_items_full)
+    _ITEM_COLUMN_SHARES = {"no": 4.5, "hsn": 10.5, "qty": 10.5, "rate": 12.5, "disc": 12.0, "gst": 6.5, "amount": 14.5}
+
+    def _build_items_full(self, items: List[Dict[str, Any]], width: float) -> Table:
+        """# | item (+ description) | HSN/SAC | quantity + unit | rate | discount | GST % | amount. The HSN/SAC column
+        only appears when a line has a code, the discount column when a line has a discount and the GST column when GST
+        is charged per item. The number columns are as wide as their longest figure needs (measured, never guessed) and
+        the item column takes the rest, so no figure is ever cut and the table always spans the page exactly."""
         per_item = self.is_gst and self.tax_mode == TAX_MODE_PER_ITEM
         default_rate = safe_float(self.data.get("tax_rate"))
-        hs  = ParagraphStyle("HS",  parent=self.styles["NC"], textColor=colors.HexColor(self.tpl.head_fg))
-        hsr = ParagraphStyle("HSR", parent=hs, alignment=TA_RIGHT)
-        hsc = ParagraphStyle("HSC", parent=hs, alignment=TA_CENTER)
+        show_hsn  = any(str(i.get("hsn") or "").strip() for i in items)
         show_disc = any(safe_float(i.get("discount")) > 0 for i in items)
-        # (header, weight) -- the weights are shares of the page width
-        cols = [("#", 4), ("ITEM / DESCRIPTION", 34), ("QTY", 13), ("RATE", 15)]
+        cols: List[Tuple[str, str]] = [("no", "#"), ("item", "ITEM / DESCRIPTION")]
+        if show_hsn:
+            cols.append(("hsn", "HSN/SAC"))
+        cols += [("qty", "QTY"), ("rate", "RATE")]
         if show_disc:
-            cols.append(("DISC.", 15))
+            cols.append(("disc", "DISC."))
         if per_item:
-            cols.append(("GST", 8))
-        cols.append(("AMOUNT", 17))
-        total_w = sum(w for _, w in cols)
-        head = [Paragraph(f"<b>{h}</b>", hsc if h == "#" else (hs if h.startswith("ITEM") else hsr)) for h, _ in cols]
-        rows = [head]
+            cols.append(("gst", "GST"))
+        cols.append(("amount", "AMOUNT"))
+
+        # --- every line as plain figures first, so the columns can be sized from what they hold -----------------
+        lines: List[Optional[Dict[str, Any]]] = []
         number = 0
         for item in items:
-            title  = str(item.get("title") or "")
-            desc   = str(item.get("description") or "")
-            gross  = safe_float(item.get("amount"))
+            title = str(item.get("title") or "")
+            desc  = str(item.get("description") or "")
+            gross = safe_float(item.get("amount"))
             if not title.strip() and not desc.strip() and gross == 0:
-                rows.append([Paragraph("", self.styles["NC"]), [Paragraph("<br/>", self.styles["NC"])]] +
-                            [Paragraph("", self.styles["Right"])] * (len(cols) - 2))
+                lines.append(None)                                        # a blank line stays a blank row
                 continue
             number += 1
             qty  = item_qty(item)
             unit = str(item.get("unit") or "").strip()
             raw_rate = item.get("rate")
             rate = safe_float(raw_rate) if raw_rate not in (None, "") else (gross / qty if qty else gross)
-            cell = [Paragraph(f"<b>{safe_markup(title)}</b>", self.styles["NC"])]
-            if desc.strip():
-                cell.append(Paragraph(safe_markup(desc), self.styles["ItemDesc"]))
-            if hsn := str(item.get("hsn") or "").strip():
-                cell.append(Paragraph(f"HSN/SAC: {safe_markup(hsn)}", self.styles["Small"]))
-            row = [Paragraph(str(number), self.styles["Center"]), cell,
-                   Paragraph(safe_markup(fmt_qty(qty) + (f" {unit}" if unit else "")), self.styles["Right"]),
-                   Paragraph(f"{CURRENCY_SYMBOL}{rate:,.2f}", self.styles["Right"])]
-            if show_disc:
-                disc = safe_float(item.get("discount"))
-                if disc <= 0:
-                    row.append(Paragraph("-", self.styles["Right"]))
-                elif item.get("disc_type") == "percent":
-                    row.append(Paragraph(f"{CURRENCY_SYMBOL}{disc:,.2f}<br/><font size='7' color='#6B7280'>"
-                                         f"({safe_float(item.get('disc_value')):g}%)</font>", self.styles["Right"]))
-                else:
-                    row.append(Paragraph(f"{CURRENCY_SYMBOL}{disc:,.2f}", self.styles["Right"]))
-            if per_item:
-                raw_tax = item.get("tax_rate")
-                line_rate = default_rate if raw_tax in (None, "") else safe_float(raw_tax, default_rate)
-                row.append(Paragraph(f"{line_rate:g}%", self.styles["Right"]))
-            row.append(Paragraph(f"{CURRENCY_SYMBOL}{gross:,.2f}", self.styles["Right"]))
-            rows.append(row)
-        return Table(rows, colWidths=[f"{w * 100.0 / total_w:.3f}%" for _, w in cols], repeatRows=1,
-                     style=TableStyle([*self._items_style(len(rows) - 1), ("ALIGN",(2,0),(-1,-1),"RIGHT"),
-                                       ("ALIGN",(0,0),(0,-1),"CENTER")]))
+            line: Dict[str, Any] = {
+                "title": title, "desc": desc, "no": str(number),
+                "hsn": str(item.get("hsn") or "").strip() or "-",
+                "qty": fmt_qty(qty) + (f" {unit}" if unit else ""),
+                "rate": f"{CURRENCY_SYMBOL}{rate:,.2f}", "amount": f"{CURRENCY_SYMBOL}{gross:,.2f}", "disc_pct": "",
+            }
+            disc = safe_float(item.get("discount"))
+            line["disc"] = f"{CURRENCY_SYMBOL}{disc:,.2f}" if disc > 0 else "-"
+            if disc > 0 and item.get("disc_type") == "percent":
+                line["disc_pct"] = f"({safe_float(item.get('disc_value')):g}%)"
+            raw_tax = item.get("tax_rate")
+            line["gst"] = f"{(default_rate if raw_tax in (None, '') else safe_float(raw_tax, default_rate)):g}%"
+            lines.append(line)
 
-    def _build_totals(self) -> Table:
-        if self.data.get("is_complimentary"):
-            return Table(
-                [[Paragraph("<b>Total</b>", self.styles["Right"]),
-                  Paragraph("<b>No Charge</b>", self.styles["Right"])]],
-                colWidths=["75%","25%"],
-                style=TableStyle([("ALIGN",(0,0),(-1,-1),"RIGHT"), ("LEFTPADDING",(0,0),(-1,-1),10)]),
-            )
-        # Same calculation engine the invoice form uses live (and the database stores), so the
-        # printed PDF can never show different numbers than what the
-        # person saw on screen when they saved.
-        totals     = DatabaseManager.totals_for(self.data, self._items())
+        # --- column widths ---------------------------------------------------------------------------------------
+        size, pad = 9.0, 6.0
+        fixed: Dict[str, float] = {}
+        for attempt in (0, 1):
+            fixed = {}
+            for key, header in cols:
+                if key == "item":
+                    continue
+                longest = self._text_width(header, size - 1, bold=True)
+                for line in lines:
+                    if line:
+                        longest = max(longest, self._text_width(line[key], size),
+                                      self._text_width(line["disc_pct"], size - 1) if key == "disc" else 0.0)
+                share = self._ITEM_COLUMN_SHARES[key] / 100.0 * width * (1.0 if attempt == 0 else 0.92)
+                fixed[key] = max(share, longest + 2 * pad + 2)
+            item_w = width - sum(fixed.values())
+            if item_w >= max(width * 0.30, 140.0):
+                break
+            size, pad = 8.0, 4.0                    # the figures need so much room that the item column would be too
+                                                    # narrow: print them a size smaller, with less padding
+        if item_w < 60.0:                           # extreme figures even at the smaller size: squeeze them all
+            scale = (width - 60.0) / sum(fixed.values())
+            fixed = {k: v * scale for k, v in fixed.items()}
+            item_w = 60.0
+        widths = [item_w if key == "item" else fixed[key] for key, _ in cols]
+
+        # --- the cells -------------------------------------------------------------------------------------------
+        hs, hsr, hsc = self._head_styles()
+        head_style = {"no": hsc, "item": hs, "hsn": hsc}
+        num  = ParagraphStyle("ItemNum", parent=self.styles["NC"], fontSize=size, leading=size + 2, alignment=TA_RIGHT)
+        mid  = ParagraphStyle("ItemMid", parent=num, alignment=TA_CENTER)
+        rows = [[Paragraph(f"<b>{header}</b>", head_style.get(key, hsr)) for key, header in cols]]
+        for line in lines:
+            if line is None:
+                rows.append([[Paragraph("<br/>", self.styles["NC"])] if key == "item" else Paragraph("", num) for key, _ in cols])
+                continue
+            cell = [Paragraph(f"<b>{safe_markup(line['title'])}</b>", self.styles["NC"])]
+            if line["desc"].strip():
+                cell.append(Paragraph(safe_markup(line["desc"]), self.styles["ItemDesc"]))
+            disc_cell = safe_markup(line["disc"])
+            if line["disc_pct"]:
+                disc_cell += f"<br/><font size='{size - 1:g}' color='#6B7280'>{safe_markup(line['disc_pct'])}</font>"
+            values: Dict[str, Any] = {
+                "no": Paragraph(line["no"], mid), "item": cell, "hsn": Paragraph(safe_markup(line["hsn"]), mid),
+                "qty": Paragraph(safe_markup(line["qty"]), num), "rate": Paragraph(safe_markup(line["rate"]), num),
+                "disc": Paragraph(disc_cell, num), "gst": Paragraph(safe_markup(line["gst"]), num),
+                "amount": Paragraph(safe_markup(line["amount"]), num),
+            }
+            rows.append([values[key] for key, _ in cols])
+        style = [*self._items_style(len(rows) - 1)]
+        keys = [key for key, _ in cols]
+        first_number = keys.index("qty")
+        style += [("ALIGN",(first_number,0),(-1,-1),"RIGHT"), ("ALIGN",(0,0),(0,-1),"CENTER"),
+                  ("LEFTPADDING",(2,0),(-1,-1),pad), ("RIGHTPADDING",(2,0),(-1,-1),pad),
+                  ("LEFTPADDING",(0,0),(0,-1),pad), ("RIGHTPADDING",(0,0),(0,-1),pad)]
+        if show_hsn:
+            style.append(("ALIGN",(2,0),(2,-1),"CENTER"))
+        return self._items_table(rows, widths, style)
+
+    # ------------------------------------------------------------------ #
+    #  Totals
+    # ------------------------------------------------------------------ #
+    def _build_totals(self, width: float, totals: Dict[str, Any]) -> Table:
+        """The totals box. GST is always one CGST and one SGST line (or one IGST line) -- however many rates the
+        invoice has; the rate-wise split goes into the GST summary beside it."""
+        right = self.styles["Right"]
         total_paid = sum(safe_float(p.get("amount")) for p in self.payments)
         _status, balance, credit = DatabaseManager.compute_payment_status(totals["grand_total"], total_paid)
 
-        rows = [[Paragraph("Subtotal", self.styles["Right"]),
-                 Paragraph(fmt_money(totals['subtotal']), self.styles["Right"])]]
+        rows = [[Paragraph("Subtotal", right), Paragraph(fmt_money(totals['subtotal']), right)]]
         if totals["total_discount"] > 0:
-            rows.append([Paragraph("Discount", self.styles["Right"]),
-                         Paragraph(f"- {fmt_money(totals['total_discount'])}", self.styles["Right"])])
+            rows.append([Paragraph("Discount", right), Paragraph(f"- {fmt_money(totals['total_discount'])}", right)])
 
         # --- IGST vs CGST/SGST PDF Rendering Logic ---
-        # One block per GST rate: a single one when the whole invoice has one rate, one per rate when GST is
-        # charged per item.
         taxed = [g for g in totals["tax_groups"] if g["rate"] > 0]
         if self.is_gst and taxed:
-            rows.append([Paragraph("Taxable Amount", self.styles["Right"]),
-                         Paragraph(fmt_money(totals['taxable']), self.styles["Right"])])
-            for g in taxed:
-                if self.data.get("gst_type") == "IGST":
-                    rows.append([Paragraph(f"IGST ({g['rate']:g}%)", self.styles["Right"]),
-                                 Paragraph(fmt_money(g["tax"]), self.styles["Right"])])
-                else:
-                    half_rate = g["rate"] / 2.0
-                    rows += [
-                        [Paragraph(f"CGST ({half_rate:g}%)", self.styles["Right"]),
-                         Paragraph(fmt_money(g["cgst"]), self.styles["Right"])],
-                        [Paragraph(f"SGST ({half_rate:g}%)", self.styles["Right"]),
-                         Paragraph(fmt_money(g["sgst"]), self.styles["Right"])],
-                    ]
+            rows.append([Paragraph("Taxable Amount", right), Paragraph(fmt_money(totals['taxable']), right)])
+            several = len(taxed) > 1
+            if self.data.get("gst_type") == "IGST":
+                rows.append([Paragraph("IGST" if several else f"IGST ({taxed[0]['rate']:g}%)", right),
+                             Paragraph(fmt_money(totals["tax"]), right)])
+            else:
+                half_rate = taxed[0]["rate"] / 2.0
+                rows += [
+                    [Paragraph("CGST" if several else f"CGST ({half_rate:g}%)", right),
+                     Paragraph(fmt_money(totals["cgst"]), right)],
+                    [Paragraph("SGST" if several else f"SGST ({half_rate:g}%)", right),
+                     Paragraph(fmt_money(totals["sgst"]), right)],
+                ]
         # ---------------------------------------------
         if totals["round_off"]:
             sign = "+" if totals["round_off"] > 0 else "-"
-            rows.append([Paragraph("Round Off", self.styles["Right"]),
-                         Paragraph(f"{sign} {fmt_money(abs(totals['round_off']))}", self.styles["Right"])])
+            rows.append([Paragraph("Round Off", right), Paragraph(f"{sign} {fmt_money(abs(totals['round_off']))}", right)])
 
-        rows.append([Paragraph("<b>Invoice Total</b>", self.styles["Right"]),
-                     Paragraph(f"<b>{fmt_money(totals['grand_total'])}</b>", self.styles["Right"])])
+        t = self.tpl
+        total_row = len(rows)
+        if t.total_bg:                                       # the total on a coloured bar
+            rows.append([Paragraph(f"<font color='{t.total_fg}'><b>Invoice Total</b></font>", right),
+                         Paragraph(f"<font color='{t.total_fg}'><b>{fmt_money(totals['grand_total'])}</b></font>", right)])
+        else:
+            rows.append([Paragraph("<b>Invoice Total</b>", right),
+                         Paragraph(f"<b>{fmt_money(totals['grand_total'])}</b>", right)])
         if total_paid > 0:
-            rows.append([Paragraph("Total Paid", self.styles["Right"]),
-                         Paragraph(f"- {fmt_money(total_paid)}", self.styles["Right"])])
+            rows.append([Paragraph("Total Paid", right), Paragraph(f"- {fmt_money(total_paid)}", right)])
 
         # Balance Due is never negative -- an overpayment prints as
         # "Advance / Credit" instead, in green, the same way the
         # invoice-form badge shows it on screen.
         if credit > 0:
             bc = "#059669"
-            rows.append([Paragraph("<b>Advance / Credit</b>", self.styles["Right"]),
-                         Paragraph(f"<font color='{bc}'><b>{fmt_money(credit)}</b></font>", self.styles["Right"])])
+            rows.append([Paragraph("<b>Advance / Credit</b>", right),
+                         Paragraph(f"<font color='{bc}'><b>{fmt_money(credit)}</b></font>", right)])
         else:
             bc = "#059669" if balance <= 0 else "#DC2626"
-            rows.append([Paragraph("<b>Balance Due</b>", self.styles["Right"]),
-                         Paragraph(f"<font color='{bc}'><b>{fmt_money(balance)}</b></font>", self.styles["Right"])])
-        return Table(rows, colWidths=["75%","25%"], style=TableStyle([
+            rows.append([Paragraph("<b>Balance Due</b>", right),
+                         Paragraph(f"<font color='{bc}'><b>{fmt_money(balance)}</b></font>", right)])
+        style: List[Tuple] = [
             ("ALIGN",(0,0),(-1,-1),"RIGHT"), ("LEFTPADDING",(0,0),(-1,-1),10),
-            ("TOPPADDING",(0,0),(-1,-1),3),  ("BOTTOMPADDING",(0,0),(-1,-1),3),
+            ("TOPPADDING",(0,0),(-1,-1),self._g(3)),  ("BOTTOMPADDING",(0,0),(-1,-1),self._g(3)),
             ("BACKGROUND",(0,-1),(1,-1),colors.HexColor("#FEF2F2" if (balance > 0 and credit <= 0) else "#ECFDF5")),
             ("GRID",(0,-1),(1,-1),1,colors.HexColor("#E5E7EB")),
-        ]))
+        ]
+        if t.total_bg:
+            style.append(("BACKGROUND",(0,total_row),(1,total_row),colors.HexColor(t.total_bg)))
+        if t.total_rule:
+            style.append(("LINEABOVE",(0,total_row),(1,total_row),0.8,colors.HexColor(t.total_rule)))
+        return Table(rows, colWidths=[width * 0.58, width * 0.42], hAlign="RIGHT", style=TableStyle(style))
 
-    def _build_payment_history(self) -> Optional[Table]:
+    def _build_gst_summary(self, width: float, totals: Dict[str, Any]) -> Optional[Table]:
+        """Tax by rate -- the taxable value and the CGST + SGST (or IGST) at each rate. Printed only when GST is charged
+        at more than one rate, which is why the totals box can show a single CGST and a single SGST line."""
+        taxed = [g for g in totals["tax_groups"] if g["rate"] > 0]
+        if not (self.is_gst and not self.data.get("is_complimentary") and len(taxed) > 1):
+            return None
+        igst = self.data.get("gst_type") == "IGST"
+        t = self.tpl
+        head_bg, head_fg = (t.head_bg, t.head_fg) if t.head_bg else (t.pay_head_bg, t.pay_head_fg)
+        small, small_right = self.styles["Small"], self.styles["SmallRight"]
+        ink = ParagraphStyle("GSTHead", parent=small, textColor=colors.HexColor(head_fg), fontName=self.bold)
+        ink_right = ParagraphStyle("GSTHeadR", parent=ink, alignment=TA_RIGHT)
+        bold_right = ParagraphStyle("GSTTotalR", parent=small_right, fontName=self.bold, textColor=colors.HexColor("#111827"))
+        bold_left = ParagraphStyle("GSTTotalL", parent=small, fontName=self.bold, textColor=colors.HexColor("#111827"))
+
+        def money(value: float) -> str:
+            return f"{value:,.2f}"
+
+        head = [Paragraph("RATE", ink), Paragraph(f"TAXABLE ({CURRENCY_SYMBOL})", ink_right)]
+        head += [Paragraph("IGST", ink_right)] if igst else [Paragraph("CGST", ink_right), Paragraph("SGST", ink_right)]
+        rows = [head]
+        for g in taxed:
+            row = [Paragraph(f"{g['rate']:g}%", small), Paragraph(money(g["taxable"]), small_right)]
+            row += [Paragraph(money(g["tax"]), small_right)] if igst else [Paragraph(money(g["cgst"]), small_right),
+                                                                              Paragraph(money(g["sgst"]), small_right)]
+            rows.append(row)
+        total = [Paragraph("Total", bold_left), Paragraph(money(sum(g["taxable"] for g in taxed)), bold_right)]
+        total += [Paragraph(money(totals["tax"]), bold_right)] if igst else [Paragraph(money(totals["cgst"]), bold_right),
+                                                                              Paragraph(money(totals["sgst"]), bold_right)]
+        rows.append(total)
+        shares = [0.18, 0.40, 0.42] if igst else [0.15, 0.31, 0.27, 0.27]
+        style: List[Tuple] = [
+            ("BACKGROUND",(0,0),(-1,0),colors.HexColor(head_bg)),
+            ("VALIGN",(0,0),(-1,-1),"MIDDLE"),
+            ("LINEBELOW",(0,1),(-1,-2),0.5,colors.HexColor(t.row_line)),
+            ("LINEABOVE",(0,-1),(-1,-1),0.8,colors.HexColor(t.end_line)),
+            ("LINEBELOW",(0,-1),(-1,-1),0.8,colors.HexColor(t.end_line)),
+            ("TOPPADDING",(0,0),(-1,-1),self._g(3)), ("BOTTOMPADDING",(0,0),(-1,-1),self._g(3)),
+            ("LEFTPADDING",(0,0),(-1,-1),5), ("RIGHTPADDING",(0,0),(-1,-1),5),
+        ]
+        return Table(rows, colWidths=[width * s_ for s_ in shares], style=TableStyle(style))
+
+    def _build_amount_in_words(self, grand_total: float) -> Optional[List[Any]]:
+        """"Amount in words: Rupees ... Only" under the totals -- when Settings turns it on, for rupee invoices."""
+        if not self.config.get("pdf_settings", {}).get("amount_in_words", False) or self.data.get("is_complimentary"):
+            return None
+        words = amount_in_words(grand_total, CURRENCY_SYMBOL)
+        if not words:
+            return None
+        return [Paragraph("Amount in words", self.styles["Caption"]), Spacer(1, 2),
+                Paragraph(safe_markup(words), self.styles["NoteBox"])]
+
+    def _build_summary(self, width: float) -> List[Any]:
+        """The totals box on the right; the amount in words and the GST summary, when there are any, on the left."""
+        right_w = width * self.SUMMARY_SHARE
+        if self.data.get("is_complimentary"):
+            right = self.styles["Right"]
+            box = Table([[Paragraph("<b>Total</b>", right), Paragraph("<b>No Charge</b>", right)]],
+                        colWidths=[right_w * 0.58, right_w * 0.42], hAlign="RIGHT",
+                        style=TableStyle([("ALIGN",(0,0),(-1,-1),"RIGHT"), ("LEFTPADDING",(0,0),(-1,-1),10)]))
+            return [KeepTogether([box])]
+        # Same calculation engine the invoice form uses live (and the database stores), so the
+        # printed PDF can never show different numbers than what the
+        # person saw on screen when they saved.
+        totals = DatabaseManager.totals_for(self.data, self._items())
+        box = self._build_totals(right_w, totals)
+        gap = 0.6 * cm
+        left_w = width - right_w - gap
+        left: List[Any] = []
+        if words := self._build_amount_in_words(totals["grand_total"]):
+            left += words
+        if summary := self._build_gst_summary(left_w, totals):
+            left += ([Spacer(1, self._g(0.3 * cm))] if left else []) + [Paragraph("GST Summary", self.styles["Caption"]),
+                                                               Spacer(1, 2), summary]
+        if not left:
+            return [KeepTogether([box])]
+        outer = Table([[left, box]], colWidths=[left_w + gap, right_w], style=[
+            ("VALIGN",(0,0),(-1,-1),"TOP"),
+            ("LEFTPADDING",(0,0),(-1,-1),0), ("RIGHTPADDING",(0,0),(0,0),gap), ("RIGHTPADDING",(1,0),(1,0),0),
+            ("TOPPADDING",(0,0),(-1,-1),0),  ("BOTTOMPADDING",(0,0),(-1,-1),0),
+        ])
+        return [KeepTogether([outer])]
+
+    # ------------------------------------------------------------------ #
+    #  Payments, notes, terms, signature
+    # ------------------------------------------------------------------ #
+    def _build_payment_history(self, width: float) -> Optional[Table]:
         """Small table listing each individual payment -- omitted entirely if
         there is no payment history to show (keeps simple invoices simple)."""
         if self.data.get("is_complimentary") or not self.payments:
             return None
-        hs = ParagraphStyle("PHS", parent=self.styles["Small"], textColor=colors.white)
+        hs = ParagraphStyle("PHS", parent=self.styles["Small"], textColor=colors.HexColor(self.tpl.pay_head_fg))
         rows = [[Paragraph("<b>DATE</b>", hs), Paragraph("<b>MODE</b>", hs),
                  Paragraph("<b>NOTE</b>", hs), Paragraph("<b>AMOUNT</b>", ParagraphStyle("PHSR", parent=hs, alignment=TA_RIGHT))]]
         for p in sorted(self.payments, key=lambda x: x.get("payment_date") or ""):
@@ -2190,11 +2607,13 @@ class PDFGenerator:
                 Paragraph(safe_markup(p.get("note") or "-"), self.styles["Small"]),
                 Paragraph(f"{CURRENCY_SYMBOL}{safe_float(p.get('amount')):,.2f}", self.styles["SmallRight"]),
             ])
-        return Table(rows, colWidths=["22%","20%","33%","25%"], style=TableStyle([
+        return Table(rows, colWidths=[width * 0.22, width * 0.20, width * 0.33, width * 0.25], repeatRows=1,
+                     style=TableStyle([
             ("BACKGROUND",(0,0),(-1,0),colors.HexColor(self.tpl.pay_head_bg)),
             ("VALIGN",(0,0),(-1,-1),"MIDDLE"),
             ("LINEBELOW",(0,0),(-1,-2),0.5,colors.HexColor("#F3F4F6")),
-            ("TOPPADDING",(0,0),(-1,-1),3),   ("BOTTOMPADDING",(0,0),(-1,-1),3),
+            ("LINEBELOW",(0,-1),(-1,-1),0.8,colors.HexColor("#E5E7EB")),
+            ("TOPPADDING",(0,0),(-1,-1),self._g(3)),   ("BOTTOMPADDING",(0,0),(-1,-1),self._g(3)),
             ("LEFTPADDING",(0,0),(-1,-1),6),  ("RIGHTPADDING",(0,0),(-1,-1),6),
         ]))
 
@@ -2224,96 +2643,309 @@ class PDFGenerator:
             return False
         return self._invoice_needs_payment()
 
-    def _build_payment_lines(self) -> Optional[str]:
-        """Composes the configured bank/UPI/payment-notes details (Settings
-        > Payment & PDF) into PDF markup, or None if nothing is configured.
-        Independent of the per-invoice QR toggle/asset -- a business that
-        only takes bank transfers (no QR/UPI) still sees its bank details
-        printed. Still shares _invoice_needs_payment() with the QR check,
-        though, so a fully paid invoice doesn't keep printing "how to pay
-        us" instructions for money that's already been collected. Skipped
-        entirely for complimentary invoices, since there's nothing to pay
-        on those."""
+    def _payment_rows(self) -> List[Tuple[str, str]]:
+        """The configured bank / UPI / payment-notes details (Settings > Payment & PDF) as (label, markup) pairs --
+        empty when nothing is configured. Independent of the per-invoice QR toggle/asset -- a business that only
+        takes bank transfers (no QR/UPI) still sees its bank details printed. Still shares _invoice_needs_payment()
+        with the QR check, though, so a fully paid invoice doesn't keep printing "how to pay us" instructions for
+        money that's already been collected. Skipped entirely for complimentary invoices, since there's nothing to
+        pay on those. The payment notes come last, with no label."""
         if self.data.get("is_complimentary") or not self._invoice_needs_payment():
-            return None
+            return []
         pd = self.config.get("payment_details", {})
-        lines = []
+        rows: List[Tuple[str, str]] = []
         for label, key in (("Bank", "bank_name"), ("A/C Holder", "account_holder_name"),
-                            ("A/C No", "account_number"), ("IFSC", "ifsc_code"),
-                            ("UPI ID", "upi_id")):
+                           ("A/C No", "account_number"), ("IFSC", "ifsc_code"),
+                           ("UPI ID", "upi_id")):
             val = _real_value(pd.get(key), _SAMPLE_UPI_ID) if key == "upi_id" else pd.get(key)
             if val:
-                lines.append(f"{label}: {safe_markup(val)}")
+                rows.append((label, safe_markup(val)))
         if notes := pd.get("payment_notes"):
-            lines.append(safe_markup(notes).replace("\n", "<br/>"))
-        return "<br/>".join(lines) if lines else None
+            rows.append(("", safe_markup(notes).replace("\n", "<br/>")))
+        return rows
 
-    def _build_footer_section(self) -> Table:
-        qr_cell = sig_cell = Spacer(0, 0)
-        payment_lines = self._build_payment_lines()
-
-        if self._should_show_qr() and (qr := self._asset("upi_qr_code")):
-            body = payment_lines or "Scan to pay."
-            detail = Paragraph(f"<b>PAYMENT DETAILS</b><br/>{body}", self.styles["NC"])
-            qr_cell = Table([[Image(str(qr), 2.2*cm, 2.2*cm, kind="proportional"), detail]],
-                            colWidths=[2.5*cm,"100%"], style=[("VALIGN",(0,0),(-1,-1),"TOP")])
-        elif payment_lines:
-            qr_cell = Paragraph(f"<b>PAYMENT DETAILS</b><br/>{payment_lines}", self.styles["NC"])
-
-        if sig := self._asset("signature"):
-            name = safe_markup(self.data.get("your_name"))
-            sig_cell = Table(
-                [[Image(str(sig), 4.0*cm, 2.0*cm, kind="proportional")],
-                 [Paragraph(f"<b>{name}</b>", self.styles["Center"])]],
-                style=[("LINEABOVE",(0,1),(0,1),1,colors.black),
-                       ("TOPPADDING",(0,1),(0,1),3),
-                       ("ALIGN",(0,0),(-1,-1),"CENTER")],
-            )
-        return Table([[qr_cell, sig_cell]], colWidths=["60%","40%"],
-                     style=[("VALIGN",(0,0),(-1,-1),"BOTTOM")])
-
-    def _build_amount_in_words(self) -> Optional[Paragraph]:
-        """"Amount in words: Rupees ... Only" under the totals -- when Settings turns it on, for rupee invoices."""
-        if not self.config.get("pdf_settings", {}).get("amount_in_words", False) or self.data.get("is_complimentary"):
+    def _build_payment_box(self, width: float) -> Optional[Table]:
+        """PAYMENT DETAILS: bank / UPI lines, with the UPI QR code beside them when it prints."""
+        rows = self._payment_rows()
+        qr = self._asset("upi_qr_code") if self._should_show_qr() else None
+        if not rows and not qr:
             return None
-        words = amount_in_words(DatabaseManager.totals_for(self.data, self._items())["grand_total"], CURRENCY_SYMBOL)
-        if not words:
+        if not rows:
+            rows = [("", "Scan to pay.")]
+        qr_w = 2.6 * cm if qr else 0.0
+        inner_w = width - qr_w - 20                                  # the box's own padding
+        label_w = 1.9 * cm
+        # a row without a label (the payment notes) is one cell across both columns -- a span shows its FIRST cell
+        lines = Table([[Paragraph(label, self.styles["PayLabel"]), Paragraph(value, self.styles["PayValue"])] if label else
+                       [Paragraph(value, self.styles["PayValue"]), ""] for label, value in rows],
+                      colWidths=[label_w, inner_w - label_w],
+                      style=TableStyle([("VALIGN",(0,0),(-1,-1),"TOP"), ("LEFTPADDING",(0,0),(-1,-1),0),
+                                        ("RIGHTPADDING",(0,0),(-1,-1),4), ("TOPPADDING",(0,0),(-1,-1),1.5),
+                                        ("BOTTOMPADDING",(0,0),(-1,-1),1.5)] +
+                                       [("SPAN",(0,i),(1,i)) for i, (label, _v) in enumerate(rows) if not label]))
+        cells: List[Any] = [[Paragraph("PAYMENT DETAILS", self.styles["Caption"]), Spacer(1, 3), lines]]
+        col_widths = [inner_w + 20 - qr_w]
+        if qr:
+            cells.append(Image(str(qr), 2.2*cm, 2.2*cm, kind="proportional"))
+            col_widths.append(qr_w)
+        t = self.tpl
+        style: List[Tuple] = [("VALIGN",(0,0),(-1,-1),"TOP"), ("LEFTPADDING",(0,0),(-1,-1),10), ("RIGHTPADDING",(0,0),(-1,-1),10),
+                              ("TOPPADDING",(0,0),(-1,-1),self._g(8)), ("BOTTOMPADDING",(0,0),(-1,-1),self._g(8)),
+                              ("BOX",(0,0),(-1,-1),0.8,colors.HexColor(t.meta_border or "#E5E7EB"))]
+        if qr:
+            style += [("ALIGN",(1,0),(1,0),"CENTER"), ("LEFTPADDING",(1,0),(1,0),0)]
+        if t.meta_bg:
+            style.append(("BACKGROUND",(0,0),(-1,-1),colors.HexColor(t.meta_bg)))
+        return Table([cells], colWidths=col_widths, style=TableStyle(style))
+
+    def _build_signature(self) -> Optional[Table]:
+        """The signature image over a line and the name, right-aligned."""
+        if not (sig := self._asset("signature")):
             return None
-        return Paragraph(f"<b>Amount in words:</b> {safe_markup(words)}", self.styles["NoteBox"])
+        name = safe_markup(self.data.get("your_name"))
+        return Table([[Image(str(sig), 4.0*cm, 2.0*cm, kind="proportional")],
+                      [Paragraph(f"<b>{name}</b>", self.styles["Center"])]], colWidths=[5.0*cm], hAlign="RIGHT",
+                     style=[("LINEABOVE",(0,1),(0,1),1,colors.black), ("TOPPADDING",(0,1),(0,1),3),
+                            ("ALIGN",(0,0),(-1,-1),"CENTER"), ("LEFTPADDING",(0,0),(-1,-1),0), ("RIGHTPADDING",(0,0),(-1,-1),0)])
+
+    def _build_footer_section(self, width: float) -> Optional[Table]:
+        """Payment details (with the QR code) on the left, the signature on the right -- None when there is neither."""
+        box = self._build_payment_box(width * 0.62)
+        sig = self._build_signature()
+        if box is None and sig is None:
+            return None
+        return Table([[box if box is not None else "", sig if sig is not None else ""]],
+                     colWidths=[width * 0.62, width * 0.38],
+                     style=[("VALIGN",(0,0),(-1,-1),"BOTTOM"), ("LEFTPADDING",(0,0),(-1,-1),0), ("RIGHTPADDING",(0,0),(-1,-1),0),
+                            ("TOPPADDING",(0,0),(-1,-1),0), ("BOTTOMPADDING",(0,0),(-1,-1),0)])
 
     def _build_notes_terms(self) -> List[Any]:
-        """The customer-facing notes and the terms & conditions (the internal notes are never printed)."""
+        """The customer-facing notes and the terms & conditions (the internal notes are never printed). A heading always
+        stays with the first lines under it; a long text flows over to the next page."""
         out: List[Any] = []
         for label, key in (("Notes", "customer_notes"), ("Terms &amp; Conditions", "terms")):
             text = str(self.data.get(key) or "").strip()
             if text:
-                out += [Paragraph(f"<b>{label}</b>", self.styles["NoteBox"]), Spacer(1, 0.08*cm),
-                        Paragraph(safe_markup(text).replace("\n", "<br/>"), self.styles["Small"]), Spacer(1, 0.3*cm)]
+                out += [CondPageBreak(1.6*cm), Paragraph(label, self.styles["Caption"]), Spacer(1, self._g(0.1*cm)),
+                        Paragraph(safe_markup(text).replace("\n", "<br/>"), self.styles["NoteText"]), Spacer(1, self._g(0.3*cm))]
         return out
 
-    def generate(self) -> Path:
-        doc   = SimpleDocTemplate(str(self.filename), pagesize=A4,
-                                  rightMargin=1.5*cm, leftMargin=1.5*cm,
-                                  topMargin=1.5*cm,  bottomMargin=1.5*cm)
-        story = [
-            self._build_header(),         Spacer(1, 0.4*cm),
-            self._build_address(),        Spacer(1, 0.4*cm),
-            self._build_meta(),           Spacer(1, 0.4*cm),
-            self._build_items(),
-            self._build_totals(),
+    # ------------------------------------------------------------------ #
+    #  Every page: top bar, running header, watermark, "Page x of y"
+    # ------------------------------------------------------------------ #
+    def _draw_top_bar(self, canvas):
+        """The colour strip some templates draw across the top edge of every page."""
+        if not self.tpl.bar:
+            return
+        canvas.saveState()
+        canvas.setFillColor(colors.HexColor(self.tpl.bar))
+        canvas.rect(0, A4[1] - 0.6*cm, A4[0], 0.6*cm, stroke=0, fill=1)
+        canvas.restoreState()
+
+    def _fit_text(self, canvas, text: str, max_width: float, size: float, font: Optional[str] = None) -> str:
+        """`text`, cut with an ellipsis when it is wider than `max_width`."""
+        font = font or self.font
+        if canvas.stringWidth(text, font, size) <= max_width:
+            return text
+        while text and canvas.stringWidth(text + "…", font, size) > max_width:
+            text = text[:-1]
+        return text + "…"
+
+    def _draw_running_header(self, canvas):
+        """Pages after the first: whose invoice this is, so a loose sheet can be identified and filed."""
+        width, height = A4
+        left, right = self.MARGIN_X * cm, width - self.MARGIN_X * cm
+        canvas.saveState()
+        canvas.setFont(self.bold, 9)
+        canvas.setFillColor(colors.HexColor("#111827"))
+        canvas.drawString(left, height - 1.2*cm, self._fit_text(canvas, compose_your_name(self.config), 9.0*cm, 9, self.bold))
+        canvas.setFont(self.font, 8.5)
+        canvas.setFillColor(colors.HexColor("#6B7280"))
+        number = str(self.data.get("invoice_number") or "")
+        canvas.drawRightString(right, height - 1.2*cm, self._fit_text(canvas, f"Invoice {number}  ·  continued", 8.0*cm, 8.5))
+        canvas.setStrokeColor(colors.HexColor(self.tpl.rule))
+        canvas.setLineWidth(0.6)
+        canvas.line(left, height - 1.5*cm, right, height - 1.5*cm)
+        canvas.restoreState()
+
+    def _apply_watermark(self, canvas, doc):
+        wm_map = {
+            InvoiceStatus.PAID.value:          ("PAID",            "#10B981", 100),
+            InvoiceStatus.DUE.value:           ("BALANCE DUE",     "#EF4444",  50),
+            InvoiceStatus.PARTIAL.value:       ("PARTIAL PAYMENT", "#F59E0B",  50),
+            InvoiceStatus.OVERPAID.value:      ("ADVANCE / CREDIT","#8B5CF6",  50),
+            InvoiceStatus.COMPLIMENTARY.value: ("COMPLIMENTARY",   "#3B82F6",  40),
+        }
+        if (entry := wm_map.get(self.data.get("status"))):
+            txt, col, fsz = entry
+            canvas.saveState()
+            canvas.setFont("Helvetica-Bold", fsz)
+            canvas.setFillColor(colors.HexColor(col), alpha=0.08)
+            canvas.translate(A4[0]/2, A4[1]/2)
+            canvas.rotate(35)
+            canvas.drawCentredString(0, 0, txt)
+            canvas.restoreState()
+
+    def _draw_footer(self, canvas, page: int, total: int):
+        """A hairline, the invoice number, the footer note from Settings (up to two lines) and "Page x of y"."""
+        width, _height = A4
+        left, right = self.MARGIN_X * cm, width - self.MARGIN_X * cm
+        first = 1.45 * cm                                   # baseline of the first line of text
+        canvas.saveState()
+        canvas.setStrokeColor(colors.HexColor("#E5E7EB"))
+        canvas.setLineWidth(0.6)
+        canvas.line(left, 1.95*cm, right, 1.95*cm)
+        canvas.setFont(self.font, 8)
+        canvas.setFillColor(colors.HexColor("#6B7280"))
+        canvas.drawString(left, first, self._fit_text(canvas, str(self.data.get("invoice_number") or ""), 4.0*cm, 8))
+        canvas.drawRightString(right, first, f"Page {page} of {total}")
+        note = str(self.config.get("pdf_settings", {}).get("footer_message", "Thank you!") or "")
+        lines = [line for part in note.splitlines() for line in (simpleSplit(part, self.font, 8, 9.5*cm) or [""])]
+        lines = [line for line in lines if line.strip()]
+        shown = lines[:2]
+        if len(lines) > 2:                                  # more text than two lines can hold
+            shown[1] = self._fit_text(canvas, shown[1] + "…", 9.5*cm, 8)
+        for n, line in enumerate(shown):
+            canvas.drawCentredString(width / 2.0, first - n * 0.4*cm, line)
+        canvas.restoreState()
+
+    def _on_page(self, canvas, doc):
+        """Called as every page begins: the colour bar, the running header (not on the first page) and the watermark
+        -- all behind the content. The footer is drawn at the end, when the number of pages is known."""
+        self._draw_top_bar(canvas)
+        if doc.page > 1:
+            self._draw_running_header(canvas)
+        self._apply_watermark(canvas, doc)
+
+    def _numbered_canvas(self):
+        """A canvas that draws the footer once the number of pages is known."""
+        generator = self
+
+        class NumberedCanvas(Canvas):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                self._page_states: List[Dict[str, Any]] = []
+
+            def showPage(self):
+                self._page_states.append(dict(self.__dict__))
+                self._startPage()
+
+            def save(self):
+                total = len(self._page_states)
+                generator.page_count = total
+                for state in self._page_states:
+                    self.__dict__.update(state)
+                    generator._draw_footer(self, self._pageNumber, total)
+                    super().showPage()
+                super().save()
+
+        return NumberedCanvas
+
+    def _tail_marker(self):
+        """A flowable with no size that goes last: when the layout reaches it, it is told how much room is left on the
+        last page (the auto-fit pass decides from that whether the last page is nearly empty)."""
+        generator = self
+
+        class TailMarker(Flowable):
+            def wrap(self, avail_width, avail_height):
+                generator._room_left = avail_height
+                return 0, 0
+
+            def draw(self):
+                pass
+
+        return TailMarker()
+
+    def _layout(self, target) -> None:
+        """Lays the whole invoice out on A4 pages and writes the PDF to `target` (a path or a file-like object). Leaves
+        the number of pages in self.page_count and the room left on the last page in self._room_left."""
+        number = str(self.data.get("invoice_number") or "")
+        doc = BaseDocTemplate(target, pagesize=A4,
+                              rightMargin=self.MARGIN_X*cm, leftMargin=self.MARGIN_X*cm,
+                              topMargin=self.MARGIN_TOP*cm, bottomMargin=self.MARGIN_BOTTOM*cm,
+                              title=f"Invoice {number}", author=compose_your_name(self.config),
+                              subject=f"Invoice {number} for {self.data.get('bill_to') or ''}".strip(),
+                              creator=f"{APP_NAME} {APP_VERSION} (build {APP_BUILD_VERSION})")
+        # A frame without padding: every table is exactly as wide as the printable area, so the page edges line up.
+        frame = Frame(doc.leftMargin, doc.bottomMargin, doc.width, doc.height, id="page",
+                      leftPadding=0, rightPadding=0, topPadding=0, bottomPadding=0)
+        doc.addPageTemplates([PageTemplate(id="invoice", frames=[frame], onPage=self._on_page, pagesize=A4)])
+        width, gap = doc.width, self._g
+        story: List[Any] = [
+            self._build_header(width),         Spacer(1, gap(0.45*cm)),
+            self._build_parties(width),        Spacer(1, gap(0.4*cm)),
+            self._build_meta(width),           Spacer(1, gap(0.45*cm)),
+            self._build_items(width),          Spacer(1, gap(0.4*cm)),
+            *self._build_summary(width),
         ]
-        if in_words := self._build_amount_in_words():
-            story += [Spacer(1, 0.15*cm), in_words]
-        story.append(Spacer(1, 0.3*cm))
-        if history := self._build_payment_history():
-            story += [Paragraph("<b>Payment History</b>", self.styles["NoteBox"]), Spacer(1, 0.15*cm),
-                      history, Spacer(1, 0.3*cm)]
+        if history := self._build_payment_history(width):
+            story += [Spacer(1, gap(0.35*cm)), CondPageBreak(2.5*cm), Paragraph("Payment History", self.styles["Caption"]),
+                      Spacer(1, gap(0.12*cm)), history]
+        if footer := self._build_footer_section(width):
+            story += [Spacer(1, gap(0.4*cm)), KeepTogether([footer])]
         # Internal notes (self.data["notes"]) are intentionally never printed
         # on the customer-facing PDF -- they're for Vyaprix's eyes only. The customer notes and the terms are.
-        story += self._build_notes_terms()
-        story += [Spacer(1, 0.3*cm), self._build_footer_section()]
-        doc.build(story, onFirstPage=self.on_each_page, onLaterPages=self.on_each_page)
+        notes = self._build_notes_terms()
+        if notes:
+            story += [Spacer(1, gap(0.4*cm)), *notes]
+        story.append(self._tail_marker())
+        doc.build(story, canvasmaker=self._numbered_canvas())
+
+    def generate(self) -> Path:
+        """Writes the invoice PDF and returns its path. An invoice that runs only a little onto a second (or later) page
+        is laid out a second time with tighter gaps and row padding, and that version is printed when it saves a page."""
+        self.tight = self.tightened = False
+        plain = io.BytesIO()
+        self._layout(plain)
+        result, pages = plain.getvalue(), self.page_count
+        if pages > 1 and self._room_left >= (1.0 - self.TIGHT_WHEN_LAST_PAGE_BELOW) * self.page_height:
+            self.tight = True
+            try:
+                snug = io.BytesIO()
+                self._layout(snug)
+                if self.page_count < pages:
+                    result, pages, self.tightened = snug.getvalue(), self.page_count, True
+            except Exception:
+                logger.warning("The tighter layout of invoice %r failed; printing it as designed.",
+                               self.data.get("invoice_number"), exc_info=True)
+            finally:
+                self.tight = False
+                self.page_count = pages
+        self.filename.write_bytes(result)
         return self.filename
+
+
+def sample_invoice_data(config: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
+    """A made-up invoice with one payment, for previewing a template: printed under the user's own business details
+    (name, logo, bank details), with the kinds of lines a real invoice has -- quantities, units, HSN codes and a GST
+    rate per item -- so the whole table shows."""
+    today = datetime.date.today()
+    items = [
+        {"title": "Stage and sound setup", "description": "Truss stage 20 x 16 ft with PA system", "amount": 90000.0,
+         "discount": 9000.0, "qty": 2.0, "unit": "Event", "rate": 45000.0, "hsn": "998596", "tax_rate": 18.0,
+         "disc_type": "percent", "disc_value": 10.0},
+        {"title": "Banquet chairs", "description": "With covers", "amount": 12500.0, "discount": 0.0, "qty": 250.0,
+         "unit": "Nos", "rate": 50.0, "hsn": "997212", "tax_rate": 18.0},
+        {"title": "Printed brochures", "description": "A5 glossy, 4 colour", "amount": 8000.0, "discount": 0.0,
+         "qty": 1000.0, "unit": "Pcs", "rate": 8.0, "hsn": "4911", "tax_rate": 5.0},
+    ]
+    data = {
+        "invoice_number": "INV-0001", "bill_to": "Sample Customer Pvt Ltd",
+        "client_contact": "12 Park Street\nKolkata - 700016\naccounts@example.com", "client_gstin": "",
+        "your_name": compose_your_name(config), "your_contact": compose_your_contact(config),
+        "items": json.dumps(items), "amount_paid": 0.0, "tax_rate": 18.0,
+        "invoice_date": today.strftime(DB_DATE_FORMAT), "payment_date": None,
+        "status": InvoiceStatus.PARTIAL.value, "payment_terms": "Net 15", "payment_mode": None,
+        "show_qr_code": 1, "is_complimentary": 0, "is_gst_invoice": 1,
+        "global_discount_value": 0.0, "global_discount_type": "amount", "advance_amount": 0.0, "advance_date": None,
+        "gst_type": "CGST/SGST", "notes": "", "tax_mode": TAX_MODE_PER_ITEM, "round_off": 1,
+        "place_of_supply": "", "po_number": "",
+        "due_date": (today + datetime.timedelta(days=15)).strftime(DB_DATE_FORMAT), "reverse_charge": 0,
+        "customer_notes": "Thank you for your business!",
+        "terms": "1. Payment within 15 days of the invoice date.\n2. Goods once sold are not returnable.",
+    }
+    payments = [{"amount": 25000.0, "payment_date": today.strftime(DB_DATE_FORMAT), "mode": "UPI", "note": "Advance"}]
+    return data, payments
 
 
 def merge_pdfs(paths: List[Path], out_path: Path) -> Path:
@@ -2579,6 +3211,8 @@ QFrame[role="stat-solid"] { border: none; border-radius: 10px; }   /* Dashboard 
 QFrame[role="splash"]  { background: @surface@; border: none; }
 QFrame[role="splash-border"] { background: @primary@; border: none; }      /* square, like the Tk splash window */
 QFrame[role="thumb"]   { background: @alt@; border: 1px solid @border@; border-radius: 6px; }
+QFrame[role="tpl"]     { background: @surface@; border: 2px solid @border@; border-radius: 8px; }      /* a template in Settings */
+QFrame[role="tpl"][selected="true"] { border: 2px solid @primary@; }
 QFrame[role="key"]     { background: @alt@; border: 1px solid @border_strong@; border-radius: 4px; }
 
 /* ---------- labels ---------- */
@@ -2651,6 +3285,7 @@ QPushButton[role="link"]:hover { background: @primary_soft@; }
 QPushButton[role="tool"] { padding: 4px 8px; min-width: 22px; font-size: 14px; background: @surface@; }
 QPushButton[glyph="true"] { padding: 7px 6px; }                                 /* one-symbol buttons ("✕"): no wide side padding */
 QPushButton[align="left"] { text-align: left; padding: 11px 15px; }        /* sidebar navigation / system buttons */
+QPushButton[align="icon"] { text-align: center; padding: 11px 0px; }       /* ... in the compact (icons only) sidebar */
 QToolButton { background: transparent; border: 1px solid transparent; border-radius: 6px; padding: 4px; }
 QToolButton:hover { background: @alt@; border-color: @border@; }
 
@@ -3221,11 +3856,17 @@ def run_dialog(dialog: QDialog) -> int:
         dialog.deleteLater()
 
 
+def screen_area(widget: Optional[QWidget] = None) -> Optional[QRect]:
+    """The usable part (the screen minus the taskbar) of the screen `widget` is on -- the one place every window-size
+    decision asks, so they all agree. None when there is no screen."""
+    screen = (widget.screen() if widget is not None else None) or QGuiApplication.primaryScreen()
+    return screen.availableGeometry() if screen is not None else None
+
+
 def _fit_to_screen(dialog: QDialog, width: int, height: int, min_width: int, min_height: int) -> None:
     """Sizes a dialog as the Tk build did, but never larger than the screen it opens on (many laptops are 768 px tall)."""
-    screen = dialog.screen() or QApplication.primaryScreen()
-    if screen is not None:
-        area = screen.availableGeometry()
+    area = screen_area(dialog)
+    if area is not None:
         width, height = min(width, max(320, area.width() - 40)), min(height, max(320, area.height() - 60))
     dialog.setMinimumSize(min(min_width, width), min(min_height, height))
     dialog.resize(width, height)
@@ -3519,9 +4160,8 @@ class PDFViewer(QDialog):
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)    # nobody keeps a reference: free it when it closes
         self.setWindowFlag(Qt.WindowType.WindowMaximizeButtonHint, True)
 
-        # --- Size (Tk: 900x720, also the minimum; centred on the screen on first show) ---
-        self.setMinimumSize(900, 720)
-        self.resize(900, 720)
+        # --- Size (Tk: 900x720, also the minimum -- smaller only on a screen that cannot hold it; centred on first show) ---
+        _fit_to_screen(self, 900, 720, 900, 720)
 
         if not self._open_document():
             return
@@ -3668,10 +4308,8 @@ class PDFViewer(QDialog):
         super().showEvent(event)
         if not self._placed:
             self._placed = True
-            parent = self.parentWidget()
-            screen = parent.screen() if parent is not None else QGuiApplication.primaryScreen()
-            if screen is not None:                                     # Tk: centred on the screen
-                area = screen.availableGeometry()
+            area = screen_area(self.parentWidget())
+            if area is not None:                                       # Tk: centred on the screen
                 self.move(area.center() - QPoint(self.width() // 2, self.height() // 2))
         self.scroll.setFocus()
         self._schedule_render(30)                                      # first picture as soon as the window has its size
@@ -3680,6 +4318,14 @@ class PDFViewer(QDialog):
         super().resizeEvent(event)
         if not self._failed:
             self._schedule_render(130)                                 # re-render once the user stops resizing
+
+    def event(self, event):
+        # Dragged to a monitor with another pixel density (100 % -> 150 %): draw the page again at that screen's
+        # resolution, otherwise it stays as soft as the old monitor's bitmap.
+        if event.type() == QEvent.Type.DevicePixelRatioChange and not getattr(self, "_failed", True) \
+                and not getattr(self, "_released", True):
+            self._schedule_render(30)
+        return super().event(event)
 
     def _schedule_render(self, delay_ms: int):
         """(Re)start the debounce timer. QTimer.start(msec) also *changes* the interval, so the delay is passed
@@ -4352,8 +4998,7 @@ class BulkProgressDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle(title)
         self.setModal(True)
-        self.resize(580, 480)
-        self.setMinimumSize(520, 440)
+        _fit_to_screen(self, 580, 480, 520, 440)
 
         self._items = items
         self._work_fn = work_fn
@@ -4561,6 +5206,54 @@ class BulkProgressDialog(QDialog):
                 logger.error(f"Bulk operation on_done callback failed: {exc}", exc_info=True)
 
 
+class ChangelogDialog(QDialog):
+    """"What's new": every release since the file this project started from, with all of its changes."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(f"What's New in {APP_NAME}")
+        self.setModal(True)
+        _fit_to_screen(self, 560, 640, 420, 420)
+        root = QVBoxLayout(self)
+        root.setContentsMargins(20, 20, 20, 20)
+        root.setSpacing(12)
+        root.addWidget(make_label(f"{CHANGE_COUNT} changes since {BASE_VERSION} (build {BASE_BUILD_VERSION})", "h2"))
+        self.summary_lbl = make_label(f"You are running {APP_VERSION}, build {APP_BUILD_VERSION}.", "muted")
+        root.addWidget(self.summary_lbl)
+        area = QScrollArea()
+        area.setWidgetResizable(True)
+        area.setFrameShape(QFrame.Shape.NoFrame)
+        area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        body = QWidget()
+        col = QVBoxLayout(body)
+        col.setContentsMargins(0, 0, 10, 0)
+        col.setSpacing(4)
+        self.release_labels: List[QLabel] = []
+        self.change_labels: List[QLabel] = []
+        for release in CHANGELOG:
+            head = make_label(f"{release.version}  —  {release.title}", "h3")
+            self.release_labels.append(head)
+            col.addSpacing(8)
+            col.addWidget(head)
+            col.addWidget(make_label(f"{release.date}  ·  {len(release.changes)} changes", "muted"))
+            col.addSpacing(4)
+            for change in release.changes:
+                lbl = make_label(f"•  {change}", wrap=True)
+                lbl.setMinimumWidth(120)
+                self.change_labels.append(lbl)
+                col.addWidget(lbl)
+        col.addStretch(1)
+        area.setWidget(body)
+        root.addWidget(area, 1)
+        row = QHBoxLayout()
+        row.addStretch(1)
+        self.close_btn = make_button("Close", "primary", self.accept)
+        self.close_btn.setFixedWidth(130)
+        self.close_btn.setDefault(True)
+        row.addWidget(self.close_btn)
+        root.addLayout(row)
+
+
 class AboutDialog(QDialog):
     WIDTH = 400
 
@@ -4590,11 +5283,15 @@ class AboutDialog(QDialog):
         self.version_label = make_label(APP_VERSION, "display", "info", align=Qt.AlignmentFlag.AlignCenter)
         root.addWidget(self.version_label)
         root.addSpacing(5)
+        self.build_label = make_label(f"Build {APP_BUILD_VERSION}", "muted", align=Qt.AlignmentFlag.AlignCenter)
+        root.addWidget(self.build_label)
         root.addWidget(make_label(f"Released on {APP_RELEASE_DATE}", "muted", align=Qt.AlignmentFlag.AlignCenter))
         root.addSpacing(6)
-        root.addWidget(make_label("Now with client & catalog managers, payment\n"
-                                  "history tracking, and bulk invoice actions.",
-                                  "small", align=Qt.AlignmentFlag.AlignCenter))
+        self.headline_label = make_label(CHANGELOG[0].title, "small", align=Qt.AlignmentFlag.AlignCenter, wrap=True)
+        root.addWidget(self.headline_label)
+        self.changes_label = make_label(f"{CHANGE_COUNT} changes since {BASE_VERSION} (build {BASE_BUILD_VERSION})",
+                                        "small", align=Qt.AlignmentFlag.AlignCenter)
+        root.addWidget(self.changes_label)
         root.addSpacing(15)
         root.addWidget(hline())
         root.addSpacing(15)
@@ -4609,12 +5306,19 @@ class AboutDialog(QDialog):
         root.addSpacing(20)
         row = QHBoxLayout()
         row.addStretch(1)
+        self.whats_new_btn = make_button("What's New", "secondary-outline", self._show_changelog)
+        self.whats_new_btn.setFixedWidth(130)
+        row.addWidget(self.whats_new_btn)
+        row.addSpacing(8)
         self.close_btn = make_button("Close", "primary", self.accept)
         self.close_btn.setFixedWidth(130)
         self.close_btn.setDefault(True)
         row.addWidget(self.close_btn)
         row.addStretch(1)
         root.addLayout(row)
+
+    def _show_changelog(self):
+        ChangelogDialog(self).exec()
 
 
 class ShortcutsDialog(QDialog):
@@ -4699,6 +5403,15 @@ def _logo_pixmap_for(widget: QWidget, max_width: int) -> Optional[QPixmap]:
     return pixmap
 
 
+def pixel_ratio(widget: Optional[QWidget] = None) -> int:
+    """The scale to paint a pixmap at for the screen `widget` is on: its device pixel ratio rounded UP, and never below
+    2 -- so an image stays sharp at 125 %, 150 %, 200 % or 300 % (Qt scales it down by the exact fraction)."""
+    screen = (widget.screen() if widget is not None else None) or QGuiApplication.primaryScreen()
+    ratio = screen.devicePixelRatio() if screen is not None else 1.0
+    whole = int(ratio)
+    return max(2, whole + (1 if ratio - whole > 1e-6 else 0))
+
+
 class _AssetRow(QWidget):
     """One upload row (Company Logo / Authorized Signature / UPI QR Code): a preview thumbnail, a status line and
     Browse / Clear buttons. The chosen file is copied into Vyaprix's own data folder straight away, so the app keeps
@@ -4772,6 +5485,233 @@ class _AssetRow(QWidget):
         self.set_path("")
 
 
+def template_thumbnail(tpl: PDFTemplate, width: int = 84, ratio: Optional[int] = None) -> QPixmap:
+    """A miniature of an invoice in `tpl`, painted from the same colours the PDF is printed in -- so a brand colour
+    shows in it at once. The page is drawn in millimetres (210 x 297), at `ratio` pixels per logical pixel (the
+    screen's, by default)."""
+    ratio = ratio or pixel_ratio()
+    height = round(width * 297 / 210)
+    pm = QPixmap(width * ratio, height * ratio)
+    pm.setDevicePixelRatio(ratio)
+    pm.fill(QColor("#FFFFFF"))
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    p.scale(width / 210.0, width / 210.0)
+
+    def block(x: float, y: float, w: float, h: float, color: str):
+        if color:
+            p.fillRect(QRectF(x, y, w, h), QColor(color))
+
+    def rule(x1: float, y1: float, x2: float, y2: float, color: str, points: float = 1.0):
+        if color:
+            pen = QPen(QColor(color))
+            pen.setWidthF(max(points * 0.353, 1.1))          # never thinner than a hair at this size
+            p.setPen(pen)
+            p.drawLine(QPointF(x1, y1), QPointF(x2, y2))
+
+    ink, soft = "#374151", "#9CA3AF"
+    block(0, 0, 210, 6, tpl.bar)
+    if tpl.header == "band":
+        block(15, 14, 180, 30, tpl.band_bg)
+        block(21, 22, 52, 7, tpl.name_color)
+        block(21, 32, 34, 3, tpl.tagline_color)
+        block(150, 24, 39, 8, tpl.title_color)
+        y = 52
+    else:
+        block(15, 16, 50, 7, tpl.name_color)
+        block(15, 26, 32, 3, tpl.tagline_color)
+        scale = tpl.title_size / 18.0
+        block(195 - 40 * scale, 17, 40 * scale, 8 * scale, tpl.title_color)
+        rule(15, 38, 195, 38, tpl.rule, tpl.rule_width)
+        y = 46
+    # BILL TO and FROM, side by side
+    for x in (15, 111):
+        block(x, y, 14, 2.6, tpl.label_color)
+        block(x, y + 5, 38, 3, ink)
+        block(x, y + 10, 46, 2.6, soft)
+        block(x, y + 14.5, 34, 2.6, soft)
+    # the reference strip: four labelled cells
+    y += 25
+    block(15, y, 180, 14, tpl.meta_bg)
+    if tpl.meta_border:
+        p.setPen(QPen(QColor(tpl.meta_border), 1.1))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawRect(QRectF(15, y, 180, 14))
+    rule(15, y, 195, y, tpl.meta_lines, 0.6)
+    rule(15, y + 14, 195, y + 14, tpl.meta_lines, 0.6)
+    for k in range(4):
+        block(19 + k * 44, y + 3, 14, 1.8, tpl.label_color)
+        block(19 + k * 44, y + 7, 26, 2.8, ink)
+    # item table: # | item | HSN | qty | rate | amount
+    y += 21
+    head_h, row_h, rows = 9, 12, 3
+    numeric = ((101, 11), (121, 11), (141, 12), (173, 16))
+    block(15, y, 180, head_h, tpl.head_bg)
+    head_ink = tpl.head_fg
+    block(18, y + 3.2, 4, 2.6, head_ink)
+    block(28, y + 3.2, 28, 2.6, head_ink)
+    for x, w in numeric:
+        block(x, y + 3.2, w - 2, 2.6, head_ink)
+    rule(15, y + head_h, 195, y + head_h, tpl.head_rule, 1.2)
+    for r in range(rows):
+        top = y + head_h + r * row_h
+        if tpl.zebra and r % 2 == 1:
+            block(15, top, 180, row_h, tpl.zebra)
+        block(18, top + 4, 4, 2.6, ink)
+        block(28, top + 3, 40, 3, ink)
+        block(28, top + 7.6, 54, 2.2, soft)
+        for x, w in numeric:
+            block(x, top + 4, w - 2, 2.6, ink)
+        if r < rows - 1:
+            rule(15, top + row_h, 195, top + row_h, tpl.row_line, 1.0)
+    bottom = y + head_h + rows * row_h
+    rule(15, bottom, 195, bottom, tpl.end_line, tpl.end_width)
+    if tpl.grid:
+        p.setPen(QPen(QColor(tpl.grid_line), 1.0))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawRect(QRectF(15, y, 180, bottom - y))
+        for x in (24, 98, 118, 138, 168):
+            p.drawLine(QPointF(x, y), QPointF(x, bottom))
+        for r in range(1, rows):
+            p.drawLine(QPointF(15, y + head_h + r * row_h), QPointF(195, y + head_h + r * row_h))
+    # summary: the amount in words and the GST summary on the left, the totals on the right
+    y = bottom + 7
+    block(15, y, 62, 2.4, soft)
+    block(15, y + 4.4, 84, 2.4, ink)
+    block(15, y + 12, 86, 5, tpl.head_bg or tpl.pay_head_bg)
+    for k in range(2):
+        block(18, y + 20 + k * 5, 14, 2.2, soft)
+        block(48, y + 20 + k * 5, 18, 2.2, ink)
+        block(76, y + 20 + k * 5, 18, 2.2, ink)
+    left = 108
+    for k in range(3):
+        block(left + 38, y + k * 6.4 + 1.6, 26, 2.4, soft)
+        block(172, y + k * 6.4 + 1.6, 23, 2.4, ink)
+    ty = y + 3 * 6.4
+    block(left, ty, 195 - left, 7, tpl.total_bg)
+    rule(left, ty, 195, ty, tpl.total_rule, 0.8)
+    total_ink = tpl.total_fg if tpl.total_bg else ink
+    block(left + 38, ty + 2.2, 26, 2.8, total_ink)
+    block(172, ty + 2.2, 23, 2.8, total_ink)
+    by = ty + 7
+    block(left, by, 195 - left, 7, "#FEF2F2")
+    block(left + 38, by + 2.2, 26, 2.8, ink)
+    block(172, by + 2.2, 23, 2.8, "#DC2626")
+    # the page footer: a hairline, the invoice number, the note and "Page 1 of 1"
+    rule(15, 281, 195, 281, "#E5E7EB", 0.6)
+    block(15, 285, 18, 2.2, soft)
+    block(80, 285, 50, 2.2, soft)
+    block(177, 285, 18, 2.2, soft)
+    p.setPen(QPen(QColor("#CBD5E1"), 0.9))
+    p.setBrush(Qt.BrushStyle.NoBrush)
+    p.drawRect(QRectF(0.4, 0.4, 209.2, 296.2))
+    p.end()
+    return pm
+
+
+# The brand colours offered in Settings (any other colour can be picked with "Custom colour...").
+BRAND_COLORS: List[Tuple[str, str]] = [
+    ("#2563EB", "Blue"), ("#4F46E5", "Indigo"), ("#7C3AED", "Purple"), ("#DB2777", "Pink"), ("#DC2626", "Red"),
+    ("#EA580C", "Orange"), ("#16A34A", "Green"), ("#0D9488", "Teal"), ("#1E3A5F", "Navy"), ("#111827", "Black"),
+]
+
+
+def _swatch_icon(color: str, selected: bool, ratio: Optional[int] = None) -> QIcon:
+    """A round colour chip; a selected one has a ring around it."""
+    ratio, size = ratio or pixel_ratio(), 24
+    pm = QPixmap(size * ratio, size * ratio)
+    pm.setDevicePixelRatio(ratio)
+    pm.fill(Qt.GlobalColor.transparent)
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    centre = QPointF(size / 2, size / 2)
+    if selected:
+        p.setPen(QPen(QColor("#374151"), 2))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawEllipse(centre, 10.5, 10.5)
+        radius = 7.5
+    else:
+        radius = 9.0
+    p.setPen(QPen(QColor(0, 0, 0, 50), 1))
+    p.setBrush(QColor(color))
+    p.drawEllipse(centre, radius, radius)
+    p.end()
+    return QIcon(pm)
+
+
+class _Swatch(QToolButton):
+    """A colour chip in the brand-colour row; clicking it announces its colour."""
+    picked = Signal(str)
+
+    def __init__(self, color: str, name: str, parent=None):
+        super().__init__(parent)
+        self.color = color
+        self.setCheckable(True)
+        self.setAutoRaise(True)
+        self.setToolTip(f"{name}  ({color})")
+        self.setIconSize(QSize(24, 24))
+        self.setFixedSize(30, 30)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setIcon(_swatch_icon(color, False, pixel_ratio(self)))
+        self.clicked.connect(self._on_clicked)
+
+    def _on_clicked(self, _checked: bool = False):
+        self.picked.emit(self.color)
+
+    def set_selected(self, selected: bool):
+        self.setChecked(selected)
+        self.setIcon(_swatch_icon(self.color, selected, pixel_ratio(self)))
+
+
+class _TemplateCard(QFrame):
+    """One template in Settings: a miniature of the invoice, its name (a radio button) and a line about it. Clicking
+    anywhere on the card picks it."""
+    picked = Signal(str)
+
+    def __init__(self, tpl: PDFTemplate, group: QButtonGroup, parent=None):
+        super().__init__(parent)
+        self.key = tpl.key
+        set_role(self, "tpl")
+        set_flag(self, "selected", False)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(10, 10, 10, 10)
+        lay.setSpacing(12)
+        self.thumb = QLabel()
+        self.thumb.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignHCenter)
+        self.thumb.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        lay.addWidget(self.thumb, 0, Qt.AlignmentFlag.AlignTop)
+        text = QVBoxLayout()
+        text.setSpacing(4)
+        self.radio = QRadioButton(tpl.label)
+        self.radio.setProperty("role", "h3")
+        group.addButton(self.radio)
+        self.radio.toggled.connect(self._on_toggled)
+        text.addWidget(self.radio)
+        self.blurb = make_label(tpl.blurb, "muted", wrap=True)
+        self.blurb.setMinimumWidth(90)                  # a wrapped label otherwise asks for far more room than it needs
+        text.addWidget(self.blurb)
+        text.addStretch(1)
+        lay.addLayout(text, 1)
+        self.refresh(tpl)
+
+    def refresh(self, tpl: PDFTemplate):
+        """Redraw the miniature (the template may have taken another brand colour)."""
+        pm = template_thumbnail(tpl, ratio=pixel_ratio(self))
+        self.thumb.setPixmap(pm)
+        self.thumb.setFixedSize(pm.size() / pm.devicePixelRatio())
+
+    def _on_toggled(self, checked: bool):
+        set_flag(self, "selected", checked)
+        if checked:
+            self.picked.emit(self.key)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.radio.click()
+        super().mousePressEvent(event)
+
+
 class SettingsDialog(QDialog):
     CURRENCY_OPTIONS: List[Tuple[str, str, str]] = [
         ("₹",   "INR", "Indian Rupee"),
@@ -4807,8 +5747,17 @@ class SettingsDialog(QDialog):
         self._cfg = load_config()
         self._asset_rows: Dict[str, _AssetRow] = {}
         self._scroll_areas: Dict[int, QScrollArea] = {}
+        self._template_key = PDF_TEMPLATE_CLASSIC.key       # the invoice look and brand colour chosen in this dialog
+        self._accent = ""
+        self._preview_dirs: List[Path] = []                  # folders holding sample PDFs (removed when the dialog closes)
         self._build()
         self._load()
+
+    def done(self, result: int):
+        for folder in self._preview_dirs:
+            shutil.rmtree(folder, ignore_errors=True)
+        self._preview_dirs.clear()
+        super().done(result)
 
     @classmethod
     def _currency_option_label(cls, opt: Tuple[str, str, str]) -> str:
@@ -4951,8 +5900,135 @@ class SettingsDialog(QDialog):
             form.addRow(make_label(caption), field)
         self._form_tab("Your Details", form, scroll=True)
 
+    # ---- Invoice template -------------------------------------------------- #
+    def _build_template_picker(self) -> QWidget:
+        """The templates as cards (two to a row), the brand colour row and the sample-preview button."""
+        box = QWidget()
+        col = QVBoxLayout(box)
+        col.setContentsMargins(0, 0, 0, 0)
+        col.setSpacing(10)
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(12)
+        grid.setVerticalSpacing(12)
+        self.template_group = QButtonGroup(self)
+        self.template_cards: Dict[str, _TemplateCard] = {}
+        for n, tpl in enumerate(PDF_TEMPLATES.values()):
+            card = _TemplateCard(tpl, self.template_group)
+            card.picked.connect(self._on_template_picked)
+            self.template_cards[tpl.key] = card
+            grid.addWidget(card, n // 2, n % 2)
+        grid.setColumnStretch(0, 1)
+        grid.setColumnStretch(1, 1)
+        col.addLayout(grid)
+
+        self.accent_box = QWidget()
+        accent_col = QVBoxLayout(self.accent_box)
+        accent_col.setContentsMargins(0, 0, 0, 0)
+        accent_col.setSpacing(6)
+        row = QHBoxLayout()
+        row.setSpacing(2)
+        row.addWidget(make_label("Brand colour:"))
+        row.addSpacing(8)
+        self.accent_swatches: Dict[str, _Swatch] = {}
+        for color, name in BRAND_COLORS:
+            swatch = _Swatch(color, name)
+            swatch.picked.connect(self._on_accent_picked)
+            self.accent_swatches[color] = swatch
+            row.addWidget(swatch)
+        row.addStretch(1)
+        accent_col.addLayout(row)
+        row = QHBoxLayout()
+        self.accent_custom_btn = make_button("Custom colour…", "secondary-outline", self._pick_custom_accent,
+                                             tooltip="Choose any other colour")
+        row.addWidget(self.accent_custom_btn)
+        self.accent_reset_btn = make_button("Use the template's colour", "link", self._reset_accent,
+                                            tooltip="Go back to the colour the template comes with")
+        row.addWidget(self.accent_reset_btn)
+        row.addStretch(1)
+        accent_col.addLayout(row)
+        col.addWidget(self.accent_box)
+        self.accent_note = self._note("")
+        col.addWidget(self.accent_note)
+
+        line = QHBoxLayout()
+        self.preview_template_btn = make_button("Preview sample invoice", "info-outline", self._preview_template,
+                                                tooltip="Open a made-up invoice in the template and colour chosen above")
+        line.addWidget(self.preview_template_btn)
+        line.addStretch(1)
+        col.addLayout(line)
+        return box
+
+    def _on_template_picked(self, key: str):
+        self._template_key = key
+        self._sync_template_picker()
+
+    def _on_accent_picked(self, color: str):
+        self._accent = color
+        self._sync_template_picker()
+
+    def _reset_accent(self):
+        self._accent = ""
+        self._sync_template_picker()
+
+    def _pick_custom_accent(self):
+        start = QColor(self._accent or PDF_TEMPLATES[self._template_key].accent or "#2563EB")
+        chosen = QColorDialog.getColor(start, self, "Brand Colour")
+        if chosen.isValid():
+            self._accent = normalize_hex_color(chosen.name())
+            self._sync_template_picker()
+
+    def _sync_template_picker(self):
+        """Shows the chosen template, brand colour and miniatures (the colour only recolours the templates that take one)."""
+        card = self.template_cards.get(self._template_key)
+        if card is not None and not card.radio.isChecked():
+            card.radio.setChecked(True)                      # (picks it again: harmless, the state is already set)
+        for key, c in self.template_cards.items():
+            c.refresh(PDF_TEMPLATES[key].with_accent(self._accent))
+        for color, swatch in self.accent_swatches.items():
+            swatch.set_selected(color == self._accent)
+        brandable = PDF_TEMPLATES[self._template_key].brandable
+        for w in (*self.accent_swatches.values(), self.accent_custom_btn, self.accent_reset_btn):
+            w.setEnabled(brandable)
+        if not brandable:
+            self.accent_note.setText("The Classic look is black and grey: it has no brand colour. Pick Modern, Minimal "
+                                     "or Corporate to colour your invoices.")
+        elif self._accent:
+            self.accent_note.setText(f"Your colour {self._accent} is used by Modern, Minimal and Corporate.")
+        else:
+            self.accent_note.setText("Each template uses its own colour until you pick one. Your colour is shared by "
+                                     "Modern, Minimal and Corporate.")
+
+    def _preview_template(self):
+        """Opens a made-up invoice in the chosen template and brand colour, under the saved business details."""
+        settings = {**(self._cfg.get("pdf_settings") or {}), "template": self._template_key, "accent_color": self._accent}
+        cfg = {**self._cfg, "pdf_settings": settings}
+        try:
+            folder = Path(tempfile.mkdtemp(prefix="vyaprix-template-"))
+            self._preview_dirs.append(folder)
+            data, payments = sample_invoice_data(cfg)
+            path = PDFGenerator(data, cfg, payments=payments, out_dir=folder).generate()
+        except Exception as exc:
+            logger.exception("Could not make the sample invoice")
+            return Messagebox.show_error("Preview Failed", f"The sample invoice could not be made:\n{exc}", parent=self)
+        PDFViewer(self, path).show()
+
+    def event(self, event):
+        # Dragged to a monitor with another pixel density: paint the miniatures, colour chips and picture previews again
+        # at that screen's resolution (a picture keeps the resolution it was made at, so it would stay soft).
+        if (event.type() == QEvent.Type.DevicePixelRatioChange and hasattr(self, "_template_key")
+                and hasattr(self, "_asset_rows")):
+            self._sync_template_picker()
+            for row in self._asset_rows.values():
+                row.refresh()
+        return super().event(event)
+
     def _build_payment_tab(self):
         form = self._new_form()
+        form.addRow(self._section("Invoice Template"))
+        form.addRow(self._note("The look of your printed invoices. You can still print a single invoice in another "
+                               "template from its own form."))
+        form.addRow(self._build_template_picker())
+        form.addRow(hline())
         form.addRow(self._section("Payment Settings"))
 
         # Currency picker: a drop-down of common currencies plus a "Custom" escape hatch (a plain text field) for
@@ -5171,6 +6247,9 @@ class SettingsDialog(QDialog):
         self.always_show_qr_check.setChecked(bool(pdf.get("always_show_qr_code", False)))
         self.amount_words_check.setChecked(bool(pdf.get("amount_in_words", False)))
         self.default_terms_text.setPlainText(pdf.get("default_terms", ""))
+        self._template_key = pdf.get("template") if pdf.get("template") in PDF_TEMPLATES else PDF_TEMPLATE_CLASSIC.key
+        self._accent = normalize_hex_color(pdf.get("accent_color"))
+        self._sync_template_picker()
 
         paths = c.get("asset_paths", {})
         for key, row in self._asset_rows.items():
@@ -5245,7 +6324,8 @@ class SettingsDialog(QDialog):
                                  "always_show_qr_code": self.always_show_qr_check.isChecked(),
                                  "amount_in_words": self.amount_words_check.isChecked(),
                                  "default_terms": self.default_terms_text.toPlainText().strip(),
-                                 "template": (self._cfg.get("pdf_settings") or {}).get("template", "classic")},
+                                 "template": self._template_key,
+                                 "accent_color": self._accent},
                 "asset_paths": {key: row.rel_path for key, row in self._asset_rows.items()},
                 "currency_symbol": self._currency_symbol(),
             })
@@ -7196,6 +8276,15 @@ class InvoiceFormFrame(QWidget):
         advance_on_enter(self.po_entry)
         lay.addWidget(self._labeled("PO / Reference No.", self.po_entry))
 
+        self.template_combo = QComboBox()
+        self.template_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        self.template_combo.setMinimumContentsLength(10)
+        self.template_combo.setToolTip("The look this invoice is printed in.\n\"Default\" is the template picked in "
+                                       "Settings > Payment & PDF.")
+        guard_wheel(self.template_combo)
+        self._fill_template_combo()
+        lay.addWidget(self._labeled("PDF Template", self.template_combo))
+
         lay.addSpacing(4)
         self.no_charge_toggle = ToggleSwitch("Mark as Complimentary (No Charge)")
         self.no_charge_toggle.clicked.connect(self._toggle_no_charge)
@@ -7289,6 +8378,16 @@ class InvoiceFormFrame(QWidget):
 
         self.gst_dependents = [self.tax_mode_combo, self.tax_rate_entry, self.gst_type_combo, self.place_combo,
                                self.reverse_toggle]
+
+    def _fill_template_combo(self):
+        """"Default (<the template picked in Settings>)", then every template; the choice is kept across a refill."""
+        chosen = self.template_combo.currentData() if self.template_combo.count() else ""
+        default = PDF_TEMPLATES.get((CONFIG.get("pdf_settings") or {}).get("template"), PDF_TEMPLATE_CLASSIC)
+        self.template_combo.clear()
+        self.template_combo.addItem(f"Default ({default.label})", "")
+        for tpl in PDF_TEMPLATES.values():
+            self.template_combo.addItem(tpl.label, tpl.key)
+        self.template_combo.setCurrentIndex(max(0, self.template_combo.findData(chosen or "")))
 
     def _toggle_no_charge(self, _checked: bool = False):
         self._apply_field_states()
@@ -7642,8 +8741,8 @@ class InvoiceFormFrame(QWidget):
         self.row_grand_total = _SummaryRow("Grand Total:", bold=True)
         self.row_paid        = _SummaryRow("Total Paid:")
         self.row_balance     = _SummaryRow("Balance Due:", bold=True)     # flips to "Advance / Credit:" when overpaid
-        # The tax lines (CGST + SGST, or IGST -- one set per GST rate on the invoice) are made on demand and slotted in
-        # between "Taxable Amount" and "Round Off", so _summary_rows is always in on-screen order.
+        # The tax lines (one CGST and one SGST, or one IGST) are made on demand and slotted in between
+        # "Taxable Amount" and "Round Off", so _summary_rows is always in on-screen order.
         self._tax_pool: List[_SummaryRow] = []
         self._summary_rows: List[_SummaryRow] = [self.row_subtotal, self.row_disc, self.row_taxable, self.row_round,
                                                  self.row_grand_total, self.row_paid, self.row_balance]
@@ -7661,7 +8760,7 @@ class InvoiceFormFrame(QWidget):
         parent.addLayout(wrap)
 
     def _tax_pool_row(self, index: int) -> _SummaryRow:
-        """The `index`-th tax line of the totals box (the pool grows when an invoice has many GST rates)."""
+        """The `index`-th tax line of the totals box (made the first time an invoice needs it)."""
         while len(self._tax_pool) <= index:
             row = _SummaryRow()
             row.setVisible(False)
@@ -7693,7 +8792,7 @@ class InvoiceFormFrame(QWidget):
             self.top_back_btn, self.client_edit, self.client_contact_text, self.client_gstin_entry,
             self.your_name_entry, self.your_contact_text,
             self.invoice_number_entry, self.invoice_date_edit, self.due_combo, self.due_date_edit,
-            self.payment_terms_entry, self.po_entry,
+            self.payment_terms_entry, self.po_entry, self.template_combo,
             self.no_charge_toggle, self.show_qr_toggle, self.reverse_toggle,
             self.gst_toggle, self.tax_mode_combo, self.tax_rate_entry, self.gst_type_combo, self.place_combo,
             self.global_discount_entry, self.disc_type_combo, self.round_off_toggle,
@@ -7760,6 +8859,7 @@ class InvoiceFormFrame(QWidget):
                 "due_date":       date_edit_db(self.due_date_edit) if self._due_on() else None,
                 "payment_terms":  self.payment_terms_entry.text().strip(),
                 "po_number":      self.po_entry.text().strip(),
+                "pdf_template":   self.template_combo.currentData() or "",
                 "notes":          self.notes_text.toPlainText().strip(),
                 "customer_notes": self.customer_notes_text.toPlainText().strip(),
                 "terms":          self.terms_text.toPlainText().strip(),
@@ -7874,19 +8974,26 @@ class InvoiceFormFrame(QWidget):
         if totals["total_discount"] > 0 or taxed:
             self.row_taxable.setVisible(True)
 
-        # 4. Tax -- one block per GST rate (a single one unless GST is charged per item). CGST/SGST is split equally
-        # and shown as two separate lines (e.g. 18% -> CGST 9% + SGST 9%); IGST is a single line at the full rate.
-        line = 0
-        for g in taxed:
+        # 4. Tax -- always ONE CGST line and ONE SGST line (or one IGST line), however many GST rates the invoice has.
+        # The rate is part of the label when there is a single rate (18% -> CGST 9% + SGST 9%); with several rates the
+        # lines are the totals, and hovering one lists the split by rate (the printed invoice has a GST summary).
+        tax_lines: List[Tuple[str, float, str]] = []
+        if taxed:
+            several = len(taxed) > 1
             if gst_type == "IGST":
-                lines = [(f"IGST ({g['rate']:g}%):", g["tax"])]
+                tax_lines.append(("IGST:" if several else f"IGST ({taxed[0]['rate']:g}%):", totals["tax"],
+                                  gst_breakdown_text(taxed, "tax", 1.0) if several else ""))
             else:
-                lines = [(f"CGST ({g['rate'] / 2.0:g}%):", g["cgst"]), (f"SGST ({g['rate'] / 2.0:g}%):", g["sgst"])]
-            for label, amount in lines:
-                tax_row = self._tax_pool_row(line)
-                tax_row.set(fmt_money(amount), label)
-                tax_row.setVisible(True)
-                line += 1
+                half = taxed[0]["rate"] / 2.0
+                tax_lines.append(("CGST:" if several else f"CGST ({half:g}%):", totals["cgst"],
+                                  gst_breakdown_text(taxed, "cgst", 0.5) if several else ""))
+                tax_lines.append(("SGST:" if several else f"SGST ({half:g}%):", totals["sgst"],
+                                  gst_breakdown_text(taxed, "sgst", 0.5) if several else ""))
+        for line, (label, amount, tip) in enumerate(tax_lines):
+            tax_row = self._tax_pool_row(line)
+            tax_row.set(fmt_money(amount), label)
+            tax_row.setToolTip(tip)
+            tax_row.setVisible(True)
 
         # 5. Round Off -- only when the total was actually rounded.
         if totals["round_off"]:
@@ -7928,6 +9035,7 @@ class InvoiceFormFrame(QWidget):
             row.title_edit.set_values(titles)
 
     def refresh_after_settings_change(self):
+        self._fill_template_combo()            # "Default (...)" names the template Settings now has
         self._refresh_suggestions()
         for row in self.item_rows:
             row.refresh_line()                 # the currency symbol may have changed
@@ -8003,6 +9111,7 @@ class InvoiceFormFrame(QWidget):
         self._place_auto = False
         self._show_stored_due(None, None)
         self.po_entry.clear()
+        self.template_combo.setCurrentIndex(0)
         self.reverse_toggle.setChecked(False)
         self.customer_notes_text.clear()
         self.terms_text.clear()
@@ -8041,6 +9150,7 @@ class InvoiceFormFrame(QWidget):
         self.place_combo.setEditText(d.get("place_of_supply") or "")
         self._place_auto = False
         self.po_entry.setText(d.get("po_number") or "")
+        self.template_combo.setCurrentIndex(max(0, self.template_combo.findData(d.get("pdf_template") or "")))
         self.reverse_toggle.setChecked(bool(d.get("reverse_charge")))
         self._show_stored_due(d.get("invoice_date"), d.get("due_date"))
         self.customer_notes_text.setPlainText(d.get("customer_notes") or "")
@@ -8162,6 +9272,7 @@ class InvoiceFormFrame(QWidget):
             "round_off": int(self.round_off_toggle.isChecked() and not no_charge),
             "place_of_supply": self.place_combo.currentText().strip(),
             "po_number": self.po_entry.text().strip(),
+            "pdf_template": self.template_combo.currentData() or "",
             "due_date": due_date,
             "reverse_charge": int(self.reverse_toggle.isChecked()),
             "customer_notes": self.customer_notes_text.toPlainText().strip(),
@@ -8350,12 +9461,19 @@ class SplashScreen(QWidget):
 
 
 class Sidebar(QFrame):
+    """The navigation column. It has three looks, chosen by the window it sits in (see InvoiceApp._apply_density): the
+    full one (240 px wide), a compact one that shows only the icons (72 px wide, for narrow windows) and a short one that
+    drops the logo (for windows that are not tall enough for it). Every button keeps its full name as its tooltip and
+    its accessible name, so nothing is lost when the labels are hidden."""
     NAV_ITEMS: List[Tuple[str, str]] = [
         ("⊞   Dashboard", "DashboardFrame"),
         ("👥   Clients",   "ClientsFrame"),
         ("📑   Catalog",   "CatalogFrame"),
     ]
     WIDTH = 240
+    COMPACT_WIDTH = 72
+    LOGO_WIDTH = 160
+    COMPACT_LOGO_WIDTH = 40
 
     def __init__(self, parent, controller):
         super().__init__(parent)
@@ -8363,12 +9481,40 @@ class Sidebar(QFrame):
         self.setProperty("role", "sidebar")
         self.setFixedWidth(self.WIDTH)
         self._nav_btns: Dict[str, QPushButton] = {}
+        self._compact = False
+        self._short = False
+        self._wide_only: List[QWidget] = []                       # labels that only the full sidebar shows
+        self._icon_buttons: List[Tuple[QPushButton, str, str, str]] = []   # (button, full text, icon, tooltip)
+        self._margin_layouts: List[Tuple[QVBoxLayout, Tuple[int, int], Tuple[int, int]]] = []   # (layout, full v, short v)
         self._build()
+
+    @property
+    def compact(self) -> bool:
+        return self._compact
+
+    @property
+    def short(self) -> bool:
+        return self._short
 
     @staticmethod
     def _left_aligned(btn: QPushButton) -> QPushButton:
         btn.setProperty("align", "left")
         return btn
+
+    def _register_button(self, btn: QPushButton) -> QPushButton:
+        """Remembers how a button looks in each density: its text splits into the icon (the first word) and the name."""
+        full = btn.text()
+        icon, _sep, name = full.partition(" ")
+        name = name.strip() or full
+        btn.setAccessibleName(name)
+        self._icon_buttons.append((btn, full, icon, btn.toolTip()))
+        return btn
+
+    def _layout(self, full_v: Tuple[int, int], short_v: Optional[Tuple[int, int]] = None) -> QVBoxLayout:
+        lay = QVBoxLayout()
+        self._margin_layouts.append((lay, full_v, short_v or full_v))
+        lay.setContentsMargins(20, full_v[0], 20, full_v[1])
+        return lay
 
     def _build(self):
         root = QVBoxLayout(self)
@@ -8376,45 +9522,48 @@ class Sidebar(QFrame):
         root.setSpacing(0)
 
         # --- branding header ---------------------------------------------
-        header = QVBoxLayout()
-        header.setContentsMargins(20, 25, 20, 10)
+        header = self._layout((25, 10), (10, 6))
         header.setSpacing(0)
-        logo = _logo_pixmap_for(self, 160)
         self.logo_label: Optional[QLabel] = None
-        if logo is not None:
+        if _logo_pixmap_for(self, self.LOGO_WIDTH) is not None:
             self.logo_label = QLabel()
-            self.logo_label.setPixmap(logo)
             self.logo_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
             header.addWidget(self.logo_label)
             header.addSpacing(10)
-        header.addWidget(make_label("Vyaprix", "h1", align=Qt.AlignmentFlag.AlignCenter))
-        header.addWidget(make_label("by EllowLabs", "section", align=Qt.AlignmentFlag.AlignCenter))
+        self.name_label = make_label("Vyaprix", "h1", align=Qt.AlignmentFlag.AlignCenter)
+        self.byline_label = make_label("by EllowLabs", "section", align=Qt.AlignmentFlag.AlignCenter)
+        self.mark_label = make_label("V", "h1", align=Qt.AlignmentFlag.AlignCenter)       # stands in for the name when compact
+        self.mark_label.setVisible(False)
+        header.addWidget(self.name_label)
+        header.addWidget(self.byline_label)
+        header.addWidget(self.mark_label)
+        self._wide_only += [self.name_label, self.byline_label]
         root.addLayout(header)
 
-        divider = QVBoxLayout()
-        divider.setContentsMargins(20, 15, 20, 15)
+        divider = self._layout((15, 15), (8, 8))
         divider.addWidget(hline())
         root.addLayout(divider)
 
         # --- quick action --------------------------------------------------
-        quick = QVBoxLayout()
-        quick.setContentsMargins(20, 0, 20, 15)
+        quick = self._layout((0, 15), (0, 8))
         self.new_invoice_btn = make_button(
             "＋  New Invoice", "success", lambda: self.controller.show_frame_by_name("InvoiceFormFrame"),
             tooltip="Instantly start a new invoice (Ctrl+N)", min_height=44)
+        self._register_button(self.new_invoice_btn)
         quick.addWidget(self.new_invoice_btn)
         root.addLayout(quick)
 
         # --- main navigation -----------------------------------------------
-        nav = QVBoxLayout()
-        nav.setContentsMargins(20, 0, 20, 0)
+        nav = self._layout((0, 0))
         nav.setSpacing(6)
         menu_label = make_label("MAIN MENU", "section")
         menu_label.setContentsMargins(4, 0, 0, 2)
         nav.addWidget(menu_label)
+        self._wide_only.append(menu_label)
         for label, frame_name in self.NAV_ITEMS:
             btn = make_button(label, "secondary-outline", lambda n=frame_name: self.controller.show_frame_by_name(n))
             self._left_aligned(btn)
+            self._register_button(btn)
             nav.addWidget(btn)
             self._nav_btns[frame_name] = btn
         root.addLayout(nav)
@@ -8422,12 +9571,12 @@ class Sidebar(QFrame):
         root.addStretch(1)
 
         # --- system / bottom -----------------------------------------------
-        bottom = QVBoxLayout()
-        bottom.setContentsMargins(20, 15, 20, 15)
+        bottom = self._layout((15, 15), (8, 8))
         bottom.setSpacing(4)
         system_label = make_label("SYSTEM", "section")
         system_label.setContentsMargins(4, 0, 0, 4)
         bottom.addWidget(system_label)
+        self._wide_only.append(system_label)
         self.settings_btn = self._left_aligned(make_button("⚙️  Settings", "info-outline",
                                                            lambda: self.controller.open_settings()))
         self.shortcuts_btn = self._left_aligned(make_button("⌨️  Shortcuts", "info-outline",
@@ -8435,10 +9584,57 @@ class Sidebar(QFrame):
         self.about_btn = self._left_aligned(make_button("ℹ️  About", "info-outline",
                                                         lambda: self.controller.open_about()))
         for btn in (self.settings_btn, self.shortcuts_btn, self.about_btn):
+            self._register_button(btn)
             bottom.addWidget(btn)
         bottom.addSpacing(11)
-        bottom.addWidget(make_label(f"Version {APP_VERSION}", "small", align=Qt.AlignmentFlag.AlignCenter))
+        self.version_label = make_label(f"Version {APP_VERSION}", "small", align=Qt.AlignmentFlag.AlignCenter)
+        self.version_short_label = make_label(APP_VERSION, "small", align=Qt.AlignmentFlag.AlignCenter)
+        self.version_short_label.setVisible(False)
+        bottom.addWidget(self.version_label)
+        bottom.addWidget(self.version_short_label)
+        self._wide_only.append(self.version_label)
         root.addLayout(bottom)
+        self._refresh_logo()
+
+    def set_density(self, compact: bool, short: bool) -> None:
+        """Switches between the full, the compact (icons only) and the short (no logo) look; does nothing when the look
+        is already the requested one."""
+        compact, short = bool(compact), bool(short)
+        if (compact, short) == (self._compact, self._short):
+            return
+        self._compact, self._short = compact, short
+        self.setFixedWidth(self.COMPACT_WIDTH if compact else self.WIDTH)
+        side = 8 if compact else 20
+        for lay, full_v, short_v in self._margin_layouts:
+            top, bottom = short_v if short else full_v
+            lay.setContentsMargins(side, top, side, bottom)
+        for widget in self._wide_only:
+            widget.setVisible(not compact)
+        self.version_short_label.setVisible(compact)
+        for btn, full, icon, tip in self._icon_buttons:
+            btn.setText(icon if compact else full)
+            btn.setToolTip(f"{btn.accessibleName()}  —  {tip}" if (compact and tip) else (btn.accessibleName() if compact else tip))
+            if btn.property("align") != ("icon" if compact else "left") and btn is not self.new_invoice_btn:
+                btn.setProperty("align", "icon" if compact else "left")
+                _repolish(btn)
+        self._refresh_logo()
+        self.updateGeometry()
+
+    def _refresh_logo(self) -> None:
+        """The logo at the size the current look wants, rendered for the screen the window is on now (so it stays sharp
+        after the window is dragged to a monitor with another scale). With no logo file, compact shows a "V" instead."""
+        show_logo = self.logo_label is not None and not self._short
+        if self.logo_label is not None:
+            self.logo_label.setVisible(show_logo)
+            if show_logo:
+                pixmap = _logo_pixmap_for(self, self.COMPACT_LOGO_WIDTH if self._compact else self.LOGO_WIDTH)
+                if pixmap is not None:
+                    self.logo_label.setPixmap(pixmap)
+        self.mark_label.setVisible(self._compact and not show_logo)
+
+    def refresh_for_screen(self) -> None:
+        """Called when the window's device pixel ratio changes (it was moved to another monitor)."""
+        self._refresh_logo()
 
     def set_active(self, frame_name: str) -> None:
         """Highlights the navigation button of the page being shown: solid for the active page, outlined for the rest."""
@@ -8565,7 +9761,10 @@ class InvoiceApp(QMainWindow):
     SPLASH_DURATION_MS = 2500
     POLL_INTERVAL_MS = 200
     DEFAULT_SIZE = (1280, 800)
-    MIN_SIZE = (1080, 680)
+    MIN_SIZE = (1080, 680)          # the smallest window the layout was designed for
+    FLOOR_SIZE = (880, 540)         # the smallest it shrinks to on a screen that has no room for MIN_SIZE
+    COMPACT_BELOW = 1080            # a window narrower than this shows the icons-only sidebar
+    SHORT_BELOW = 760               # a window lower than this drops the logo from the sidebar
 
     def __init__(self):
         super().__init__()
@@ -8607,19 +9806,107 @@ class InvoiceApp(QMainWindow):
     # ------------------------------------------------------------------ #
     #  Window set-up / start-up hand-over
     # ------------------------------------------------------------------ #
-    def _place_on_screen(self) -> None:
-        """1280 x 800, centred on the screen it opens on (never larger than that screen's usable area, but never below
-        the 1080 x 680 minimum either)."""
-        screen = self.screen() or QGuiApplication.primaryScreen()
-        area = screen.availableGeometry() if screen is not None else None
+    def _usable_area(self) -> Optional[QRect]:
+        """The part of the screen this window is on that is not taken by the taskbar (None when there is no screen)."""
+        return screen_area(self)
+
+    def _minimum_for(self, area: Optional[QRect]) -> Tuple[int, int]:
+        """The smallest window allowed on a screen with this usable area: the designed 1080 x 680 where the screen has
+        room for it, smaller (down to FLOOR_SIZE, with the compact sidebar) on a small one -- so the window never hangs
+        off the edge of a laptop display where Save and Back would be out of reach."""
         min_w, min_h = self.MIN_SIZE
-        width, height = self.DEFAULT_SIZE
         if area is not None:
-            width, height = max(min_w, min(width, area.width())), max(min_h, min(height, area.height()))
+            min_w = max(self.FLOOR_SIZE[0], min(min_w, area.width()))
+            min_h = max(self.FLOOR_SIZE[1], min(min_h, area.height()))
+        return min_w, min_h
+
+    def _frame_extra(self) -> Tuple[int, int]:
+        """How much the window frame (borders and title bar) adds to the client size. The system only says how thick the
+        frame is once the native window exists, so it is created here (not shown) when it is not there yet."""
+        if self.windowHandle() is None:
+            self.create()
+        frame, client = self.frameGeometry(), self.geometry()
+        return max(0, frame.width() - client.width()), max(0, frame.height() - client.height())
+
+    @staticmethod
+    def _client_room(area: Optional[QRect], extra: Tuple[int, int]) -> Optional[QRect]:
+        """The part of `area` the window's client size may use: what is left once the frame has taken its share."""
+        if area is None:
+            return None
+        return QRect(area.x(), area.y(), max(1, area.width() - extra[0]), max(1, area.height() - extra[1]))
+
+    def _place_on_screen(self, area: Optional[QRect] = None) -> None:
+        """1280 x 800, centred on the screen it opens on -- never larger than that screen's usable area (the title bar and
+        borders included, so a 1366 x 768 laptop does not push the window's bottom behind the taskbar), and never below
+        the minimum that screen allows (1080 x 680 where it fits)."""
+        area = area if area is not None else self._usable_area()
+        extra = self._frame_extra()
+        room = self._client_room(area, extra)
+        min_w, min_h = self._minimum_for(room)
+        width, height = self.DEFAULT_SIZE
+        if room is not None:
+            width, height = max(min_w, min(width, room.width())), max(min_h, min(height, room.height()))
         self.setMinimumSize(min_w, min_h)
         self.resize(width, height)
         if area is not None:
-            self.move(area.x() + (area.width() - width) // 2, area.y() + (area.height() - height) // 2)
+            self.move(area.x() + (area.width() - (width + extra[0])) // 2, area.y() + (area.height() - (height + extra[1])) // 2)
+        self._apply_density()
+
+    def _fit_into(self, area: Optional[QRect]) -> None:
+        """Brings the window -- its frame included -- inside `area` (the usable part of a screen): the limits follow the
+        screen, a window that is too big shrinks and one that hangs over an edge moves back. A maximized or full-screen
+        window is left alone."""
+        if area is None:
+            return
+        extra = self._frame_extra()
+        min_w, min_h = self._minimum_for(self._client_room(area, extra))
+        self.setMinimumSize(min_w, min_h)
+        if self.isMaximized() or self.isFullScreen():
+            return
+        width = max(min_w, min(self.width(), area.width() - extra[0]))
+        height = max(min_h, min(self.height(), area.height() - extra[1]))
+        if (width, height) != (self.width(), self.height()):
+            self.resize(width, height)
+        frame = self.frameGeometry()
+        x = max(area.x(), min(frame.x(), area.x() + area.width() - frame.width()))
+        y = max(area.y(), min(frame.y(), area.y() + area.height() - frame.height()))
+        if (x, y) != (frame.x(), frame.y()):
+            self.move(x, y)
+
+    def _apply_density(self) -> None:
+        """The sidebar follows the window: icons only when the window is narrower than COMPACT_BELOW, no logo when it is
+        lower than SHORT_BELOW."""
+        sidebar = getattr(self, "sidebar", None)
+        if sidebar is not None:
+            sidebar.set_density(self.width() < self.COMPACT_BELOW, self.height() < self.SHORT_BELOW)
+
+    def _on_screen_changed(self, screen) -> None:
+        """The window was dragged to another monitor: fit the limits to its usable area and shrink the window into it if
+        it no longer fits (a maximized or full-screen window is left alone)."""
+        self._fit_into(screen.availableGeometry() if screen is not None else None)
+        self._apply_density()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        handle = self.windowHandle()
+        if handle is not None and not getattr(self, "_screen_watch", False):
+            self._screen_watch = True
+            handle.screenChanged.connect(self._on_screen_changed)
+            QTimer.singleShot(0, self._fit_shown_window)         # now that the window is up, its real frame is known
+
+    def _fit_shown_window(self) -> None:
+        """Once, right after the first show: the frame measured before the window existed may have been an estimate."""
+        if not self._closing_for_good:
+            self._fit_into(self._usable_area())
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._apply_density()
+
+    def event(self, event):
+        if event.type() == QEvent.Type.DevicePixelRatioChange and hasattr(self, "sidebar"):
+            self.sidebar.refresh_for_screen()
+        return super().event(event)
 
     def _set_icon(self) -> None:
         candidates = ([APP_LOGO_ICO] if sys.platform == "win32" else []) + [APP_LOGO_PNG]
@@ -8674,6 +9961,7 @@ class InvoiceApp(QMainWindow):
         self.sidebar = Sidebar(central, self)
         outer.addWidget(self.sidebar)
         outer.addWidget(vline())
+        self._apply_density()
 
         right = QWidget()
         column = QVBoxLayout(right)
@@ -9001,9 +10289,24 @@ def configure_windows_app_identity() -> None:
         logger.warning("Could not set Windows application identity: %s", exc)
 
 
+def configure_high_dpi() -> None:
+    """Per-monitor, exact-fraction scaling. Qt 6 already scales every window by the DPI of the screen it is on; this pins
+    the rounding policy to "pass through", so a 125 % or 150 % Windows scale stays 125 % / 150 % instead of being rounded
+    to 100 % / 200 % (which would make the whole window too small or too large), and asks Windows for per-monitor-v2
+    awareness, so the window re-scales as it is dragged between monitors. Must run before the QApplication exists."""
+    try:
+        QGuiApplication.setHighDpiScaleFactorRoundingPolicy(Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
+    except Exception:
+        logger.warning("Could not set the high-DPI scale policy", exc_info=True)
+    if sys.platform == "win32":
+        os.environ.setdefault("QT_QPA_PLATFORM", "windows:dpiawareness=2")
+
+
 def main() -> int:
     app = None
     try:
+        if QApplication.instance() is None:
+            configure_high_dpi()
         app = QApplication.instance() or QApplication(sys.argv)
         app.setApplicationName(APP_NAME)
         sys.excepthook = _log_unhandled_exception
