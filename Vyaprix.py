@@ -200,11 +200,11 @@ BASE_BUILD_VERSION: str = "1.5.2"
 
 # Newest first. EVERY change made to the application adds a line below -- and a new Release whenever a new build is handed
 # over. APP_VERSION, the build number, the release date and the "What's new" window all follow from this list, so they
-# can never disagree: the build number is "<version>.<number of changes made since the uploaded v1.5 / build 1.5.2>".
+# can never disagree: the build number is "<version>.<number of documented changes since the uploaded v1.5 / build 1.5.2>".
 CHANGELOG: Tuple[Release, ...] = (
     Release(
         "v2.4",
-        "14 November 2026",
+        "15 November 2026",
         "A redesigned Settings screen, and a watermark you control",
         (
             "The status watermark (PAID, BALANCE DUE ...) is fixed: it is no longer half hidden and half shown. It is now "
@@ -235,6 +235,9 @@ CHANGELOG: Tuple[Release, ...] = (
             'Data & Backup shows where your data is kept, with "Copy path" and "Show in folder" buttons.',
             "Databases and backups made by earlier versions upgrade themselves to remember each invoice's watermark choice; "
             "older invoices follow the Settings switch.",
+            "The About screen, PDF metadata and What's New window use the same release metadata, so the version and build "
+            "information stay consistent.",
+            "The release date is shown with the current release notes, making the shipped handover easy to identify.",
         ),
     ),
     Release(
