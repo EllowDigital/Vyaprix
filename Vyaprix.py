@@ -27,7 +27,7 @@ from decimal import Decimal, ROUND_DOWN, ROUND_HALF_UP
 from enum import Enum
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple, Type
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Type
 from xml.sax.saxutils import escape as xml_escape
 
 # --- Standard Library: Lazy Imports ---
@@ -77,6 +77,7 @@ from PySide6.QtGui import (
     QGuiApplication,
     QIcon,
     QImage,
+    QImageReader,
     QKeySequence,
     QPainter,
     QPainterPath,
@@ -108,6 +109,8 @@ from PySide6.QtWidgets import (
     QLabel,
     QLayout,
     QLineEdit,
+    QListWidget,
+    QListWidgetItem,
     QMainWindow,
     QMenu,
     QMessageBox,
@@ -197,8 +200,46 @@ BASE_BUILD_VERSION: str = "1.5.2"
 
 # Newest first. EVERY change made to the application adds a line below -- and a new Release whenever a new build is handed
 # over. APP_VERSION, the build number, the release date and the "What's new" window all follow from this list, so they
-# can never disagree: the build number is "<version>.<number of changes made since the uploaded v1.5 / build 1.5.2>".
+# can never disagree: the build number is "<version>.<number of documented changes since the uploaded v1.5 / build 1.5.2>".
 CHANGELOG: Tuple[Release, ...] = (
+    Release(
+        "v2.4",
+        "15 November 2026",
+        "A redesigned Settings screen, and a watermark you control",
+        (
+            "The status watermark (PAID, BALANCE DUE ...) is fixed: it is no longer half hidden and half shown. It is now "
+            "drawn last, on top of the page, with real transparency and sized to the page, so shaded rows, total boxes and "
+            "colour bands can no longer cover part of it, and the text under it stays readable.",
+            'The status watermark can be switched off for every invoice: "Show the status watermark" in Settings > '
+            "Invoice PDF.",
+            'It can also be shown or hidden for a single invoice: the new "Status Watermark" box on the invoice form '
+            "(Default, On or Off) is remembered with the invoice.",
+            "Payment and Invoice PDF are now two separate pages in Settings. Payment: currency, bank account, UPI ID and QR "
+            "code, payment terms and notes, and when the payment details are printed. Invoice PDF: template and brand "
+            "colour, status watermark, total in words, footer note and default terms.",
+            "Settings is redesigned: a side menu of six pages -- General, Your Details, Payment, Invoice PDF, Logo & "
+            "Signature and Data & Backup -- each made of cards that say what their settings do.",
+            "Settings fits every window size: the menu shrinks to icons in a narrow window and two-column cards flow into "
+            "one column.",
+            "Mistakes are explained next to the box (email, phone number, GSTIN, custom currency symbol). A page that has "
+            "one is marked in the menu, and Save takes you straight to it instead of showing a pop-up.",
+            "Settings tells you whether there is anything to save, Ctrl+S saves, and closing Settings with unsaved changes "
+            "asks first.",
+            '"Preview sample invoice" prints from what is on the screen, so a template, colour or watermark setting can be '
+            "tried before it is saved.",
+            "Logo, signature and UPI QR code: drop a picture onto its row, a file that is not a readable picture is "
+            "refused, and Cancel puts back the pictures you replaced.",
+            "The UPI QR code is now set up beside the UPI ID on the Payment page; Logo & Signature keeps the logo and the "
+            "signature.",
+            "The GSTIN is written in capitals for you when you leave the box.",
+            'Data & Backup shows where your data is kept, with "Copy path" and "Show in folder" buttons.',
+            "Databases and backups made by earlier versions upgrade themselves to remember each invoice's watermark choice; "
+            "older invoices follow the Settings switch.",
+            "The About screen, PDF metadata and What's New window use the same release metadata, so the version and build "
+            "information stay consistent.",
+            "The release date is shown with the current release notes, making the shipped handover easy to identify.",
+        ),
+    ),
     Release(
         "v2.3",
         "12 November 2026",
@@ -233,7 +274,7 @@ CHANGELOG: Tuple[Release, ...] = (
         "10 November 2026",
         "Invoice templates",
         (
-            "Four invoice templates -- Classic, Modern, Minimal and Corporate -- picked in Settings > Payment & PDF, with a "
+            "Four invoice templates -- Classic, Modern, Minimal and Corporate -- picked in Settings > Invoice PDF, with a "
             'miniature of each and a "Preview sample invoice" button.',
             "A brand colour for Modern, Minimal and Corporate: ten ready colours, or any colour of your own.",
             'A template can be chosen for a single invoice ("PDF Template" on the invoice form) and is remembered with it.',
@@ -562,8 +603,9 @@ def get_default_config() -> Dict[str, Any]:
             "amount_in_words": False,  # print "Rupees ... Only" under the invoice total
             "default_terms": "",  # terms & conditions every new invoice starts with
             "template": "classic",  # the invoice look (see PDF_TEMPLATES)
-            "accent_color": "",
-        },  # brand colour for the templates that take one ("" = the template's own)
+            "accent_color": "",  # brand colour for the templates that take one ("" = the template's own)
+            "status_watermark": True,
+        },  # the faint PAID / BALANCE DUE ... stamp across the page
         "currency_symbol": "₹",
     }
 
@@ -1178,6 +1220,7 @@ class DatabaseManager:
                     "customer_notes": "TEXT DEFAULT ''",  # printed on the invoice (`notes` is internal)
                     "terms": "TEXT DEFAULT ''",  # terms & conditions, printed
                     "pdf_template": "TEXT DEFAULT ''",  # this invoice's own look ('' = the Settings default)
+                    "pdf_watermark": "TEXT DEFAULT ''",  # its status stamp: '' = as Settings says | 'show' | 'hide'
                 }.items():
                     if col not in existing:
                         c.execute(f"ALTER TABLE invoices ADD COLUMN {col} {ctype}")
@@ -2611,6 +2654,23 @@ def pdf_template_for(
     return chosen.with_accent(settings.get("accent_color"))
 
 
+# The status stamp ("PAID", "BALANCE DUE" ...) across a printed invoice. Settings > PDF has the general switch; an
+# invoice can override it for itself (the New Invoice form's "Status Watermark" box): '' follows Settings.
+WATERMARK_DEFAULT, WATERMARK_SHOW, WATERMARK_HIDE = "", "show", "hide"
+
+
+def watermark_enabled(
+    config: Dict[str, Any], data: Optional[Dict[str, Any]] = None
+) -> bool:
+    """Does this invoice print with the status stamp? Its own choice (show / hide) wins, else the Settings switch."""
+    own = str((data or {}).get("pdf_watermark") or "").strip().lower()
+    if own == WATERMARK_SHOW:
+        return True
+    if own == WATERMARK_HIDE:
+        return False
+    return bool((config.get("pdf_settings") or {}).get("status_watermark", True))
+
+
 class PDFGenerator:
     """Draws one invoice as an A4 PDF.
 
@@ -3755,8 +3815,8 @@ class PDFGenerator:
         """Whether there's still money owed on this invoice -- the shared
         "nothing left to pay" gate for every payment-collection element
         below (QR code, bank/UPI details). True for Unpaid/Partially Paid
-        invoices, or for anything once Settings > Images & Assets' "Always
-        show payment details" override is turned on."""
+        invoices, or for anything once the "Always show payment details"
+        switch (Settings > Payment) is turned on."""
         if self.config.get("pdf_settings", {}).get("always_show_qr_code", False):
             return True
         return self.data.get("status") in (
@@ -3772,16 +3832,16 @@ class PDFGenerator:
         controls, unchanged. On top of those, by default, the QR only
         appears on invoices that still owe money (Unpaid/Partially
         Paid): there's nothing left to pay on a fully settled invoice,
-        so a "scan to pay" code there is just noise. Settings > Images
-        & Assets has an "Always show payment details" override for anyone
-        who wants it printed regardless of payment status.
+        so a "scan to pay" code there is just noise. Settings > Payment has
+        an "Always show payment details" switch for anyone who wants it
+        printed regardless of payment status.
         """
         if not self.data.get("show_qr_code") or self.data.get("is_complimentary"):
             return False
         return self._invoice_needs_payment()
 
     def _payment_rows(self) -> List[Tuple[str, str]]:
-        """The configured bank / UPI / payment-notes details (Settings > Payment & PDF) as (label, markup) pairs --
+        """The configured bank / UPI / payment-notes details (Settings > Payment) as (label, markup) pairs --
         empty when nothing is configured. Independent of the per-invoice QR toggle/asset -- a business that only
         takes bank transfers (no QR/UPI) still sees its bank details printed. Still shares _invoice_needs_payment()
         with the QR check, though, so a fully paid invoice doesn't keep printing "how to pay us" instructions for
@@ -3990,23 +4050,51 @@ class PDFGenerator:
         canvas.line(left, height - 1.5 * cm, right, height - 1.5 * cm)
         canvas.restoreState()
 
-    def _apply_watermark(self, canvas, doc):
-        wm_map = {
-            InvoiceStatus.PAID.value: ("PAID", "#10B981", 100),
-            InvoiceStatus.DUE.value: ("BALANCE DUE", "#EF4444", 50),
-            InvoiceStatus.PARTIAL.value: ("PARTIAL PAYMENT", "#F59E0B", 50),
-            InvoiceStatus.OVERPAID.value: ("ADVANCE / CREDIT", "#8B5CF6", 50),
-            InvoiceStatus.COMPLIMENTARY.value: ("COMPLIMENTARY", "#3B82F6", 40),
-        }
-        if entry := wm_map.get(self.data.get("status")):
-            txt, col, fsz = entry
-            canvas.saveState()
-            canvas.setFont("Helvetica-Bold", fsz)
-            canvas.setFillColor(colors.HexColor(col), alpha=0.08)
-            canvas.translate(A4[0] / 2, A4[1] / 2)
-            canvas.rotate(35)
-            canvas.drawCentredString(0, 0, txt)
-            canvas.restoreState()
+    # The status stamp across the page: (words, colour, biggest size in points). Every stamp is as wide as the page
+    # allows (a long phrase gets a smaller size than "PAID"), so they all look alike.
+    _STAMPS = {
+        InvoiceStatus.PAID.value: ("PAID", "#10B981", 150),
+        InvoiceStatus.DUE.value: ("BALANCE DUE", "#EF4444", 100),
+        InvoiceStatus.PARTIAL.value: ("PARTIAL PAYMENT", "#F59E0B", 100),
+        InvoiceStatus.OVERPAID.value: ("ADVANCE / CREDIT", "#8B5CF6", 100),
+        InvoiceStatus.COMPLIMENTARY.value: ("COMPLIMENTARY", "#3B82F6", 100),
+    }
+    STAMP_ANGLE = 35  # degrees, counter-clockwise
+    STAMP_COS = 0.8192  # cos(35 degrees)
+    STAMP_WIDTH = 0.82  # the share of the page width the slanted word may take up
+    STAMP_ALPHA = 0.14  # how strong it is: faint enough to read through, strong enough to see everywhere
+
+    def _apply_watermark(self, canvas, doc=None):
+        """The status stamp (PAID, BALANCE DUE ...): one big, slanted word in the middle of the page, drawn with real
+        transparency and -- this is the point -- LAST, on top of everything else on the page. Drawn first, as it used
+        to be, every shaded row, total box and colour band painted over part of it, so only the pieces over bare white
+        paper showed: "half hidden, half shown". On top, nothing can cover it, and at this strength the text under it
+        stays perfectly readable. Settings can switch it off for every invoice (pdf_settings.status_watermark) and an
+        invoice can show or hide it for itself (its pdf_watermark)."""
+        if not watermark_enabled(self.config, self.data):
+            return
+        entry = self._STAMPS.get(self.data.get("status"))
+        if entry is None:
+            return
+        words, colour, biggest = entry
+        page_width, page_height = A4
+        size = min(
+            biggest,
+            page_width
+            * self.STAMP_WIDTH
+            / self.STAMP_COS
+            / max(canvas.stringWidth(words, self.bold, 1), 0.01),
+        )
+        canvas.saveState()
+        canvas.setFont(self.bold, size)
+        canvas.setFillColor(colors.HexColor(colour))
+        canvas.setFillAlpha(self.STAMP_ALPHA)
+        canvas.translate(page_width / 2.0, page_height / 2.0)
+        canvas.rotate(self.STAMP_ANGLE)
+        canvas.drawCentredString(
+            0, -size * 0.35, words
+        )  # 0.35 em below the baseline: the capitals sit centred
+        canvas.restoreState()
 
     def _draw_footer(self, canvas, page: int, total: int):
         """A hairline, the invoice number, the footer note from Settings (up to two lines) and "Page x of y"."""
@@ -4045,13 +4133,12 @@ class PDFGenerator:
         canvas.restoreState()
 
     def _on_page(self, canvas, doc):
-        """Called as every page begins: the colour bar, the running header (not on the first page) and the watermark
-        -- all behind the content. The footer is drawn at the end, when the number of pages is known.
-        """
+        """Called as every page begins: the colour bar and the running header (not on the first page), both behind the
+        content. The footer and the status stamp are drawn at the end (see NumberedCanvas.save): the footer needs the
+        number of pages, and the stamp must lie on top of the content."""
         self._draw_top_bar(canvas)
         if doc.page > 1:
             self._draw_running_header(canvas)
-        self._apply_watermark(canvas, doc)
 
     def _numbered_canvas(self):
         """A canvas that draws the footer once the number of pages is known."""
@@ -4072,6 +4159,9 @@ class PDFGenerator:
                 for state in self._page_states:
                     self.__dict__.update(state)
                     generator._draw_footer(self, self._pageNumber, total)
+                    generator._apply_watermark(
+                        self, None
+                    )  # last: on top of everything on the page
                     super().showPage()
                 super().save()
 
@@ -4543,6 +4633,9 @@ def resolve_palette(theme: Dict[str, Any]) -> Dict[str, str]:
         p[f"{tone}_soft"] = _mix(p["surface"], base, 0.18 if dark else 0.12)
         p[f"{tone}_text"] = _readable(base, p["surface"])
     p["muted_text"] = _readable(p["muted"], p["surface"], 3.0)
+    p["nav_sel_fg"] = (
+        p["fg"] if dark else p["primary_text"]
+    )  # the chosen page in Settings: plain text on a dark theme
     p["hero_bg"] = p["primary"]
     p["hero_fg"] = _on(p["primary"])
     p["hero_sub"] = _mix(p["primary"], p["hero_fg"], 0.78)
@@ -4667,6 +4760,7 @@ QFrame[role="splash-border"] { background: @primary@; border: none; }      /* sq
 QFrame[role="thumb"]   { background: @alt@; border: 1px solid @border@; border-radius: 6px; }
 QFrame[role="tpl"]     { background: @surface@; border: 2px solid @border@; border-radius: 8px; }      /* a template in Settings */
 QFrame[role="tpl"][selected="true"] { border: 2px solid @primary@; }
+QFrame[role="thumb"][dropping="true"] { background: @primary_soft@; border: 2px dashed @primary@; }   /* a picture dragged over its row */
 QFrame[role="key"]     { background: @alt@; border: 1px solid @border_strong@; border-radius: 4px; }
 
 /* ---------- labels ---------- */
@@ -4778,6 +4872,14 @@ QScrollBar::handle:horizontal { background: @border_strong@; border-radius: 4px;
 QScrollBar::handle:hover { background: @muted@; }
 QScrollBar::add-line, QScrollBar::sub-line { width: 0px; height: 0px; background: none; border: none; }
 QScrollBar::add-page, QScrollBar::sub-page { background: transparent; }
+
+/* ---------- the menu of pages in Settings ---------- */
+QListWidget[role="nav"] { background: transparent; border: none; border-radius: 0px; padding: 0px 8px; font-size: 14px; }
+QListWidget[role="nav"]::item { padding: 8px 12px; margin: 1px 0px; border-radius: 8px; border: none; }
+QListWidget[role="nav"]::item:hover { background: @alt@; }
+QListWidget[role="nav"]::item:selected { background: @primary_soft@; color: @nav_sel_fg@; }
+QListWidget[role="nav"]::item:selected:hover { background: @primary_soft@; }
+QListWidget[role="nav"][compact="true"]::item { padding: 8px 0px; }
 
 /* ---------- containers ---------- */
 QTabWidget::pane { border: 1px solid @border@; border-radius: 8px; top: -1px; background: transparent; }
@@ -7287,42 +7389,278 @@ def pixel_ratio(widget: Optional[QWidget] = None) -> int:
     return max(2, whole + (1 if ratio - whole > 1e-6 else 0))
 
 
+# ---------------------------------------------------------------------------------------------------------------------
+#  Settings: the building blocks of the screen (cards, fields, pages) and the picture rows
+# ---------------------------------------------------------------------------------------------------------------------
+class _ReflowGrid(QWidget):
+    """Its children in 1 .. `max_columns` equal columns -- as many as fit at `min_column_width` each -- laid out again
+    whenever the width changes: a form is two columns in a wide window and one in a narrow one. A child added with
+    `full_row=True` always takes a whole row. (More columns are only taken on with some room to spare, so a scroll bar
+    that appears or goes away can never make the layout flip back and forth.)"""
+
+    HYSTERESIS = 24
+
+    def __init__(
+        self,
+        max_columns: int = 2,
+        min_column_width: int = 260,
+        align_top: bool = True,
+        parent: Optional[QWidget] = None,
+    ):
+        super().__init__(parent)
+        self.max_columns = max(1, max_columns)
+        self.min_column_width = min_column_width
+        self.align_top = (
+            align_top  # False: the children of a row are stretched to one height
+        )
+        self._items: List[Tuple[QWidget, bool]] = []
+        self._columns = 0
+        self._grid = QGridLayout(self)
+        self._grid.setContentsMargins(0, 0, 0, 0)
+        self._grid.setHorizontalSpacing(16)
+        self._grid.setVerticalSpacing(12)
+
+    @property
+    def columns(self) -> int:
+        return self._columns
+
+    def add(self, widget: QWidget, full_row: bool = False) -> QWidget:
+        self._items.append((widget, full_row))
+        self._place(force=True)
+        return widget
+
+    def _wanted_columns(self) -> int:
+        gap = self._grid.horizontalSpacing()
+        width = self.width()
+        wanted = max(1, self._columns)
+        while (
+            wanted > 1 and width < wanted * self.min_column_width + (wanted - 1) * gap
+        ):
+            wanted -= 1
+        while (
+            wanted < self.max_columns
+            and width
+            >= (wanted + 1) * self.min_column_width + wanted * gap + self.HYSTERESIS
+        ):
+            wanted += 1
+        return wanted
+
+    def _place(self, force: bool = False) -> None:
+        columns = self._wanted_columns()
+        if columns == self._columns and not force:
+            return
+        self._columns = columns
+        grid = self._grid
+        while grid.count():
+            grid.takeAt(0)  # (only the layout's hold on a child: the child stays)
+        for column in range(self.max_columns):
+            grid.setColumnStretch(column, 1 if column < columns else 0)
+        top = Qt.AlignmentFlag.AlignTop
+        row = column = 0
+        for widget, full_row in self._items:
+            if full_row:
+                if column:
+                    row, column = row + 1, 0
+                if self.align_top:
+                    grid.addWidget(widget, row, 0, 1, columns, top)
+                else:
+                    grid.addWidget(widget, row, 0, 1, columns)
+                row += 1
+            else:
+                if self.align_top:
+                    grid.addWidget(
+                        widget, row, column, top
+                    )  # (a field with an error message must not stretch its neighbour)
+                else:
+                    grid.addWidget(widget, row, column)
+                column += 1
+                if column == columns:
+                    row, column = row + 1, 0
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._place()
+
+
+class _Field(QWidget):
+    """One setting: its caption (and "optional"), the input, a line of help and -- when the value is wrong -- an error
+    in red right under the input, which also gets a red border. `validator` is a function returning "" for a good value
+    or the message to show; the dialog runs it when the field loses focus and then with every keystroke until the
+    value is right."""
+
+    error_changed = Signal()
+
+    def __init__(
+        self,
+        caption: str,
+        widget: QWidget,
+        hint: str = "",
+        optional: bool = False,
+        parent: Optional[QWidget] = None,
+    ):
+        super().__init__(parent)
+        self.widget = widget
+        self.validator: Optional[Callable[[], str]] = None
+        col = QVBoxLayout(self)
+        col.setContentsMargins(0, 0, 0, 0)
+        col.setSpacing(4)
+        head = QHBoxLayout()
+        head.setSpacing(6)
+        self.caption = make_label(caption, "caption")
+        self.caption.setBuddy(widget)
+        head.addWidget(self.caption)
+        if optional:
+            head.addWidget(make_label("optional", "small"))
+        head.addStretch(1)
+        col.addLayout(head)
+        col.addWidget(widget)
+        self.hint = make_label(hint, "small", wrap=True)
+        self.hint.setVisible(bool(hint))
+        col.addWidget(self.hint)
+        self.error = make_label("", "small", tone="danger", wrap=True)
+        self.error.setVisible(False)
+        col.addWidget(self.error)
+        widget.setAccessibleName(caption)
+
+    @property
+    def has_error(self) -> bool:
+        return bool(self.error.text())
+
+    def set_error(self, message: str = "") -> None:
+        changed = message != self.error.text()
+        self.error.setText(message)
+        self.error.setVisible(bool(message))
+        set_flag(self.widget, "invalid", bool(message))
+        self.widget.setAccessibleDescription(message)
+        if changed:
+            self.error_changed.emit()
+
+    def validate(self) -> bool:
+        """Runs the check (a field without one is always fine), shows or clears the error; True when the value is fine."""
+        message = self.validator() if self.validator is not None else ""
+        self.set_error(message)
+        return not message
+
+
+class _SettingsCard(QFrame):
+    """A titled group of settings: a card with a heading, a line saying what the group is for, and the fields."""
+
+    def __init__(
+        self, title: str, description: str = "", parent: Optional[QWidget] = None
+    ):
+        super().__init__(parent)
+        set_role(self, "card")
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(20, 16, 20, 20)
+        outer.setSpacing(0)
+        self.title_label = make_label(title, "h2")
+        outer.addWidget(self.title_label)
+        self.description = make_label(description, "muted", wrap=True)
+        self.description.setVisible(bool(description))
+        outer.addSpacing(3)
+        outer.addWidget(self.description)
+        outer.addSpacing(14)
+        self.body = QVBoxLayout()
+        self.body.setContentsMargins(0, 0, 0, 0)
+        self.body.setSpacing(14)
+        outer.addLayout(self.body)
+
+    def add(self, widget: QWidget) -> QWidget:
+        self.body.addWidget(widget)
+        return widget
+
+
+class _SettingsPage(QScrollArea):
+    """One page of the Settings dialog: a heading, a line about the page, then its cards. It scrolls on its own, and
+    its column never grows wider than `MAX_WIDTH` (it is centred when the window is wider than that).
+    """
+
+    MAX_WIDTH = 860
+
+    def __init__(self, title: str, subtitle: str, parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        self.title = title
+        self.setWidgetResizable(True)
+        self.setFrameShape(QFrame.Shape.NoFrame)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setAccessibleName(title)
+        body = QWidget()
+        outer = QHBoxLayout(body)
+        outer.setContentsMargins(24, 22, 24, 24)
+        outer.setSpacing(0)
+        content = QWidget()
+        content.setMaximumWidth(self.MAX_WIDTH)
+        self.column = QVBoxLayout(content)
+        self.column.setContentsMargins(0, 0, 0, 0)
+        self.column.setSpacing(16)
+        outer.addStretch(1)
+        outer.addWidget(content, 1000)
+        outer.addStretch(1)
+        self.heading = make_label(title, "h1")
+        self.column.addWidget(self.heading)
+        self.subtitle = make_label(subtitle, "muted", wrap=True)
+        self.column.addWidget(self.subtitle)
+        self.setWidget(body)
+
+    def add(self, widget: QWidget) -> QWidget:
+        self.column.addWidget(widget)
+        return widget
+
+    def finish(self) -> None:
+        self.column.addStretch(1)
+
+
 class _AssetRow(QWidget):
-    """One upload row (Company Logo / Authorized Signature / UPI QR Code): a preview thumbnail, a status line and
-    Browse / Clear buttons. The chosen file is copied into Vyaprix's own data folder straight away, so the app keeps
-    working even if the original is moved or deleted; the file name is deliberately not shown.
+    """One picture row (Company Logo / Authorized Signature / UPI QR Code): a preview, a line saying whether a picture
+    is set, and Browse / Clear buttons -- or drop a PNG / JPG file onto the row. The chosen file is copied into
+    Vyaprix's own data folder straight away, so the app keeps working even if the original is moved or deleted (the
+    file name is deliberately not shown). Cancelling Settings puts back the picture a row replaced.
     """
 
     THUMB = 64
+    IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg")
+    changed = Signal()
 
-    def __init__(self, config_key: str, label: str, dest_filename: str):
+    def __init__(self, config_key: str, label: str, dest_filename: str, hint: str = ""):
         super().__init__()
         self.config_key = config_key
         self.dest_filename = dest_filename
         self.rel_path = ""
+        self._undo: Optional[Tuple[Path, Optional[bytes]]] = (
+            None  # (the file this row overwrote, what it held)
+        )
+        self.setAcceptDrops(True)
 
         row = QHBoxLayout(self)
-        row.setContentsMargins(0, 8, 0, 8)
-        row.setSpacing(12)
+        row.setContentsMargins(0, 6, 0, 6)
+        row.setSpacing(14)
 
         self.thumb = make_label("—", "thumb", align=Qt.AlignmentFlag.AlignCenter)
         self.thumb.setFixedSize(self.THUMB, self.THUMB)
-        row.addWidget(self.thumb)
+        row.addWidget(self.thumb, 0, Qt.AlignmentFlag.AlignVCenter)
 
         info = QVBoxLayout()
         info.setSpacing(2)
         info.addStretch(1)
-        info.addWidget(make_label(label, "h3"))
-        self.status = make_label("", "muted")
+        self.title = make_label(label, "h3")
+        info.addWidget(self.title)
+        if hint:
+            info.addWidget(make_label(hint, "muted", wrap=True))
+        self.status = make_label("", "small", wrap=True)
         info.addWidget(self.status)
         info.addStretch(1)
         row.addLayout(info, 1)
 
-        self.browse_btn = make_button("Browse…", "secondary-outline", self.browse)
+        self.browse_btn = make_button(
+            "Browse…",
+            "secondary-outline",
+            self.browse,
+            tooltip="Choose a PNG or JPG picture (or drop one onto this row)",
+        )
         self.clear_btn = make_button("✕ Clear", "danger-outline", self.clear)
         _no_default_button(self.browse_btn, self.clear_btn)
-        row.addWidget(self.browse_btn)
-        row.addWidget(self.clear_btn)
+        row.addWidget(self.browse_btn, 0, Qt.AlignmentFlag.AlignVCenter)
+        row.addWidget(self.clear_btn, 0, Qt.AlignmentFlag.AlignVCenter)
 
     def set_path(self, rel_path: str) -> None:
         self.rel_path = rel_path or ""
@@ -7343,7 +7681,9 @@ class _AssetRow(QWidget):
             self.thumb.clear()
             self.thumb.setText("—")
             self.status.setText("No file selected — using default")
+        self.clear_btn.setEnabled(bool(self.rel_path))
 
+    # ---- choosing a picture ------------------------------------------------------------------------------------ #
     def browse(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
             self.window(),
@@ -7351,22 +7691,104 @@ class _AssetRow(QWidget):
             str(_start_dir("asset_dir")),
             "Image Files (*.png *.jpg *.jpeg)",
         )
-        if not path:
-            return
-        _remember_dir("asset_dir", path)
+        if path:
+            _remember_dir("asset_dir", path)
+            self.use_file(path)
+
+    def use_file(self, path: str) -> bool:
+        """Takes `path` as this row's picture (copied into the data folder). False, with a message, if it can't be used."""
+        source = Path(path)
+        if not QImageReader(str(source)).canRead():
+            Messagebox.show_error(
+                "Not a Picture",
+                "That file can't be read as a picture.\nChoose a PNG or JPG image.",
+                parent=self.window(),
+            )
+            return False
         try:
             dest = ASSETS_DIR / self.dest_filename
-            if not (dest.exists() and _same_file(Path(path), dest)):
-                shutil.copy(path, dest)
+            if not (dest.exists() and _same_file(source, dest)):
+                self._keep_original(dest)
+                shutil.copy(source, dest)
         except Exception as exc:
             Messagebox.show_error(
                 "Error", f"Could not save file: {exc}", parent=self.window()
             )
-            return
+            return False
         self.set_path(f"assets/{self.dest_filename}")
+        self.changed.emit()
+        return True
 
     def clear(self) -> None:
-        self.set_path("")
+        if self.rel_path:
+            self.set_path("")
+            self.changed.emit()
+
+    # ---- cancelling ---------------------------------------------------------------------------------------------- #
+    def _keep_original(self, dest: Path) -> None:
+        """Before this row overwrites its file for the first time: remember what the file held."""
+        if self._undo is None:
+            try:
+                self._undo = (dest, dest.read_bytes() if dest.exists() else None)
+            except OSError:
+                self._undo = None
+
+    @property
+    def replaced(self) -> bool:
+        """Has this dialog put a new file over the row's picture? (Cancel would put the old one back.)"""
+        return self._undo is not None
+
+    def commit(self) -> None:
+        """Settings was saved: the picture stays."""
+        self._undo = None
+
+    def undo_copy(self) -> None:
+        """Settings was cancelled: put back the picture this row replaced (or remove the one it created)."""
+        if self._undo is None:
+            return
+        dest, original = self._undo
+        self._undo = None
+        try:
+            if original is None:
+                dest.unlink(missing_ok=True)
+            else:
+                dest.write_bytes(original)
+        except OSError as exc:
+            logger.warning("Could not put back %s: %s", dest.name, exc)
+
+    # ---- drag and drop ------------------------------------------------------------------------------------------- #
+    def _dropped_picture(self, mime) -> str:
+        if mime is not None and mime.hasUrls():
+            for url in mime.urls():
+                if url.isLocalFile() and url.toLocalFile().lower().endswith(
+                    self.IMAGE_SUFFIXES
+                ):
+                    return url.toLocalFile()
+        return ""
+
+    def dragEnterEvent(self, event) -> None:
+        if self._dropped_picture(event.mimeData()):
+            event.acceptProposedAction()
+            set_flag(self.thumb, "dropping", True)
+        else:
+            event.ignore()
+
+    def dragMoveEvent(self, event) -> None:
+        if self._dropped_picture(event.mimeData()):
+            event.acceptProposedAction()
+
+    def dragLeaveEvent(self, event) -> None:
+        set_flag(self.thumb, "dropping", False)
+        super().dragLeaveEvent(event)
+
+    def dropEvent(self, event) -> None:
+        set_flag(self.thumb, "dropping", False)
+        path = self._dropped_picture(event.mimeData())
+        if path:
+            event.acceptProposedAction()
+            self.use_file(path)
+        else:
+            event.ignore()
 
 
 def template_thumbnail(
@@ -7620,6 +8042,12 @@ class _TemplateCard(QFrame):
 
 
 class SettingsDialog(QDialog):
+    """Settings: a menu of pages on the left (General, Your Details, Payment, Invoice PDF, Logo & Signature, Data &
+    Backup) and the chosen page on the right, made of titled cards. Nothing is applied until "Save Changes"; the footer
+    says whether there is anything unsaved, a mistake in a field is explained right under the field, and closing the
+    dialog with unsaved changes asks first. The menu shrinks to icons when the window is narrow.
+    """
+
     CURRENCY_OPTIONS: List[Tuple[str, str, str]] = [
         ("₹", "INR", "Indian Rupee"),
         ("$", "USD", "US Dollar"),
@@ -7643,17 +8071,48 @@ class SettingsDialog(QDialog):
         ("₫", "VND", "Vietnamese Dong"),
     ]
     CUSTOM_CURRENCY = "Custom Symbol…"
-    TAB_GENERAL, TAB_DETAILS, TAB_PAYMENT, TAB_ASSETS, TAB_DATA = range(5)
+    PAGE_GENERAL, PAGE_DETAILS, PAGE_PAYMENT, PAGE_PDF, PAGE_IMAGES, PAGE_DATA = range(
+        6
+    )
+    # (icon, name, what the page is about)
+    PAGES: List[Tuple[str, str, str]] = [
+        (
+            "⚙️",
+            "General",
+            "How the app looks, and the business name printed on every invoice.",
+        ),
+        (
+            "👤",
+            "Your Details",
+            "Your own contact details, printed under the business name on new invoices.",
+        ),
+        ("💳", "Payment", "The currency, and how your customers can pay you."),
+        (
+            "📄",
+            "Invoice PDF",
+            "How your printed invoices look: template, colour, status watermark, footer and terms.",
+        ),
+        ("🖼️", "Logo & Signature", "The pictures printed on your invoices."),
+        (
+            "💾",
+            "Data & Backup",
+            "Where your data is kept, and how to back it up or bring it back.",
+        ),
+    ]
+    NAV_WIDE, NAV_COMPACT = 212, 62  # width of the menu: with names / icons only
+    COMPACT_BELOW = 780  # the menu shows icons only in a dialog narrower than this
 
     def __init__(self, parent, callback: Callable[[Optional[str]], None]):
         super().__init__(parent)
         self.callback = callback
         self.setWindowTitle(f"{APP_NAME} Settings")
         self.setModal(True)
-        _fit_to_screen(self, 680, 780, 620, 700)
+        _fit_to_screen(self, 940, 720, 640, 540)
         self._cfg = load_config()
         self._asset_rows: Dict[str, _AssetRow] = {}
-        self._scroll_areas: Dict[int, QScrollArea] = {}
+        self._checked_fields: List[_Field] = (
+            []
+        )  # the fields that explain a mistake in place
         self._template_key = (
             PDF_TEMPLATE_CLASSIC.key
         )  # the invoice look and brand colour chosen in this dialog
@@ -7661,14 +8120,51 @@ class SettingsDialog(QDialog):
         self._preview_dirs: List[Path] = (
             []
         )  # folders holding sample PDFs (removed when the dialog closes)
+        self._baseline: Optional[str] = (
+            None  # the screen as loaded: what "unsaved" is measured against
+        )
+        self._compact: Optional[bool] = None
+        self._bad_pages: Set[int] = set()
+        self._closing_now = False  # closed by the program (not the user): never ask
         self._build()
         self._load()
+        QShortcut(
+            QKeySequence.StandardKey.Save,
+            self,
+            activated=self._save,
+            context=Qt.ShortcutContext.WidgetWithChildrenShortcut,
+        )
 
+    # ------------------------------------------------------------------ #
+    #  Closing
+    # ------------------------------------------------------------------ #
     def done(self, result: int):
         for folder in self._preview_dirs:
             shutil.rmtree(folder, ignore_errors=True)
         self._preview_dirs.clear()
         super().done(result)
+
+    def reject(self):  # Cancel, Esc and the window's X all come here
+        if (
+            not self._closing_now
+            and self._is_dirty()
+            and not Messagebox.yesno(
+                "Discard changes?",
+                "You have changes that are not saved.\n\nClose Settings and discard them?",
+                parent=self,
+            )
+        ):
+            return
+        for row in self._asset_rows.values():
+            row.undo_copy()
+        super().reject()
+
+    def closeEvent(self, event):
+        if (
+            not event.spontaneous()
+        ):  # the program is closing it (the app is shutting down): no question asked
+            self._closing_now = True
+        super().closeEvent(event)
 
     @classmethod
     def _currency_option_label(cls, opt: Tuple[str, str, str]) -> str:
@@ -7678,14 +8174,6 @@ class SettingsDialog(QDialog):
     # ------------------------------------------------------------------ #
     #  Small building blocks
     # ------------------------------------------------------------------ #
-    @staticmethod
-    def _section(title: str) -> QLabel:
-        return make_label(title, "h2")
-
-    @staticmethod
-    def _note(text: str) -> QLabel:
-        return make_label(text, "muted", wrap=True)
-
     @staticmethod
     def _entry(placeholder: str = "") -> PlaceholderEntry:
         return PlaceholderEntry(placeholder=placeholder)
@@ -7698,110 +8186,247 @@ class SettingsDialog(QDialog):
         return box
 
     @staticmethod
-    def _new_form() -> QFormLayout:
-        form = QFormLayout()
-        form.setContentsMargins(0, 0, 0, 0)
-        form.setHorizontalSpacing(12)
-        form.setVerticalSpacing(10)
-        form.setLabelAlignment(
-            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+    def _combo() -> QComboBox:
+        combo = QComboBox()
+        combo.setSizeAdjustPolicy(
+            QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
         )
-        form.setFieldGrowthPolicy(
-            QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow
-        )  # combo boxes fill the row too
-        form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.DontWrapRows)
-        return form
+        combo.setMinimumContentsLength(12)
+        return guard_wheel(combo)
 
-    def _add_tab(self, title: str, body_layout: QLayout, scroll: bool = False) -> int:
-        """Adds a tab whose content is `body_layout` (optionally inside a scroll area) and returns its index."""
-        body = QWidget()
-        body.setLayout(body_layout)
-        page = QWidget()
-        outer = QVBoxLayout(page)
-        outer.setContentsMargins(16, 16, 16, 16)
-        if scroll:
-            body_layout.setContentsMargins(
-                0, 0, 10, 0
-            )  # keeps the fields clear of the scroll bar
-            area = QScrollArea()
-            area.setWidgetResizable(True)
-            area.setFrameShape(QFrame.Shape.NoFrame)
-            area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-            area.setWidget(body)
-            outer.addWidget(area)
-            index = self.tabs.addTab(page, title)
-            self._scroll_areas[index] = area
-            return index
-        body_layout.setContentsMargins(0, 0, 0, 0)
-        outer.addWidget(body)
-        return self.tabs.addTab(page, title)
+    @staticmethod
+    def _toggle_row(switch: QCheckBox, hint: str) -> QWidget:
+        """An on/off switch with a line of explanation under it, lined up with the switch's caption."""
+        box = QWidget()
+        col = QVBoxLayout(box)
+        col.setContentsMargins(0, 0, 0, 0)
+        col.setSpacing(2)
+        col.addWidget(switch)
+        note = make_label(hint, "small", wrap=True)
+        note.setContentsMargins(ToggleSwitch.TRACK_W + 4 + ToggleSwitch.GAP, 0, 0, 0)
+        col.addWidget(note)
+        return box
 
-    def _form_tab(self, title: str, form: QFormLayout, scroll: bool = False) -> int:
-        column = QVBoxLayout()
-        column.addLayout(form)
-        column.addStretch(1)
-        return self._add_tab(title, column, scroll)
+    def _field(
+        self,
+        caption: str,
+        widget: QWidget,
+        hint: str = "",
+        optional: bool = False,
+        check: Optional[Callable[[str], str]] = None,
+    ) -> _Field:
+        """A captioned input; `check(text)` (-> "" or a message) makes it explain a wrong value in place."""
+        field = _Field(caption, widget, hint, optional)
+        self._track(widget)
+        if check is not None:
+            self._watch(field, check)
+        return field
+
+    def _watch(self, field: _Field, check: Callable[[str], str]) -> None:
+        """Checks the field when it loses focus, and then with every keystroke until its value is right."""
+        edit = field.widget
+        field.validator = lambda: check(edit.text())
+        field.error_changed.connect(self._on_field_error_changed)
+        edit.editingFinished.connect(field.validate)
+        edit.textChanged.connect(
+            lambda _text: field.validate() if field.has_error else None
+        )
+        self._checked_fields.append(field)
+
+    def _track(self, *widgets: QWidget) -> None:
+        """Watches inputs, so the footer can say whether there are unsaved changes."""
+        for widget in widgets:
+            if isinstance(widget, (QLineEdit, QPlainTextEdit)):
+                widget.textChanged.connect(self._on_edited)
+            elif isinstance(widget, QComboBox):
+                widget.currentIndexChanged.connect(self._on_edited)
+            elif isinstance(widget, QCheckBox):
+                widget.toggled.connect(self._on_edited)
+
+    @staticmethod
+    def _page_of(widget: Optional[QWidget]) -> Optional[_SettingsPage]:
+        while widget is not None and not isinstance(widget, _SettingsPage):
+            widget = widget.parentWidget()
+        return widget
 
     # ------------------------------------------------------------------ #
     #  Layout
     # ------------------------------------------------------------------ #
     def _build(self):
         root = QVBoxLayout(self)
-        root.setContentsMargins(20, 20, 20, 20)
-        root.setSpacing(16)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
 
-        self.tabs = QTabWidget()
-        root.addWidget(self.tabs, 1)
-        self._build_general_tab()
-        self._build_your_details_tab()
-        self._build_payment_tab()
-        self._build_assets_tab()
-        self._build_data_tab()
+        body = QHBoxLayout()
+        body.setContentsMargins(0, 0, 0, 0)
+        body.setSpacing(0)
+        root.addLayout(body, 1)
 
-        row = QHBoxLayout()
-        row.addStretch(1)
-        self.save_btn = make_button("Save Configuration", "success", self._save)
-        self.cancel_btn = make_button("Cancel", "secondary", self.reject)
-        _no_default_button(self.save_btn, self.cancel_btn)
-        row.addWidget(self.save_btn)
-        row.addSpacing(8)
-        row.addWidget(self.cancel_btn)
-        root.addLayout(row)
+        # ---- the menu of pages ---------------------------------------------------------------------------------- #
+        self.nav_frame = QFrame()
+        set_role(self.nav_frame, "sidebar")
+        menu = QVBoxLayout(self.nav_frame)
+        menu.setContentsMargins(0, 20, 0, 12)
+        menu.setSpacing(10)
+        self.nav_title = make_label("Settings", "h2")
+        self.nav_title.setContentsMargins(22, 0, 12, 0)
+        menu.addWidget(self.nav_title)
+        self.nav = QListWidget()
+        set_role(self.nav, "nav")
+        self.nav.setFrameShape(QFrame.Shape.NoFrame)
+        self.nav.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.nav.setTextElideMode(Qt.TextElideMode.ElideRight)
+        self.nav.setSpacing(1)
+        self.nav.setAccessibleName("Settings pages")
+        menu.addWidget(self.nav, 1)
+        body.addWidget(self.nav_frame)
+        body.addWidget(vline())
 
-    def _build_general_tab(self):
-        form = self._new_form()
-        form.addRow(self._section("Interface"))
-        self.theme_combo = QComboBox()
+        # ---- the pages ------------------------------------------------------------------------------------------ #
+        self.stack = QStackedWidget()
+        body.addWidget(self.stack, 1)
+        builders = (
+            self._build_general_page,
+            self._build_details_page,
+            self._build_payment_page,
+            self._build_pdf_page,
+            self._build_images_page,
+            self._build_data_page,
+        )
+        self.pages: List[_SettingsPage] = []
+        for (icon, name, about), build in zip(self.PAGES, builders):
+            page = _SettingsPage(name, about)
+            build(page)
+            page.finish()
+            self.pages.append(page)
+            self.stack.addWidget(page)
+            item = QListWidgetItem(name)
+            item.setData(Qt.ItemDataRole.UserRole, (icon, name))
+            item.setSizeHint(QSize(0, 42))
+            self.nav.addItem(item)
+        self.nav.currentRowChanged.connect(self._on_nav_row)
+
+        # ---- the footer: what is unsaved, and the two buttons ------------------------------------------------- #
+        root.addWidget(hline())
+        footer = QWidget()
+        foot = QHBoxLayout(footer)
+        foot.setContentsMargins(24, 12, 24, 12)
+        foot.setSpacing(10)
+        self.status_label = make_label("", "small", tone="muted")
+        foot.addWidget(self.status_label, 1)
+        self.cancel_btn = make_button(
+            "Cancel",
+            "secondary",
+            self.reject,
+            tooltip="Close Settings without saving (Esc)",
+        )
+        self.save_btn = make_button(
+            "💾  Save Changes  (Ctrl+S)",
+            "success",
+            self._save,
+            tooltip="Save every change and close Settings (Ctrl+S)",
+        )
+        _no_default_button(self.cancel_btn, self.save_btn)
+        foot.addWidget(self.cancel_btn)
+        foot.addWidget(self.save_btn)
+        root.addWidget(footer)
+
+        self._apply_nav_mode()
+        self.nav.setCurrentRow(self.PAGE_GENERAL)
+
+    # ---- the menu -------------------------------------------------------------------------------------------------- #
+    def show_page(self, index: int) -> None:
+        self.nav.setCurrentRow(max(0, min(index, self.nav.count() - 1)))
+
+    def current_page(self) -> int:
+        return self.stack.currentIndex()
+
+    def _on_nav_row(self, row: int) -> None:
+        if row >= 0:
+            self.stack.setCurrentIndex(row)
+
+    def _apply_nav_mode(self) -> None:
+        """Icons only in a narrow dialog, icons and names in a wide one."""
+        compact = self.width() < self.COMPACT_BELOW
+        if compact != self._compact:
+            self._compact = compact
+            self.nav_frame.setFixedWidth(self.NAV_COMPACT if compact else self.NAV_WIDE)
+            self.nav_title.setVisible(not compact)
+            set_flag(self.nav, "compact", compact)
+        self._apply_nav_text()
+
+    def _apply_nav_text(self) -> None:
+        for row in range(self.nav.count()):
+            item = self.nav.item(row)
+            icon, name = item.data(Qt.ItemDataRole.UserRole)
+            bad = row in self._bad_pages
+            marker = "  ●" if bad else ""
+            if self._compact:
+                item.setText(icon + marker)
+                item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            else:
+                item.setText(f"{icon}   {name}{marker}")
+                item.setTextAlignment(
+                    Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+                )
+            item.setData(
+                Qt.ItemDataRole.ForegroundRole,
+                QColor(theme_color("danger_text")) if bad else None,
+            )
+            item.setToolTip(f"{name} — a field here needs attention" if bad else name)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if hasattr(self, "nav"):
+            self._apply_nav_mode()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self.nav.setFocus()
+
+    # ---- General ---------------------------------------------------------------------------------------------------- #
+    def _build_general_page(self, page: _SettingsPage):
+        card = _SettingsCard(
+            "Appearance", "The colour theme of the whole app. It changes when you save."
+        )
+        self.theme_combo = self._combo()
         for name in THEME_NAMES:
             self.theme_combo.addItem(name.title(), name)
-        form.addRow(make_label("App Theme:"), self.theme_combo)
-        form.addRow(hline())
-        form.addRow(self._section("Company Details"))
-        form.addRow(
-            self._note(
-                "Your one business identity: shown as the letterhead at the top of every invoice, and as the name and "
-                "GSTIN in the FROM block below it. There's only one place to set these, so they can't disagree with "
-                "each other."
-            )
+        card.add(self._field("Theme", self.theme_combo))
+        page.add(card)
+
+        card = _SettingsCard(
+            "Company",
+            "Your one business identity: the letterhead at the top of every invoice, and the "
+            "name and GSTIN in the FROM block under it. There is only one place to set them, "
+            "so they can never disagree with each other.",
         )
         self.co_name = self._entry("Your company or firm name")
         self.co_desc = self._entry("A short tagline, e.g. Business Made Smarter.")
         self.co_gst = self._entry("22ABCDE1234F1Z5")
-        form.addRow(make_label("Company Name:"), self.co_name)
-        form.addRow(make_label("Company Tagline:"), self.co_desc)
-        form.addRow(make_label("Company GSTIN:"), self.co_gst)
-        self._form_tab("General", form)
-
-    def _build_your_details_tab(self):
-        form = self._new_form()
-        form.addRow(self._section("Your Details"))
-        form.addRow(
-            self._note(
-                "Your personal contact details, shown under the business name in the FROM block on new invoices. Editing "
-                "this doesn't change any invoice you've already created. For your business/firm name and GSTIN, see "
-                "Company Details on the General tab -- there's just one of each."
+        grid = _ReflowGrid(2, 260)
+        grid.add(self._field("Company name", self.co_name))
+        grid.add(self._field("Tagline", self.co_desc, optional=True))
+        grid.add(
+            self._field(
+                "GSTIN",
+                self.co_gst,
+                "15 characters, for example 22ABCDE1234F1Z5.",
+                optional=True,
+                check=self._check_gstin,
             )
         )
+        self.co_gst.editingFinished.connect(self._uppercase_gstin)
+        card.add(grid)
+        page.add(card)
+
+    def _uppercase_gstin(self):
+        text = self.co_gst.text().strip()
+        if text != self.co_gst.text() or text != text.upper():
+            self.co_gst.setText(text.upper())
+
+    # ---- Your Details ----------------------------------------------------------------------------------------------- #
+    def _build_details_page(self, page: _SettingsPage):
         self.ud_name = self._entry("e.g. Priya Sharma")
         self.ud_phone = self._entry("+91 98765 43210")
         self.ud_email = self._entry("you@example.com")
@@ -7816,47 +8441,208 @@ class SettingsDialog(QDialog):
         self.ud_state.setCompleter(state_names)
         self.ud_pin = self._entry("e.g. 226001")
         restrict_to_digits(self.ud_pin, max_length=6)
-        for caption, field in (
-            ("Your Name:", self.ud_name),
-            ("Phone Number:", self.ud_phone),
-            ("Email Address:", self.ud_email),
-            ("Website (Optional):", self.ud_website),
-            ("Address:", self.ud_address),
-            ("City:", self.ud_city),
-            ("State:", self.ud_state),
-            ("PIN Code:", self.ud_pin),
-        ):
-            form.addRow(make_label(caption), field)
-        self._form_tab("Your Details", form, scroll=True)
 
-    # ---- Invoice template -------------------------------------------------- #
+        card = _SettingsCard(
+            "Contact",
+            "Printed under the business name in the FROM block of every new invoice. "
+            "Changing it never alters an invoice you have already made. The business name "
+            "and GSTIN are on the General page.",
+        )
+        grid = _ReflowGrid(2, 260)
+        grid.add(self._field("Your name", self.ud_name))
+        grid.add(self._field("Phone number", self.ud_phone, check=self._check_phone))
+        grid.add(self._field("Email address", self.ud_email, check=self._check_email))
+        grid.add(self._field("Website", self.ud_website, optional=True))
+        card.add(grid)
+        page.add(card)
+
+        card = _SettingsCard(
+            "Address",
+            "Your state decides CGST + SGST (same state) or IGST (another state) when you "
+            "pick the place of supply on an invoice. If a GSTIN is set on the General page, "
+            "its first two digits give the state instead.",
+        )
+        grid = _ReflowGrid(2, 260)
+        grid.add(self._field("Address", self.ud_address), full_row=True)
+        grid.add(self._field("City", self.ud_city))
+        grid.add(self._field("State", self.ud_state))
+        grid.add(self._field("PIN code", self.ud_pin))
+        card.add(grid)
+        page.add(card)
+
+    # ---- Payment ---------------------------------------------------------------------------------------------------- #
+    def _build_payment_page(self, page: _SettingsPage):
+        # Currency picker: a drop-down of common currencies plus a "Custom" escape hatch (a plain text field) for
+        # anything that is not on the list. The extra field only shows once "Custom Symbol…" is picked.
+        card = _SettingsCard("Currency", "The symbol printed before every amount.")
+        self.currency_combo = self._combo()
+        for opt in self.CURRENCY_OPTIONS:
+            self.currency_combo.addItem(self._currency_option_label(opt), opt[0])
+        self.currency_combo.addItem(self.CUSTOM_CURRENCY, None)
+        self.currency_combo.currentIndexChanged.connect(
+            lambda _i: self._on_currency_selected(user=True)
+        )
+        self.custom_currency_entry = self._entry("e.g. Rs., kr, ₪")
+        card.add(self._field("Currency", self.currency_combo))
+        self._custom_currency_field = self._field(
+            "Custom symbol",
+            self.custom_currency_entry,
+            "Printed before every amount, e.g. Rs.",
+        )
+        card.add(self._custom_currency_field)
+        page.add(card)
+
+        card = _SettingsCard(
+            "Bank account",
+            "Printed in the payment block of an invoice while there is still something "
+            "to pay.",
+        )
+        self.bank_name = self._entry("e.g. State Bank of India")
+        self.acc_holder = self._entry("e.g. Priya Sharma")
+        self.acc_number = self._entry("e.g. 000123456789")
+        self.ifsc_code = self._entry("e.g. SBIN0001234")
+        grid = _ReflowGrid(2, 260)
+        grid.add(self._field("Bank name", self.bank_name))
+        grid.add(self._field("Account holder name", self.acc_holder))
+        grid.add(self._field("Account number", self.acc_number))
+        grid.add(self._field("IFSC code", self.ifsc_code))
+        card.add(grid)
+        page.add(card)
+
+        card = _SettingsCard(
+            "UPI",
+            "Customers can pay from any UPI app: the UPI ID is printed on the invoice, and so "
+            "is the QR code when you add one.",
+        )
+        self.upi_id = self._entry("company@upi")
+        card.add(self._field("UPI ID", self.upi_id))
+        qr_row = _AssetRow(
+            "upi_qr_code",
+            "UPI QR code",
+            "upi_qr.png",
+            "The code a customer scans to pay you.",
+        )
+        self._add_asset_row(qr_row)
+        card.add(qr_row)
+        page.add(card)
+
+        card = _SettingsCard("Terms and notes")
+        self.pay_terms = self._entry("Due on Receipt")
+        self.payment_notes_text = self._multiline(
+            "Anything else to show on the invoice -- cheque instructions, a late-fee policy, "
+            "alternate payment methods, etc.",
+            3,
+        )
+        card.add(
+            self._field(
+                "Default payment terms",
+                self.pay_terms,
+                "Each new invoice starts with this; you can change it on the invoice.",
+            )
+        )
+        card.add(self._field("Payment notes", self.payment_notes_text, optional=True))
+        page.add(card)
+
+        card = _SettingsCard("When payment details are printed")
+        self.always_show_qr_check = ToggleSwitch(
+            "Always show payment details, even on fully paid invoices"
+        )
+        self._track(self.always_show_qr_check)
+        card.add(
+            self._toggle_row(
+                self.always_show_qr_check,
+                "Off by default: the QR code and the bank / UPI details are only printed on unpaid and partly paid "
+                "invoices, because there is nothing left to pay once an invoice is settled. Turn this on to print them "
+                "whatever the status.",
+            )
+        )
+        page.add(card)
+        self._on_currency_selected()
+
+    def _on_currency_selected(self, user: bool = False):
+        custom = self.currency_combo.currentData() is None
+        self._custom_currency_field.setVisible(custom)
+        if custom and user:
+            self.custom_currency_entry.setFocus()
+
+    # ---- Invoice PDF ------------------------------------------------------------------------------------------------ #
+    def _build_pdf_page(self, page: _SettingsPage):
+        card = _SettingsCard(
+            "Template",
+            "The look of every invoice you print. A single invoice can still be printed "
+            "in another template from its own form.",
+        )
+        card.add(self._build_template_picker())
+        page.add(card)
+
+        card = _SettingsCard("On the page")
+        self.watermark_check = ToggleSwitch("Show the status watermark")
+        self._track(self.watermark_check)
+        card.add(
+            self._toggle_row(
+                self.watermark_check,
+                "A faint slanted stamp across the page that says where the invoice stands: PAID, BALANCE DUE, PARTIAL "
+                "PAYMENT, ADVANCE / CREDIT or COMPLIMENTARY. You can also turn it on or off for a single invoice, on its "
+                "own form.",
+            )
+        )
+        self.amount_words_check = ToggleSwitch("Print the invoice total in words")
+        self._track(self.amount_words_check)
+        card.add(
+            self._toggle_row(
+                self.amount_words_check,
+                '"Rupees ... Only" under the totals, for rupee invoices. It is also shown while you fill in an invoice.',
+            )
+        )
+        page.add(card)
+
+        card = _SettingsCard("Footer and terms")
+        self.footer_text = self._multiline("Thank you for your business!", 3)
+        self.default_terms_text = self._multiline(
+            "Every new invoice starts with this text in its Terms field -- e.g. payment within 15 days, "
+            "late-fee policy, cancellation terms. Leave empty to print no terms.",
+            4,
+        )
+        card.add(
+            self._field(
+                "Footer note",
+                self.footer_text,
+                "Printed at the bottom of every page, under a thin line (two lines at most).",
+            )
+        )
+        card.add(
+            self._field(
+                "Default terms and conditions", self.default_terms_text, optional=True
+            )
+        )
+        page.add(card)
+
+    # ---- Invoice template ------------------------------------------------------------------------------------------ #
     def _build_template_picker(self) -> QWidget:
-        """The templates as cards (two to a row), the brand colour row and the sample-preview button."""
+        """The templates as cards (two to a row when there is room), the brand colour row and the sample-preview button."""
         box = QWidget()
         col = QVBoxLayout(box)
         col.setContentsMargins(0, 0, 0, 0)
-        col.setSpacing(10)
-        grid = QGridLayout()
-        grid.setHorizontalSpacing(12)
-        grid.setVerticalSpacing(12)
+        col.setSpacing(12)
+        self.template_grid = _ReflowGrid(
+            2, 250, align_top=False
+        )  # the cards of a row are one height
         self.template_group = QButtonGroup(self)
         self.template_cards: Dict[str, _TemplateCard] = {}
-        for n, tpl in enumerate(PDF_TEMPLATES.values()):
+        for tpl in PDF_TEMPLATES.values():
             card = _TemplateCard(tpl, self.template_group)
             card.picked.connect(self._on_template_picked)
             self.template_cards[tpl.key] = card
-            grid.addWidget(card, n // 2, n % 2)
-        grid.setColumnStretch(0, 1)
-        grid.setColumnStretch(1, 1)
-        col.addLayout(grid)
+            self.template_grid.add(card)
+        col.addWidget(self.template_grid)
 
         self.accent_box = QWidget()
         accent_col = QVBoxLayout(self.accent_box)
-        accent_col.setContentsMargins(0, 0, 0, 0)
+        accent_col.setContentsMargins(0, 4, 0, 0)
         accent_col.setSpacing(6)
         row = QHBoxLayout()
         row.setSpacing(2)
-        row.addWidget(make_label("Brand colour:"))
+        row.addWidget(make_label("Brand colour", "caption"))
         row.addSpacing(8)
         self.accent_swatches: Dict[str, _Swatch] = {}
         for color, name in BRAND_COLORS:
@@ -7884,7 +8670,7 @@ class SettingsDialog(QDialog):
         row.addStretch(1)
         accent_col.addLayout(row)
         col.addWidget(self.accent_box)
-        self.accent_note = self._note("")
+        self.accent_note = make_label("", "muted", wrap=True)
         col.addWidget(self.accent_note)
 
         line = QHBoxLayout()
@@ -7892,8 +8678,9 @@ class SettingsDialog(QDialog):
             "Preview sample invoice",
             "info-outline",
             self._preview_template,
-            tooltip="Open a made-up invoice in the template and colour chosen above",
+            tooltip="Open a made-up invoice with the template, colour and print options shown on this screen",
         )
+        _no_default_button(self.preview_template_btn)
         line.addWidget(self.preview_template_btn)
         line.addStretch(1)
         col.addLayout(line)
@@ -7952,15 +8739,12 @@ class SettingsDialog(QDialog):
                 "Each template uses its own colour until you pick one. Your colour is shared by "
                 "Modern, Minimal and Corporate."
             )
+        self._on_edited()
 
     def _preview_template(self):
-        """Opens a made-up invoice in the chosen template and brand colour, under the saved business details."""
-        settings = {
-            **(self._cfg.get("pdf_settings") or {}),
-            "template": self._template_key,
-            "accent_color": self._accent,
-        }
-        cfg = {**self._cfg, "pdf_settings": settings}
+        """Opens a made-up invoice printed from what is on this screen -- template, brand colour, print options, footer,
+        business and payment details -- saved or not."""
+        cfg = self._collect_config()
         try:
             folder = Path(tempfile.mkdtemp(prefix="vyaprix-template-"))
             self._preview_dirs.append(folder)
@@ -7988,136 +8772,46 @@ class SettingsDialog(QDialog):
                 row.refresh()
         return super().event(event)
 
-    def _build_payment_tab(self):
-        form = self._new_form()
-        form.addRow(self._section("Invoice Template"))
-        form.addRow(
-            self._note(
-                "The look of your printed invoices. You can still print a single invoice in another "
-                "template from its own form."
+    # ---- Logo & Signature ------------------------------------------------------------------------------------------ #
+    def _add_asset_row(self, row: _AssetRow) -> _AssetRow:
+        self._asset_rows[row.config_key] = row
+        row.changed.connect(self._on_edited)
+        return row
+
+    def _build_images_page(self, page: _SettingsPage):
+        card = _SettingsCard(
+            "Logo and signature",
+            "Choose a PNG or JPG file for each, or drop one onto its row. Vyaprix keeps its own copy "
+            "of the file straight away, so the picture still prints if you later move or delete the "
+            "original. (The UPI QR code is on the Payment page.)",
+        )
+        logo = self._add_asset_row(
+            _AssetRow(
+                "logo",
+                "Company logo",
+                "logo.png",
+                "Printed in the letterhead at the top of every invoice.",
             )
         )
-        form.addRow(self._build_template_picker())
-        form.addRow(hline())
-        form.addRow(self._section("Payment Settings"))
-
-        # Currency picker: a drop-down of common currencies plus a "Custom" escape hatch (a plain text field) for
-        # anything that is not on the list. The extra row only shows once "Custom Symbol…" is picked.
-        self.currency_combo = QComboBox()
-        guard_wheel(self.currency_combo)
-        for opt in self.CURRENCY_OPTIONS:
-            self.currency_combo.addItem(self._currency_option_label(opt), opt[0])
-        self.currency_combo.addItem(self.CUSTOM_CURRENCY, None)
-        self.currency_combo.currentIndexChanged.connect(
-            lambda _i: self._on_currency_selected()
-        )
-        self.custom_currency_entry = self._entry("e.g. Rs., kr, ₪")
-        form.addRow(make_label("Currency:"), self.currency_combo)
-        form.addRow(make_label("Custom Symbol:"), self.custom_currency_entry)
-        self._payment_form = form
-
-        self.bank_name = self._entry("e.g. State Bank of India")
-        self.acc_holder = self._entry("e.g. Priya Sharma")
-        self.acc_number = self._entry("e.g. 000123456789")
-        self.ifsc_code = self._entry("e.g. SBIN0001234")
-        self.upi_id = self._entry("company@upi")
-        for caption, field in (
-            ("Bank Name:", self.bank_name),
-            ("Account Holder Name:", self.acc_holder),
-            ("Account Number:", self.acc_number),
-            ("IFSC Code:", self.ifsc_code),
-            ("UPI ID:", self.upi_id),
-        ):
-            form.addRow(make_label(caption), field)
-        form.addRow(make_label("Payment Notes:"))
-        self.payment_notes_text = self._multiline(
-            "Anything else to show on the invoice -- cheque instructions, a late-fee policy, "
-            "alternate payment methods, etc.",
-            3,
-        )
-        form.addRow(self.payment_notes_text)
-        self.pay_terms = self._entry("Due on Receipt")
-        form.addRow(make_label("Default Payment Terms:"), self.pay_terms)
-        form.addRow(hline())
-        form.addRow(self._section("PDF Footer Note"))
-        self.footer_text = self._multiline("Thank you for your business!", 3)
-        form.addRow(self.footer_text)
-        form.addRow(hline())
-        form.addRow(self._section("Invoice Printing"))
-        self.amount_words_check = QCheckBox(
-            "Print the invoice total in words (Rupees ... Only)"
-        )
-        form.addRow(self.amount_words_check)
-        form.addRow(
-            self._note(
-                "Only for rupee invoices. It is printed under the totals, and is also shown while you "
-                "fill in an invoice."
+        signature = self._add_asset_row(
+            _AssetRow(
+                "signature",
+                "Authorized signature",
+                "sign.png",
+                "Printed above the signature line at the end of an invoice.",
             )
         )
-        form.addRow(make_label("Default Terms and Conditions:"))
-        self.default_terms_text = self._multiline(
-            "Every new invoice starts with this text in its Terms field -- e.g. payment within 15 days, "
-            "late-fee policy, cancellation terms. Leave empty to print no terms.",
-            4,
-        )
-        form.addRow(self.default_terms_text)
-        self._form_tab("Payment && PDF", form, scroll=True)
-        self._on_currency_selected()
+        card.add(logo)
+        card.add(hline())
+        card.add(signature)
+        page.add(card)
 
-    def _on_currency_selected(self):
-        custom = self.currency_combo.currentData() is None
-        self._payment_form.setRowVisible(self.custom_currency_entry, custom)
-
-    def _build_assets_tab(self):
-        col = QVBoxLayout()
-        col.setSpacing(0)
-        col.addWidget(self._section("Upload Assets"))
-        col.addSpacing(8)
-        col.addWidget(
-            self._note(
-                "Files you choose are copied into Vyaprix's own data folder right away, so the app "
-                "keeps working even if you later move or delete the original."
-            )
+    # ---- Data & Backup ---------------------------------------------------------------------------------------------- #
+    def _build_data_page(self, page: _SettingsPage):
+        card = _SettingsCard(
+            "Where your data is kept",
+            "Invoices, clients and your catalogue all live in one database file on this computer.",
         )
-        col.addSpacing(6)
-        # The save destination is fixed per asset (logo.png, sign.png, upi_qr.png).
-        for index, (key, label, dest) in enumerate(
-            (
-                ("logo", "Company Logo", "logo.png"),
-                ("signature", "Authorized Signature", "sign.png"),
-                ("upi_qr_code", "UPI QR Code", "upi_qr.png"),
-            )
-        ):
-            if index:
-                col.addWidget(hline())
-            row = _AssetRow(key, label, dest)
-            self._asset_rows[key] = row
-            col.addWidget(row)
-        col.addSpacing(12)
-        col.addWidget(hline())
-        col.addSpacing(14)
-        col.addWidget(self._section("Payment Details Visibility"))
-        col.addSpacing(8)
-        self.always_show_qr_check = QCheckBox(
-            "Always show payment details, even on fully paid invoices"
-        )
-        col.addWidget(self.always_show_qr_check)
-        col.addSpacing(4)
-        col.addWidget(
-            self._note(
-                "Off by default: the QR code and bank/UPI details only print on Unpaid or Partially Paid invoices, since "
-                "there's nothing left to pay once an invoice is settled. Turn this on to always include them regardless "
-                "of payment status."
-            )
-        )
-        col.addStretch(1)
-        self._add_tab("Images && Assets", col)
-
-    def _build_data_tab(self):
-        col = QVBoxLayout()
-        col.setSpacing(0)
-        col.addWidget(self._section("Database Location"))
-        col.addSpacing(8)
         self.db_path_label = make_label(str(DB_NAME), "muted")
         self.db_path_label.setWordWrap(True)
         self.db_path_label.setTextInteractionFlags(
@@ -8126,34 +8820,74 @@ class SettingsDialog(QDialog):
         self.db_path_label.setSizePolicy(
             QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
         )
-        col.addWidget(self.db_path_label)
-        col.addSpacing(12)
-        col.addWidget(hline())
-        col.addSpacing(14)
-        col.addWidget(self._section("Backup & Restore"))
-        col.addSpacing(8)
+        card.add(self.db_path_label)
+        row = QHBoxLayout()
+        self.copy_path_btn = make_button(
+            "Copy path",
+            "secondary-outline",
+            self._copy_db_path,
+            tooltip="Copy the location of the database file",
+        )
+        self.open_folder_btn = make_button(
+            "Show in folder",
+            "secondary-outline",
+            self._open_db_folder,
+            tooltip="Open the folder that holds the database file",
+        )
+        _no_default_button(self.copy_path_btn, self.open_folder_btn)
+        row.addWidget(self.copy_path_btn)
+        row.addWidget(self.open_folder_btn)
+        row.addStretch(1)
+        card.body.addLayout(row)
+        page.add(card)
+
+        card = _SettingsCard(
+            "Back up",
+            "Save a copy of the database somewhere safe -- a USB drive, or a folder that syncs to the "
+            "cloud.",
+        )
         self.backup_btn = make_button(
             "💾  Save a Backup Copy…  (Ctrl+B)",
             "secondary-outline",
             self._backup_db,
             tooltip="Back up the database now (Ctrl+B works from anywhere in the app)",
         )
+        _no_default_button(self.backup_btn)
+        row = QHBoxLayout()
+        row.addWidget(self.backup_btn)
+        row.addStretch(1)
+        card.body.addLayout(row)
+        page.add(card)
+
+        card = _SettingsCard(
+            "Restore from a backup",
+            "Replaces all invoices, clients and catalogue items with the contents of the file you "
+            "choose. Your current database is backed up automatically first, and the app refreshes by "
+            "itself once the import has finished.",
+        )
         self.import_btn = make_button(
             "📥  Import Database…", "warning-outline", self._import_db
         )
-        _no_default_button(self.backup_btn, self.import_btn)
-        col.addWidget(self.backup_btn, 0, Qt.AlignmentFlag.AlignLeft)
-        col.addSpacing(10)
-        col.addWidget(self.import_btn, 0, Qt.AlignmentFlag.AlignLeft)
-        col.addSpacing(4)
-        col.addWidget(
-            self._note(
-                "Replaces all invoices, clients, and catalog items with the contents of the file you choose. Your current "
-                "database is backed up automatically first, and the app refreshes automatically once the import finishes."
-            )
-        )
-        col.addStretch(1)
-        self._add_tab("Data", col)
+        _no_default_button(self.import_btn)
+        row = QHBoxLayout()
+        row.addWidget(self.import_btn)
+        row.addStretch(1)
+        card.body.addLayout(row)
+        page.add(card)
+
+    def _copy_db_path(self):
+        QGuiApplication.clipboard().setText(str(DB_NAME))
+        self.copy_path_btn.setText("Copied ✓")
+        QTimer.singleShot(1500, self, self._reset_copy_text)
+
+    def _reset_copy_text(self):
+        try:
+            self.copy_path_btn.setText("Copy path")
+        except RuntimeError:  # the dialog has gone in the meantime
+            pass
+
+    def _open_db_folder(self):
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(Path(DB_NAME).parent)))
 
     # ------------------------------------------------------------------ #
     #  Backup / import
@@ -8231,9 +8965,12 @@ class SettingsDialog(QDialog):
         self.callback(None)  # reloads CONFIG and refreshes every screen's list
 
     # ------------------------------------------------------------------ #
-    #  Load / save
+    #  Load / what changed / save
     # ------------------------------------------------------------------ #
     def _load(self):
+        self._baseline = (
+            None  # (the fields fill in one by one: nothing is "changed" yet)
+        )
         c = self._cfg
         theme = normalize_theme_name(c.get("theme"))
         self.theme_combo.setCurrentIndex(max(0, self.theme_combo.findData(theme)))
@@ -8277,6 +9014,7 @@ class SettingsDialog(QDialog):
             bool(pdf.get("always_show_qr_code", False))
         )
         self.amount_words_check.setChecked(bool(pdf.get("amount_in_words", False)))
+        self.watermark_check.setChecked(bool(pdf.get("status_watermark", True)))
         self.default_terms_text.setPlainText(pdf.get("default_terms", ""))
         self._template_key = (
             pdf.get("template")
@@ -8290,106 +9028,154 @@ class SettingsDialog(QDialog):
         for key, row in self._asset_rows.items():
             row.set_path(paths.get(key, ""))
 
-    def _reject_input(self, title: str, message: str, tab: int, field: QWidget) -> None:
-        """Explains what is wrong, then takes the user to the offending field (it may be on another tab)."""
-        Messagebox.show_error(title, message, parent=self)
-        self.tabs.setCurrentIndex(tab)
-        field.setFocus()
-        area = self._scroll_areas.get(tab)
-        if area is not None:
-            area.ensureWidgetVisible(field)
+        self._baseline = self._snapshot()
+        self._refresh_status()
 
     def _currency_symbol(self) -> str:
         if self.currency_combo.currentData() is None:
             return self.custom_currency_entry.text().strip() or "₹"
         return self.currency_combo.currentData()
 
+    def _collect_config(self) -> Dict[str, Any]:
+        """Everything on the screen as the settings dictionary: what Save writes, and what the sample invoice is printed from."""
+        return {
+            "theme": self.theme_combo.currentData() or DEFAULT_THEME,
+            "company_details": {
+                "name": self.co_name.text().strip(),
+                "description": self.co_desc.text().strip(),
+                "gstin": self.co_gst.text().strip(),
+            },
+            "user_details": {
+                "name": self.ud_name.text().strip(),
+                "phone": self.ud_phone.text().strip(),
+                "email": self.ud_email.text().strip(),
+                "website": self.ud_website.text().strip(),
+                "address": self.ud_address.text().strip(),
+                "city": self.ud_city.text().strip(),
+                "state": self.ud_state.text().strip(),
+                "pin_code": self.ud_pin.text().strip(),
+                # Preserved but no longer editable here directly -- see compose_your_contact()'s
+                # upgrade-path fallback.
+                "contact_info": self._cfg.get("user_details", {}).get(
+                    "contact_info", ""
+                ),
+            },
+            "payment_details": {
+                "upi_id": self.upi_id.text().strip(),
+                "payment_terms": self.pay_terms.text().strip(),
+                "bank_name": self.bank_name.text().strip(),
+                "account_holder_name": self.acc_holder.text().strip(),
+                "account_number": self.acc_number.text().strip(),
+                "ifsc_code": self.ifsc_code.text().strip(),
+                "payment_notes": self.payment_notes_text.toPlainText().strip(),
+            },
+            "pdf_settings": {
+                "footer_message": self.footer_text.toPlainText().strip(),
+                "always_show_qr_code": self.always_show_qr_check.isChecked(),
+                "amount_in_words": self.amount_words_check.isChecked(),
+                "status_watermark": self.watermark_check.isChecked(),
+                "default_terms": self.default_terms_text.toPlainText().strip(),
+                "template": self._template_key,
+                "accent_color": self._accent,
+            },
+            "asset_paths": {key: row.rel_path for key, row in self._asset_rows.items()},
+            "currency_symbol": self._currency_symbol(),
+        }
+
+    def _snapshot(self) -> str:
+        """The screen as a string: the settings, and which pictures have been replaced (a new file keeps the old name,
+        so the settings alone would not show that)."""
+        replaced = sorted(key for key, row in self._asset_rows.items() if row.replaced)
+        return json.dumps([self._collect_config(), replaced], sort_keys=True)
+
+    def _is_dirty(self) -> bool:
+        return self._baseline is not None and self._snapshot() != self._baseline
+
+    # ---- checks, shown in place --------------------------------------------------------------------------------- #
+    @staticmethod
+    def _check_email(text: str) -> str:
+        text = text.strip()
+        if text and not is_valid_email(text):
+            return "That doesn't look like an email address. Example: name@example.com"
+        return ""
+
+    @staticmethod
+    def _check_phone(text: str) -> str:
+        text = text.strip()
+        if text and not is_valid_phone(text):
+            return "Use digits only, with an optional + sign, spaces or dashes (7 to 15 digits)."
+        return ""
+
+    @staticmethod
+    def _check_gstin(text: str) -> str:
+        text = text.strip()
+        if text and not is_valid_gstin(text):
+            return "A GSTIN has 15 characters, for example 22ABCDE1234F1Z5."
+        return ""
+
+    def _on_edited(self, *_args) -> None:
+        if self._baseline is not None:
+            self._refresh_status()
+
+    def _on_field_error_changed(self) -> None:
+        self._bad_pages = {
+            self.stack.indexOf(page)
+            for field in self._checked_fields
+            if field.has_error
+            for page in (self._page_of(field),)
+            if page is not None
+        }
+        self._apply_nav_text()
+        self._refresh_status()
+
+    def _refresh_status(self) -> None:
+        wrong = sum(1 for field in self._checked_fields if field.has_error)
+        if wrong:
+            self._set_status(
+                f"● {wrong} field{'s' if wrong != 1 else ''} to correct before you can save",
+                "danger",
+            )
+        elif self._is_dirty():
+            self._set_status("● Unsaved changes", "warning")
+        else:
+            self._set_status("No unsaved changes", "muted")
+
+    def _set_status(self, text: str, tone: str) -> None:
+        self.status_label.setText(text)
+        set_tone(self.status_label, tone)
+
+    def _show_field(self, widget: QWidget) -> None:
+        """Goes to the page a field is on and puts the cursor in it."""
+        page = self._page_of(widget)
+        if page is None:
+            return
+        self.show_page(self.stack.indexOf(page))
+        widget.setFocus()
+        page.ensureWidgetVisible(widget, 40, 80)
+        QTimer.singleShot(
+            0, page, lambda: page.ensureWidgetVisible(widget, 40, 80)
+        )  # (once the page has laid itself out)
+
     def _save(self):
-        email = self.ud_email.text().strip()
-        if email and not is_valid_email(email):
-            return self._reject_input(
-                "Invalid Email",
-                f'"{email}" doesn\'t look like a valid email address.',
-                self.TAB_DETAILS,
-                self.ud_email,
-            )
+        wrong = [field for field in self._checked_fields if not field.validate()]
+        if wrong:
+            self._refresh_status()
+            return self._show_field(wrong[0].widget)
 
-        phone = self.ud_phone.text().strip()
-        if phone and not is_valid_phone(phone):
-            return self._reject_input(
-                "Invalid Phone Number",
-                f'"{phone}" doesn\'t look like a valid phone number.\n'
-                "Use digits only, optionally with +, spaces, or dashes.",
-                self.TAB_DETAILS,
-                self.ud_phone,
-            )
-
-        company_gstin = self.co_gst.text().strip()
-        if company_gstin and not is_valid_gstin(company_gstin):
-            return self._reject_input(
-                "Invalid GST Number",
-                f'"{company_gstin}" is not a valid GSTIN.\n'
-                "A GSTIN is 15 characters, for example 22ABCDE1234F1Z5.",
-                self.TAB_GENERAL,
-                self.co_gst,
-            )
-
-        theme = self.theme_combo.currentData() or DEFAULT_THEME
+        config = self._collect_config()
+        config["company_details"]["gstin"] = config["company_details"]["gstin"].upper()
         try:
-            save_config(
-                {
-                    "theme": theme,
-                    "company_details": {
-                        "name": self.co_name.text().strip(),
-                        "description": self.co_desc.text().strip(),
-                        "gstin": company_gstin,
-                    },
-                    "user_details": {
-                        "name": self.ud_name.text().strip(),
-                        "phone": phone,
-                        "email": email,
-                        "website": self.ud_website.text().strip(),
-                        "address": self.ud_address.text().strip(),
-                        "city": self.ud_city.text().strip(),
-                        "state": self.ud_state.text().strip(),
-                        "pin_code": self.ud_pin.text().strip(),
-                        # Preserved but no longer editable here directly -- see compose_your_contact()'s
-                        # upgrade-path fallback.
-                        "contact_info": self._cfg.get("user_details", {}).get(
-                            "contact_info", ""
-                        ),
-                    },
-                    "payment_details": {
-                        "upi_id": self.upi_id.text().strip(),
-                        "payment_terms": self.pay_terms.text().strip(),
-                        "bank_name": self.bank_name.text().strip(),
-                        "account_holder_name": self.acc_holder.text().strip(),
-                        "account_number": self.acc_number.text().strip(),
-                        "ifsc_code": self.ifsc_code.text().strip(),
-                        "payment_notes": self.payment_notes_text.toPlainText().strip(),
-                    },
-                    "pdf_settings": {
-                        "footer_message": self.footer_text.toPlainText().strip(),
-                        "always_show_qr_code": self.always_show_qr_check.isChecked(),
-                        "amount_in_words": self.amount_words_check.isChecked(),
-                        "default_terms": self.default_terms_text.toPlainText().strip(),
-                        "template": self._template_key,
-                        "accent_color": self._accent,
-                    },
-                    "asset_paths": {
-                        key: row.rel_path for key, row in self._asset_rows.items()
-                    },
-                    "currency_symbol": self._currency_symbol(),
-                }
-            )
+            save_config(config)
         except OSError as exc:
             return Messagebox.show_error(
                 "Save Failed", f"Your settings could not be saved:\n{exc}", parent=self
             )
+        for row in self._asset_rows.values():
+            row.commit()
 
         try:
             self.callback(
-                theme
+                config["theme"]
             )  # the new theme goes to the app, which applies it and refreshes every screen
         finally:
             self.accept()
@@ -10843,11 +11629,24 @@ class InvoiceFormFrame(QWidget):
         self.template_combo.setMinimumContentsLength(10)
         self.template_combo.setToolTip(
             'The look this invoice is printed in.\n"Default" is the template picked in '
-            "Settings > Payment & PDF."
+            "Settings > PDF."
         )
         guard_wheel(self.template_combo)
         self._fill_template_combo()
         lay.addWidget(self._labeled("PDF Template", self.template_combo))
+
+        self.watermark_combo = QComboBox()
+        self.watermark_combo.setSizeAdjustPolicy(
+            QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
+        )
+        self.watermark_combo.setMinimumContentsLength(10)
+        self.watermark_combo.setToolTip(
+            "The faint PAID / BALANCE DUE ... stamp across the printed invoice: turn it on or off "
+            'for this invoice.\n"Default" follows Settings > PDF.'
+        )
+        guard_wheel(self.watermark_combo)
+        self._fill_watermark_combo()
+        lay.addWidget(self._labeled("Status Watermark", self.watermark_combo))
 
         lay.addSpacing(4)
         self.no_charge_toggle = ToggleSwitch("Mark as Complimentary (No Charge)")
@@ -10978,6 +11777,24 @@ class InvoiceFormFrame(QWidget):
             self.template_combo.addItem(tpl.label, tpl.key)
         self.template_combo.setCurrentIndex(
             max(0, self.template_combo.findData(chosen or ""))
+        )
+
+    def _fill_watermark_combo(self):
+        """ "Default (On|Off)" -- what Settings says -- then On and Off; the choice is kept across a refill."""
+        chosen = (
+            self.watermark_combo.currentData()
+            if self.watermark_combo.count()
+            else WATERMARK_DEFAULT
+        )
+        on = bool((CONFIG.get("pdf_settings") or {}).get("status_watermark", True))
+        self.watermark_combo.clear()
+        self.watermark_combo.addItem(
+            f"Default ({'On' if on else 'Off'})", WATERMARK_DEFAULT
+        )
+        self.watermark_combo.addItem("On", WATERMARK_SHOW)
+        self.watermark_combo.addItem("Off", WATERMARK_HIDE)
+        self.watermark_combo.setCurrentIndex(
+            max(0, self.watermark_combo.findData(chosen or WATERMARK_DEFAULT))
         )
 
     def _toggle_no_charge(self, _checked: bool = False):
@@ -11343,7 +12160,7 @@ class InvoiceFormFrame(QWidget):
             "Use default terms",
             "link",
             self._use_default_terms,
-            tooltip="Fill this box with the default terms from Settings > Payment & PDF",
+            tooltip="Fill this box with the default terms from Settings > Invoice PDF",
         )
         self.default_terms_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         head.addWidget(self.default_terms_btn)
@@ -11363,7 +12180,7 @@ class InvoiceFormFrame(QWidget):
         if not default:
             Messagebox.show_info(
                 "No Default Terms",
-                "No default terms have been set yet.\nAdd them in Settings > Payment & PDF > Invoice Printing.",
+                "No default terms have been set yet.\nAdd them in Settings > Invoice PDF > Footer and terms.",
                 parent=self.controller,
             )
             return
@@ -11500,6 +12317,7 @@ class InvoiceFormFrame(QWidget):
             self.payment_terms_entry,
             self.po_entry,
             self.template_combo,
+            self.watermark_combo,
             self.no_charge_toggle,
             self.show_qr_toggle,
             self.reverse_toggle,
@@ -11593,6 +12411,7 @@ class InvoiceFormFrame(QWidget):
                 "payment_terms": self.payment_terms_entry.text().strip(),
                 "po_number": self.po_entry.text().strip(),
                 "pdf_template": self.template_combo.currentData() or "",
+                "pdf_watermark": self.watermark_combo.currentData() or "",
                 "notes": self.notes_text.toPlainText().strip(),
                 "customer_notes": self.customer_notes_text.toPlainText().strip(),
                 "terms": self.terms_text.toPlainText().strip(),
@@ -11799,6 +12618,7 @@ class InvoiceFormFrame(QWidget):
 
     def refresh_after_settings_change(self):
         self._fill_template_combo()  # "Default (...)" names the template Settings now has
+        self._fill_watermark_combo()  # ... and whether Settings has the status watermark on
         self._refresh_suggestions()
         for row in self.item_rows:
             row.refresh_line()  # the currency symbol may have changed
@@ -11883,6 +12703,7 @@ class InvoiceFormFrame(QWidget):
         self._show_stored_due(None, None)
         self.po_entry.clear()
         self.template_combo.setCurrentIndex(0)
+        self.watermark_combo.setCurrentIndex(0)
         self.reverse_toggle.setChecked(False)
         self.customer_notes_text.clear()
         self.terms_text.clear()
@@ -11929,6 +12750,9 @@ class InvoiceFormFrame(QWidget):
         self.po_entry.setText(d.get("po_number") or "")
         self.template_combo.setCurrentIndex(
             max(0, self.template_combo.findData(d.get("pdf_template") or ""))
+        )
+        self.watermark_combo.setCurrentIndex(
+            max(0, self.watermark_combo.findData(d.get("pdf_watermark") or ""))
         )
         self.reverse_toggle.setChecked(bool(d.get("reverse_charge")))
         self._show_stored_due(d.get("invoice_date"), d.get("due_date"))
@@ -12090,6 +12914,7 @@ class InvoiceFormFrame(QWidget):
             "place_of_supply": self.place_combo.currentText().strip(),
             "po_number": self.po_entry.text().strip(),
             "pdf_template": self.template_combo.currentData() or "",
+            "pdf_watermark": self.watermark_combo.currentData() or "",
             "due_date": due_date,
             "reverse_charge": int(self.reverse_toggle.isChecked()),
             "customer_notes": self.customer_notes_text.toPlainText().strip(),
