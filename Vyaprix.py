@@ -11,7 +11,7 @@
 #           python-barcode is optional (invoices simply print without a barcode)
 #           NotoSans-Regular.ttf / NotoSans-Bold.ttf in a "fonts" folder and the
 #           logo images in an "assets" folder, next to this file (as before)
-#  Run:     python Vyaprix.py
+#  Run:     python Vyaprix_PySide6.py
 # =============================================================================
 
 # --- Standard Library: Eager Imports ---
@@ -28,13 +28,14 @@ from enum import Enum
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Type
-from xml.sax.saxutils import escape as xml_escape
 
 # --- Standard Library: Lazy Imports ---
 lazy import csv
 lazy import datetime
+lazy import gc
 lazy import io
 lazy import json
+lazy import math
 lazy import os
 lazy import queue
 lazy import shutil
@@ -48,86 +49,23 @@ lazy import webbrowser
 
 # --- GUI Dependencies (PySide6 / Qt) ---
 from PySide6.QtCore import (
-    Qt,
-    QCoreApplication,
-    QDate,
-    QEvent,
-    QItemSelectionModel,
-    QLocale,
+    Qt, QAbstractAnimation, QCoreApplication, QDate, QEasingCurve, QEvent, QEventLoop, QItemSelectionModel, QLocale,
     QObject,
-    QPoint,
-    QPointF,
-    QRect,
-    QRectF,
-    QRegularExpression,
-    QSize,
-    QStandardPaths,
-    QStringListModel,
-    QTimer,
-    QUrl,
-    Signal,
+    QPoint, QPointF, QPropertyAnimation, QRect, QRectF, QRegularExpression, QSize, QStandardPaths, QStringListModel,
+    QTimer, QUrl, QVariantAnimation, Signal,
 )
 from PySide6.QtGui import (
-    QBrush,
-    QColor,
-    QDesktopServices,
-    QFont,
-    QFontDatabase,
-    QFontMetrics,
-    QGuiApplication,
-    QIcon,
-    QImage,
-    QImageReader,
-    QKeySequence,
-    QPainter,
-    QPainterPath,
-    QPalette,
-    QPen,
-    QPixmap,
-    QRegularExpressionValidator,
-    QShortcut,
-    QValidator,
+    QBrush, QColor, QDesktopServices, QFont, QFontDatabase, QFontMetrics, QGuiApplication, QIcon,
+    QImage, QImageReader, QKeySequence, QLinearGradient, QPainter, QPainterPath, QPalette, QPen, QPixmap, QPixmapCache,
+    QRadialGradient, QRegularExpressionValidator, QShortcut, QValidator,
 )
 from PySide6.QtWidgets import (
-    QAbstractItemView,
-    QAbstractScrollArea,
-    QAbstractSpinBox,
-    QApplication,
-    QButtonGroup,
-    QCheckBox,
-    QColorDialog,
-    QComboBox,
-    QCompleter,
-    QDateEdit,
-    QDialog,
-    QFileDialog,
-    QFormLayout,
-    QFrame,
-    QGridLayout,
-    QHBoxLayout,
-    QHeaderView,
-    QLabel,
-    QLayout,
-    QLineEdit,
-    QListWidget,
-    QListWidgetItem,
-    QMainWindow,
-    QMenu,
-    QMessageBox,
-    QPlainTextEdit,
-    QProgressBar,
-    QPushButton,
-    QRadioButton,
-    QScrollArea,
-    QSizePolicy,
-    QStackedWidget,
-    QTabWidget,
-    QTableWidget,
-    QTableWidgetItem,
-    QTableWidgetSelectionRange,
-    QToolButton,
-    QVBoxLayout,
-    QWidget,
+    QAbstractItemView, QAbstractScrollArea, QAbstractSpinBox, QApplication, QButtonGroup, QCheckBox,
+    QColorDialog, QComboBox, QCompleter, QDateEdit, QDialog, QFileDialog, QFormLayout, QFrame, QGraphicsOpacityEffect,
+    QGridLayout, QHBoxLayout, QHeaderView, QLabel, QLayout, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMenu,
+    QMessageBox, QPlainTextEdit,
+    QProgressBar, QPushButton, QRadioButton, QScrollArea, QSizePolicy, QStackedWidget, QTabWidget,
+    QTableWidget, QTableWidgetItem, QTableWidgetSelectionRange, QToolButton, QVBoxLayout, QWidget,
 )
 
 # --- ReportLab: Lazy Imports ---
@@ -155,29 +93,26 @@ lazy from reportlab.platypus import (
     TableStyle,
 )
 
-# --- pypdf: needed for bulk printing (merging PDFs) ---
-# Qt's own QtPdf shows the PDFs; pypdf only merges them. A missing pypdf disables bulk printing only.
-try:
-    from pypdf import PdfWriter
+# --- Optional extras: found now, loaded the first time they are used ---
+# pypdf only joins invoices into one file (bulk printing) and python-barcode only draws the barcode on an invoice, so neither
+# is needed to open the program: their imports (a good fifth of a second between them) wait until one of those jobs runs.
+# A missing one switches off just its own feature.
+import importlib.util
 
-    PYPDF_AVAILABLE = True
-except ImportError:
+PYPDF_AVAILABLE: bool = importlib.util.find_spec("pypdf") is not None
+if PYPDF_AVAILABLE:
+    lazy from pypdf import PdfWriter
+else:
     PdfWriter = None
-    PYPDF_AVAILABLE = False
-    print(
-        "WARNING: pypdf not installed. Bulk-print PDF merging will be skipped (pip install pypdf)."
-    )
+    print("WARNING: pypdf not installed. Bulk-print PDF merging will be skipped (pip install pypdf).")
 
-# --- Python-Barcode: Optional Dependency ---
-try:
-    import barcode
-    from barcode.writer import ImageWriter
-
-    BARCODE_AVAILABLE = True
-except ImportError:
+BARCODE_AVAILABLE: bool = importlib.util.find_spec("barcode") is not None
+if BARCODE_AVAILABLE:
+    lazy import barcode
+    lazy from barcode.writer import ImageWriter
+else:
     barcode = None
     ImageWriter = None
-    BARCODE_AVAILABLE = False
     print("WARNING: python-barcode not installed. Barcodes will be skipped.")
 
 
@@ -187,7 +122,6 @@ except ImportError:
 @dataclass(frozen=True)
 class Release:
     """One release of Vyaprix: its version, the day it was handed over, a headline and every change made in it."""
-
     version: str
     date: str
     title: str
@@ -195,137 +129,146 @@ class Release:
 
 
 # The file this project started from: Vyaprix v1.5, build 1.5.2 (the Tkinter build of 22 October 2026).
-BASE_VERSION: str = "v1.5"
+BASE_VERSION: str       = "v1.5"
 BASE_BUILD_VERSION: str = "1.5.2"
 
 # Newest first. EVERY change made to the application adds a line below -- and a new Release whenever a new build is handed
 # over. APP_VERSION, the build number, the release date and the "What's new" window all follow from this list, so they
-# can never disagree: the build number is "<version>.<number of documented changes since the uploaded v1.5 / build 1.5.2>".
+# can never disagree: the build number is "<version>.<number of changes made since the uploaded v1.5 / build 1.5.2>".
 CHANGELOG: Tuple[Release, ...] = (
-    Release(
-        "v2.4",
-        "15 November 2026",
-        "A redesigned Settings screen, and a watermark you control",
-        (
-            "The status watermark (PAID, BALANCE DUE ...) is fixed: it is no longer half hidden and half shown. It is now "
-            "drawn last, on top of the page, with real transparency and sized to the page, so shaded rows, total boxes and "
-            "colour bands can no longer cover part of it, and the text under it stays readable.",
-            'The status watermark can be switched off for every invoice: "Show the status watermark" in Settings > '
-            "Invoice PDF.",
-            'It can also be shown or hidden for a single invoice: the new "Status Watermark" box on the invoice form '
-            "(Default, On or Off) is remembered with the invoice.",
-            "Payment and Invoice PDF are now two separate pages in Settings. Payment: currency, bank account, UPI ID and QR "
-            "code, payment terms and notes, and when the payment details are printed. Invoice PDF: template and brand "
-            "colour, status watermark, total in words, footer note and default terms.",
-            "Settings is redesigned: a side menu of six pages -- General, Your Details, Payment, Invoice PDF, Logo & "
-            "Signature and Data & Backup -- each made of cards that say what their settings do.",
-            "Settings fits every window size: the menu shrinks to icons in a narrow window and two-column cards flow into "
-            "one column.",
-            "Mistakes are explained next to the box (email, phone number, GSTIN, custom currency symbol). A page that has "
-            "one is marked in the menu, and Save takes you straight to it instead of showing a pop-up.",
-            "Settings tells you whether there is anything to save, Ctrl+S saves, and closing Settings with unsaved changes "
-            "asks first.",
-            '"Preview sample invoice" prints from what is on the screen, so a template, colour or watermark setting can be '
-            "tried before it is saved.",
-            "Logo, signature and UPI QR code: drop a picture onto its row, a file that is not a readable picture is "
-            "refused, and Cancel puts back the pictures you replaced.",
-            "The UPI QR code is now set up beside the UPI ID on the Payment page; Logo & Signature keeps the logo and the "
-            "signature.",
-            "The GSTIN is written in capitals for you when you leave the box.",
-            'Data & Backup shows where your data is kept, with "Copy path" and "Show in folder" buttons.',
-            "Databases and backups made by earlier versions upgrade themselves to remember each invoice's watermark choice; "
-            "older invoices follow the Settings switch.",
-            "The About screen, PDF metadata and What's New window use the same release metadata, so the version and build "
-            "information stay consistent.",
-            "The release date is shown with the current release notes, making the shipped handover easy to identify.",
-        ),
-    ),
-    Release(
-        "v2.3",
-        "12 November 2026",
-        "One GST line, professional A4 invoices, sharp and responsive on every screen",
-        (
-            "CGST and SGST (or IGST) appear once on the invoice form and on the PDF -- one combined line each, however many "
-            "GST rates the items use. Hover the line on the form to see the split by rate.",
-            'A "GST summary" on the PDF shows the taxable value and the tax at each rate whenever an invoice uses more than '
-            "one rate.",
-            "The invoice PDF is redesigned for A4: header, bill-to and invoice details, items, totals, payment box and "
-            "signature on even margins, in all four templates.",
-            "Long invoices run on to as many A4 pages as they need: the item headings repeat on every page, no line is "
-            'ever cut in two, and each page carries the invoice number and "Page x of y".',
-            "Auto-fit: an invoice that runs only a few lines onto an extra page is fitted onto fewer pages -- the gaps "
-            "tighten a little, the type stays the same size.",
-            "The item columns size themselves to what is in them -- quantity, unit, rate, HSN / SAC, GST % and amounts never "
-            "wrap or get cut, and long descriptions wrap inside their cell.",
-            "Very large amounts and very long names, addresses and notes still fit inside the page.",
-            "The template miniatures in Settings are redrawn to match the new layouts.",
-            "The application is DPI aware: a Windows scale of 125 % or 150 % is followed exactly, the logo, icons and template "
-            "miniatures stay sharp, and the invoice preview and Settings re-sharpen when you move them to another monitor.",
-            "The main window opens at a size that fits your screen, cannot be made too small to use, and fits itself again "
-            "when you move it to a smaller monitor.",
-            "The sidebar shrinks to icons in a narrow window and drops the logo in a short one, so every screen stays usable "
-            "as you resize.",
-            'The version, the build number and the "What\'s new" list all come from one change log: the build number counts '
-            "every change made since v1.5 (build 1.5.2).",
-        ),
-    ),
-    Release(
-        "v2.2",
-        "10 November 2026",
-        "Invoice templates",
-        (
-            "Four invoice templates -- Classic, Modern, Minimal and Corporate -- picked in Settings > Invoice PDF, with a "
-            'miniature of each and a "Preview sample invoice" button.',
-            "A brand colour for Modern, Minimal and Corporate: ten ready colours, or any colour of your own.",
-            'A template can be chosen for a single invoice ("PDF Template" on the invoice form) and is remembered with it.',
-        ),
-    ),
-    Release(
-        "v2.1",
-        "9 November 2026",
-        "Professional invoicing",
-        (
-            "Every invoice line has a quantity, a unit and a rate (250 Nos x Rs. 50); the line amount is worked out for you.",
-            "One catalog item can be sold in several units, each with its own rate, and Vyaprix remembers the rate per unit.",
-            "GST for the whole invoice or a different GST rate for every item, chosen per invoice.",
-            "HSN / SAC code on every item, saved with the catalog item.",
-            "Item discounts as an amount or a percentage, besides the overall discount.",
-            "The place of supply decides CGST + SGST or IGST (a customer's GSTIN fills it in).",
-            "Due date (on receipt, 7, 15, 30 ... days, or a date you pick), customer PO / reference number and a "
-            "reverse-charge flag.",
-            "Optional round off of the invoice total to the nearest rupee.",
-            "Notes for the customer and Terms & Conditions printed on the invoice, with default terms set in Settings.",
-            "The invoice total in words (Rupees ... Only), switched on in Settings.",
-            "The catalog shows and edits unit, HSN / SAC, GST % and the other units an item is sold in.",
-            "The PDF prints quantity, unit, rate, discount and GST columns whenever an invoice uses them; older invoices "
-            "print as before.",
-            "Databases and backups made by earlier versions upgrade themselves; saved invoices keep exactly their totals.",
-            "Faster entry: Enter in the last field of the last line adds a new line.",
-        ),
-    ),
-    Release(
-        "v2.0",
-        "6 November 2026",
-        "Rebuilt on PySide6",
-        (
-            "The whole interface is rebuilt on PySide6 (Qt 6); Tkinter, ttkbootstrap and PyMuPDF are no longer needed.",
-            "Runs on Python 3.15 and uses PEP 810 lazy imports, so the application starts faster.",
-            "Invoice preview uses Qt's own PDF viewer (zoom, page navigation, print, share).",
-            "Bulk PDF merging uses pypdf instead of PyMuPDF.",
-            "The eight colour themes, including the dark ones, are drawn from one palette each.",
-            "Every screen of the Tk build is kept: Dashboard, invoice form, Clients, Catalog, Settings, About, Keyboard "
-            "shortcuts and the splash screen.",
-            "Windows and dialogs are limited to the size of the screen they open on.",
-        ),
-    ),
+    Release("v2.4", "15 November 2026", "A friendlier Vyaprix: correct amounts, easier payments and plain wording", (
+        "Every invoice line now shows its amount after the discount: Amount = Quantity x Rate - Discount. The invoice form, "
+        "the preview and the PDF all show the same figures, and the subtotal, the discount, the total, the amount paid, "
+        "the balance due and the total in words always agree with the Amount column.",
+        "Recording a payment now has a Reference box that changes with the payment method: the 12-digit UPI transaction "
+        "ID (UTR), the cheque number, or the reference / authorization number for a bank transfer or a card. The Note "
+        "box is still there for anything else, such as \"Received from my brother\".",
+        "The payment reference is saved with the payment and printed in the payment list on the invoice.",
+        "A new \"Record Payment\" window on the Invoices page: add a payment to any invoice without opening it.",
+        "The Invoices page has an \"Overdue\" filter for unpaid invoices whose due date has passed, a \"Due On\" column "
+        "(shown in red when late) and a short line on each summary card that says what it adds up.",
+        "Settings now opens inside the main window as a page with a Back button, instead of in a window of its own. "
+        "Esc goes back, Ctrl+S saves, and the invoice you were writing is kept exactly as it was while you look at Settings.",
+        "Vyaprix lets go of what it no longer needs: closed pages, finished previews and old pictures are cleared from "
+        "memory, so it stays quick and light even after a long day of use.",
+        "A free (complimentary) invoice starts with the payment terms \"No payment required\"; switching it back to a normal "
+        "invoice brings your own terms back.",
+        "A new \"Print on the invoice\" box on the New Invoice page: print the notes and the terms, only the terms, "
+        "only the notes, or neither.",
+        "The invoice list, the invoice form and Settings fit the window, from a small laptop screen to a large monitor.",
+        "The menu on the left can be folded away: press \"Hide menu\" (or Ctrl+\\) and it slides in to a narrow strip "
+        "of pictures; press \"Show menu\" and it slides back out. Vyaprix remembers how you left it.",
+        "A new welcome screen: a rounded card with a soft shadow, an invoice that writes itself while Vyaprix gets ready "
+        "and a green READY stamp at the end. It fits any screen size, and a click skips the wait.",
+        "Vyaprix opens faster: the welcome screen follows what the app is really doing and gives way as soon as "
+        "everything is ready, instead of always waiting two and a half seconds.",
+        "Everything on screen is written in plain words. \"Dashboard\" is now \"Invoices\", \"Catalog\" is \"Items\", "
+        "\"Import Database\" is \"Restore from a backup\", and no message uses technical terms.",
+        "A new Help window (F1, or Help in the menu): short answers to the questions people ask most, each with a "
+        "button that takes you straight to the right place, such as starting an invoice or saving a backup.",
+        "Pages fade in gently, and good news such as \"Invoice saved\" appears as a small message that slides up and "
+        "goes away by itself, so nobody has to click OK.",
+        "Two new switches in Settings > General: smooth movement and the welcome screen. Vyaprix also follows the "
+        "Windows setting for reduced animation.",
+        "Tips and clearer wording in Settings, on the invoice form, in the keyboard shortcuts list and in every message.",
+        "The version, the build number and the release date are the same everywhere they appear: About, What's New and "
+        "the details stored inside every PDF invoice.",
+        "What's New shows the date of every release next to its notes, and marks the release you are running.",
+        "The status watermark (PAID, BALANCE DUE ...) is fixed: it is no longer half hidden and half shown. It is now "
+        "drawn last, on top of the page, with real transparency and sized to the page, so shaded rows, total boxes and "
+        "colour bands can no longer cover part of it, and the text under it stays readable.",
+        "The status watermark can be switched off for every invoice: \"Show the status watermark\" in Settings > "
+        "Invoice Design.",
+        "It can also be shown or hidden for a single invoice: the new \"Status Watermark\" box on the invoice form "
+        "(Default, On or Off) is remembered with the invoice.",
+        "Payment and Invoice Design are now two separate pages in Settings. Payment: currency, bank account, UPI ID and "
+        "QR code, payment terms and notes, and when the payment details are printed. Invoice Design: template and "
+        "brand colour, status watermark, total in words, footer note and default terms.",
+        "Settings is redesigned: a side menu of six pages -- General, Your Details, Payment, Invoice Design, Logo & "
+        "Signature and Backup & Restore -- each made of cards that say what their settings do.",
+        "Settings fits every window size: the menu shrinks to pictures in a narrow window and two-column cards flow "
+        "into one column.",
+        "Mistakes are explained next to the box (email, phone number, GSTIN, custom currency symbol). A page that has "
+        "one is marked in the menu, and Save takes you straight to it instead of showing a pop-up.",
+        "Settings tells you whether there is anything to save, Ctrl+S saves, and leaving Settings with unsaved changes "
+        "asks first.",
+        "\"Preview sample invoice\" prints from what is on the screen, so a template, colour or watermark setting can be "
+        "tried before it is saved.",
+        "Logo, signature and UPI QR code: drop a picture onto its row, a file that is not a readable picture is "
+        "refused, and going Back without saving puts back the pictures you replaced.",
+        "The UPI QR code is now set up beside the UPI ID on the Payment page; Logo & Signature keeps the logo and the "
+        "signature.",
+        "The GSTIN is written in capitals for you when you leave the box.",
+        "Backup & Restore shows where your data is kept, with \"Copy path\" and \"Show in folder\" buttons.",
+        "Data and backups made by earlier versions are upgraded automatically to remember each invoice's watermark "
+        "choice; older invoices follow the Settings switch.",
+    )),
+    Release("v2.3", "12 November 2026", "One GST line, professional A4 invoices, sharp and responsive on every screen", (
+        "CGST and SGST (or IGST) appear once on the invoice form and on the PDF -- one combined line each, however many "
+        "GST rates the items use. Hover the line on the form to see the split by rate.",
+        "A \"GST summary\" on the PDF shows the taxable value and the tax at each rate whenever an invoice uses more than "
+        "one rate.",
+        "The invoice PDF is redesigned for A4: header, bill-to and invoice details, items, totals, payment box and "
+        "signature on even margins, in all four templates.",
+        "Long invoices run on to as many A4 pages as they need: the item headings repeat on every page, no line is "
+        "ever cut in two, and each page carries the invoice number and \"Page x of y\".",
+        "Auto-fit: an invoice that runs only a few lines onto an extra page is fitted onto fewer pages -- the gaps "
+        "tighten a little, the type stays the same size.",
+        "The item columns size themselves to what is in them -- quantity, unit, rate, HSN / SAC, GST % and amounts never "
+        "wrap or get cut, and long descriptions wrap inside their cell.",
+        "Very large amounts and very long names, addresses and notes still fit inside the page.",
+        "The small previews of each invoice template in Settings are redrawn to match the new layouts.",
+        "Vyaprix follows your Windows display scale: 125 % or 150 % is followed exactly, the logo, icons and template "
+        "previews stay sharp, and the invoice preview and Settings sharpen again when you move them to another monitor.",
+        "The main window opens at a size that fits your screen, cannot be made too small to use, and fits itself again "
+        "when you move it to a smaller monitor.",
+        "The menu on the left shrinks to pictures in a narrow window and drops the logo in a short one, so every "
+        "screen stays usable as you resize.",
+        "The version, the build number and the \"What's New\" list all come from one list of changes: the build number "
+        "counts every change made since v1.5 (build 1.5.2).",
+    )),
+    Release("v2.2", "10 November 2026", "Invoice templates", (
+        "Four invoice templates -- Classic, Modern, Minimal and Corporate -- picked in Settings > Invoice Design, with a "
+        "small preview of each and a \"Preview sample invoice\" button.",
+        "A brand colour for Modern, Minimal and Corporate: ten ready colours, or any colour of your own.",
+        "A template can be chosen for a single invoice (\"Invoice Look\" on the invoice form) and is remembered with it.",
+    )),
+    Release("v2.1", "9 November 2026", "Professional invoicing", (
+        "Every invoice line has a quantity, a unit and a rate (250 Nos x Rs. 50); the line amount is worked out for you.",
+        "One saved item can be sold in several units, each with its own rate, and Vyaprix remembers the rate per unit.",
+        "GST for the whole invoice or a different GST rate for every item, chosen per invoice.",
+        "HSN / SAC code on every item, saved with the item.",
+        "Item discounts as an amount or a percentage, besides the overall discount.",
+        "The place of supply decides CGST + SGST or IGST (a customer's GSTIN fills it in).",
+        "Due date (on receipt, 7, 15, 30 ... days, or a date you pick), customer PO / reference number and a "
+        "reverse-charge flag.",
+        "Optional round off of the invoice total to the nearest rupee.",
+        "Notes for the customer and Terms & Conditions printed on the invoice, with default terms set in Settings.",
+        "The invoice total in words (Rupees ... Only), switched on in Settings.",
+        "The Items page shows and edits unit, HSN / SAC, GST % and the other units an item is sold in.",
+        "The PDF prints quantity, unit, rate, discount and GST columns whenever an invoice uses them; older invoices "
+        "print as before.",
+        "Data and backups made by earlier versions are upgraded automatically; saved invoices keep exactly their totals.",
+        "Faster entry: Enter in the last field of the last line adds a new line.",
+    )),
+    Release("v2.0", "6 November 2026", "Rebuilt for a sharper, faster app", (
+        "The whole app is rebuilt from the ground up, so it looks sharper and responds faster.",
+        "Vyaprix starts faster, because each part is only loaded when it is first needed.",
+        "The invoice preview is built in: zoom, page navigation, print and share.",
+        "Several invoices can be joined into one file for printing in a single step.",
+        "Eight colour themes, including dark ones.",
+        "Every screen of the earlier version is kept: the invoice list, the invoice form, Clients, Items, Settings, "
+        "About, Keyboard Shortcuts and the welcome screen.",
+        "Windows and dialogs never open larger than the screen they are on.",
+    )),
 )
 CHANGE_COUNT: int = sum(len(release.changes) for release in CHANGELOG)
 
-APP_NAME: str = "Vyaprix"
-APP_VERSION: str = CHANGELOG[0].version
+APP_NAME: str          = "Vyaprix"
+APP_VERSION: str       = CHANGELOG[0].version
 APP_BUILD_VERSION: str = f"{APP_VERSION.lstrip('v')}.{CHANGE_COUNT}"
-APP_RELEASE_DATE: str = CHANGELOG[0].date
-APP_TAGLINE: str = "Business Made Smarter."
+APP_RELEASE_DATE: str  = CHANGELOG[0].date
+APP_TAGLINE: str       = "Business Made Smarter."
 
 APP_ATTRIBUTION: str = (
     "Designed & Developed by Sarwan Yadav\n"
@@ -346,9 +289,9 @@ def _resource_root() -> Path:
 
 
 # Read-Only paths (inside the compiled EXE)
-RESOURCE_DIR: Path = _resource_root()
+RESOURCE_DIR: Path        = _resource_root()
 RESOURCE_ASSETS_DIR: Path = RESOURCE_DIR / "assets"
-FONTS_DIR: Path = RESOURCE_DIR / "fonts"
+FONTS_DIR: Path           = RESOURCE_DIR / "fonts"
 
 
 def _program_data_root() -> Path:
@@ -364,44 +307,40 @@ def _program_data_root() -> Path:
 
 # Mutable application state mapped to Windows ProgramData
 PROGRAM_DATA_DIR: Path = _program_data_root()
-DATA_DIR: Path = PROGRAM_DATA_DIR / "EllowDigital" / "Vyaprix"
+DATA_DIR: Path         = PROGRAM_DATA_DIR / "EllowDigital" / "Vyaprix"
 
 # Writable subdirectories
-ASSETS_DIR: Path = DATA_DIR / "assets"
-DATA_FONTS_DIR: Path = DATA_DIR / "fonts"
-INVOICES_DIR: Path = DATA_DIR / "invoices"
-BATCH_DIR: Path = INVOICES_DIR / "_batches"
-PRINT_BATCH_SIZE: int = (
-    100  # bulk print merges PDFs in groups of this size -- see DashboardFrame._bulk_print_work
-)
-LOGS_DIR: Path = DATA_DIR / "logs"
+ASSETS_DIR: Path       = DATA_DIR / "assets"
+DATA_FONTS_DIR: Path   = DATA_DIR / "fonts"
+INVOICES_DIR: Path     = DATA_DIR / "invoices"
+BATCH_DIR: Path        = INVOICES_DIR / "_batches"
+PRINT_BATCH_SIZE: int  = 100  # bulk print merges PDFs in groups of this size -- see DashboardFrame._bulk_print_work
+LOGS_DIR: Path         = DATA_DIR / "logs"
 
 # Core Application Files
-DB_NAME: Path = DATA_DIR / "Vyaprix.db"
-CONFIG_FILE: Path = DATA_DIR / "config.json"
-LOG_FILE: Path = LOGS_DIR / "Vyaprix.log"
+DB_NAME: Path          = DATA_DIR / "Vyaprix.db"
+CONFIG_FILE: Path      = DATA_DIR / "config.json"
+LOG_FILE: Path         = LOGS_DIR / "Vyaprix.log"
 
 # UI Specific Assets (Read directly from EXE for speed)
-APP_LOGO_PNG: Path = RESOURCE_ASSETS_DIR / "app_logo.png"
-APP_LOGO_ICO: Path = RESOURCE_ASSETS_DIR / "app_logo.ico"
+APP_LOGO_PNG: Path     = RESOURCE_ASSETS_DIR / "app_logo.png"
+APP_LOGO_ICO: Path     = RESOURCE_ASSETS_DIR / "app_logo.ico"
 
 
 # =============================================================================
 #  3. ENVIRONMENT INITIALIZATION
 # =============================================================================
-def _copy_bundled_files(
-    src_dir: Path, dest_dir: Path, allowed_files: Tuple[str, ...] = None
-) -> None:
+def _copy_bundled_files(src_dir: Path, dest_dir: Path, allowed_files: Tuple[str, ...] = None) -> None:
     """Helper method to securely copy bundled files to the writable directory."""
     if not src_dir.exists():
         return
-
+        
     for item in src_dir.iterdir():
         if item.is_file():
             # Strict whitelist to prevent local dev clutter (DBs, JSONs) from extracting
             if allowed_files and item.name not in allowed_files:
                 continue
-
+                
             dest = dest_dir / item.name
             if not dest.exists():
                 try:
@@ -413,27 +352,17 @@ def _copy_bundled_files(
 def _initialize_environment() -> None:
     """Create mutable directories and copy default assets/fonts on first launch."""
     directories_to_create = (
-        DATA_DIR,
-        ASSETS_DIR,
-        DATA_FONTS_DIR,
-        INVOICES_DIR,
-        BATCH_DIR,
-        LOGS_DIR,
+        DATA_DIR, ASSETS_DIR, DATA_FONTS_DIR, 
+        INVOICES_DIR, BATCH_DIR, LOGS_DIR
     )
     for directory in directories_to_create:
         directory.mkdir(parents=True, exist_ok=True)
 
     # Extract defaults from EXE to Writable paths using strict whitelists
     # FIXED: Added "logo.png" so the default invoice logo extracts successfully
-    expected_assets = (
-        "app_logo.png",
-        "app_logo.ico",
-        "logo.png",
-        "sign.png",
-        "upi_qr.png",
-    )
+    expected_assets = ("app_logo.png", "app_logo.ico", "logo.png", "sign.png", "upi_qr.png")
     _copy_bundled_files(RESOURCE_ASSETS_DIR, ASSETS_DIR, allowed_files=expected_assets)
-
+    
     expected_fonts = ("NotoSans-Regular.ttf", "NotoSans-Bold.ttf")
     _copy_bundled_files(FONTS_DIR, DATA_FONTS_DIR, allowed_files=expected_fonts)
 
@@ -447,16 +376,11 @@ _initialize_environment()
 # =============================================================================
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s",
+    format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
         # forever on a machine that runs Vyaprix for years.
-        RotatingFileHandler(
-            LOG_FILE,
-            mode="a",
-            maxBytes=5 * 1024 * 1024,
-            backupCount=5,
-            encoding="utf-8",
-        ),
+        RotatingFileHandler(LOG_FILE, mode='a', maxBytes=5 * 1024 * 1024,
+                            backupCount=5, encoding='utf-8'),
         logging.StreamHandler(),
     ],
 )
@@ -468,15 +392,25 @@ logger = logging.getLogger(__name__)
 # =============================================================================
 #  5. PDF FONTS
 # =============================================================================
-def register_fonts() -> str:
+def _pdf_font_files() -> Optional[Tuple[Path, Path]]:
+    """The two NotoSans files (regular, bold) invoices are printed in: the data folder first, then next to the program."""
     for font_dir in (DATA_FONTS_DIR, FONTS_DIR):
-        reg = font_dir / "NotoSans-Regular.ttf"
+        reg, bold = font_dir / "NotoSans-Regular.ttf", font_dir / "NotoSans-Bold.ttf"
+        if reg.exists() and bold.exists():
+            return reg, bold
+    return None
+
+
+def register_fonts() -> str:
+    """Hands the NotoSans files to the PDF engine; "Helvetica" (which has no rupee sign) when that is not possible."""
+    for font_dir in (DATA_FONTS_DIR, FONTS_DIR):
+        reg  = font_dir / "NotoSans-Regular.ttf"
         bold = font_dir / "NotoSans-Bold.ttf"
         if not (reg.exists() and bold.exists()):
             continue
         try:
             # Remember to keep the str() fix!
-            pdfmetrics.registerFont(TTFont("NotoSans", str(reg)))
+            pdfmetrics.registerFont(TTFont("NotoSans",      str(reg)))
             pdfmetrics.registerFont(TTFont("NotoSans-Bold", str(bold)))
             addMapping("NotoSans", 0, 0, "NotoSans")
             addMapping("NotoSans", 1, 0, "NotoSans-Bold")
@@ -486,25 +420,68 @@ def register_fonts() -> str:
     logger.error(
         "NotoSans font files were not found in %s or %s -- falling back to "
         "Helvetica. PDFs will NOT render the currency symbol or non-Latin "
-        "characters correctly until this is fixed.",
-        DATA_FONTS_DIR,
-        FONTS_DIR,
+        "characters correctly until this is fixed.", DATA_FONTS_DIR, FONTS_DIR,
     )
     return "Helvetica"
 
 
-PDF_FONT = register_fonts()
+# Start-up only checks that the font files are there (a file-exists check); the PDF engine is not even loaded. Reading the two
+# fonts into it is left to ensure_pdf_fonts(), which runs when the first invoice is printed or previewed.
+PDF_FONT: str = "NotoSans" if _pdf_font_files() else "Helvetica"
+_PDF_FONTS_READY: bool = False
+if PDF_FONT == "Helvetica":
+    logger.error(
+        "NotoSans font files were not found in %s or %s -- falling back to "
+        "Helvetica. PDFs will NOT render the currency symbol or non-Latin "
+        "characters correctly until this is fixed.", DATA_FONTS_DIR, FONTS_DIR,
+    )
+
+
+def ensure_pdf_fonts() -> str:
+    """Loads the invoice fonts into the PDF engine the first time they are needed; returns the font name to print with."""
+    global PDF_FONT, _PDF_FONTS_READY
+    if not _PDF_FONTS_READY and PDF_FONT != "Helvetica":
+        _PDF_FONTS_READY = True
+        PDF_FONT = register_fonts()
+    return PDF_FONT
 
 
 # =============================================================================
 #  6. UI CONSTANTS & FORMATTING
 # =============================================================================
-FONT_FAMILY: str = (
-    "Segoe UI"  # Qt silently falls back to the platform default if this font is absent
-)
-DB_DATE_FORMAT: str = "%Y-%m-%d"
+FONT_FAMILY: str         = "Segoe UI"      # Qt silently falls back to the platform default if this font is absent
+DB_DATE_FORMAT: str      = "%Y-%m-%d"
 DISPLAY_DATE_FORMAT: str = "%d %b %Y"
-PAYMENT_MODES: List[str] = ["Cash", "UPI", "Bank Transfer", "Card", "Cheque", "Other"]
+PAYMENT_MODES: List[str] = ['Cash', 'UPI', 'Bank Transfer', 'Card', 'Cheque', 'Other']
+
+#: What the "Reference" box of a payment asks for, by payment method: (caption, hint shown in the empty box,
+#: digits only, longest entry). Cash needs no reference at all.
+PAYMENT_REFERENCE_FIELDS: Dict[str, Tuple[str, str, bool, int]] = {
+    "UPI":           ("UPI transaction ID / UTR", "12-digit UTR number", True, 12),
+    "Cheque":        ("Cheque number", "Cheque number", False, 20),
+    "Bank Transfer": ("Reference / authorization no.", "Reference number", False, 40),
+    "Card":          ("Reference / authorization no.", "Authorization number", False, 40),
+    "Other":         ("Reference (optional)", "Any reference", False, 40),
+}
+UPI_REFERENCE_LENGTH: int = 12
+
+#: What an invoice prints under its totals: the customer note, the terms and conditions, both, or neither.
+PRINT_EXTRAS_CHOICES: List[Tuple[str, str]] = [
+    ("both", "Notes and Terms & Conditions"), ("terms", "Terms & Conditions only"),
+    ("notes", "Notes only"), ("none", "Nothing"),
+]
+PRINT_EXTRAS_KEYS: Tuple[str, ...] = tuple(key for key, _label in PRINT_EXTRAS_CHOICES)
+#: The payment terms a free (complimentary) invoice starts with.
+NO_PAYMENT_TERMS: str = "No payment required"
+
+
+def payment_reference_problem(mode: str, reference: str) -> str:
+    """"" when a payment's reference is fine, else a plain sentence saying what is wrong with it. Only a UPI reference
+    is checked (a UTR has exactly 12 digits); every other reference is free text."""
+    reference = (reference or "").strip()
+    if mode == "UPI" and reference and not (reference.isdigit() and len(reference) == UPI_REFERENCE_LENGTH):
+        return f"A UPI reference (UTR) has exactly {UPI_REFERENCE_LENGTH} digits. Please check the number or leave it empty."
+    return ""
 
 # Regex to safely sanitize invoice numbers before converting them to PDF filenames.
 # Prevents path traversal and Windows filesystem crashes. Unchanged.
@@ -515,39 +492,29 @@ INVALID_FILENAME_CHARS: re.Pattern = re.compile(r'[\\/:*?"<>|]')
 # STATUS_BOOTSTYLE), so that it follows the active theme. The PDF watermark keeps its own palette in
 # PDFGenerator._apply_watermark (the same hues: a printed page never follows the UI theme).
 STATUS_BADGE: Dict[str, Dict[str, str]] = {
-    "PAID": {"foreground": "#10B981", "background": ""},  # Soft Green
-    "DUE": {"foreground": "#EF4444", "background": ""},  # Soft Red
-    "PARTIAL": {"foreground": "#F59E0B", "background": ""},  # Orange/Amber
-    "OVERPAID": {
-        "foreground": "#8B5CF6",
-        "background": "",
-    },  # Violet -- distinct from "Paid" green so an overpayment stands out
+    "PAID":          {"foreground": "#10B981", "background": ""},  # Soft Green
+    "DUE":           {"foreground": "#EF4444", "background": ""},  # Soft Red
+    "PARTIAL":       {"foreground": "#F59E0B", "background": ""},  # Orange/Amber
+    "OVERPAID":      {"foreground": "#8B5CF6", "background": ""},  # Violet -- distinct from "Paid" green so an overpayment stands out
     "COMPLIMENTARY": {"foreground": "#3B82F6", "background": ""},  # Blue
 }
 
 STATUS_DISPLAY_LABELS: Dict[str, str] = {
-    "Due": "UNPAID",
-    "Partial": "PARTIALLY PAID",
-    "Paid": "PAID",
-    "Overpaid": "OVERPAID",
-    "Complimentary": "COMPLIMENTARY",
+    "Due": "UNPAID", "Partial": "PARTIALLY PAID", "Paid": "PAID",
+    "Overpaid": "OVERPAID", "Complimentary": "COMPLIMENTARY",
 }
 
 #: ttkbootstrap "bootstyle" of the status badge  ->  theme tone (the Tk build's STATUS_BOOTSTYLE)
 STATUS_TONES: Dict[str, str] = {
-    "Paid": "success",
-    "Due": "danger",
-    "Partial": "warning",
-    "Overpaid": "info",
-    "Complimentary": "info",
+    "Paid": "success", "Due": "danger", "Partial": "warning", "Overpaid": "info", "Complimentary": "info",
 }
 
 
 class InvoiceStatus(Enum):
-    PAID = "Paid"
-    DUE = "Due"
-    PARTIAL = "Partial"
-    OVERPAID = "Overpaid"
+    PAID          = "Paid"
+    DUE           = "Due"
+    PARTIAL       = "Partial"
+    OVERPAID      = "Overpaid"
     COMPLIMENTARY = "Complimentary"
 
 
@@ -571,50 +538,37 @@ def get_default_config() -> Dict[str, Any]:
     return {
         "theme": "litera",
         "user_details": {
-            "name": "",
-            "phone": "",
-            "email": "",
-            "website": "",
-            "address": "",
-            "city": "",
-            "state": "",
-            "pin_code": "",
+            "name": "", "phone": "", "email": "",
+            "website": "", "address": "", "city": "",
+            "state": "", "pin_code": "",
             "contact_info": "",
         },
         "company_details": {"name": APP_NAME, "description": APP_TAGLINE, "gstin": ""},
         "payment_details": {
-            "upi_id": "",
-            "payment_terms": "Due upon receipt",
-            "bank_name": "",
-            "account_holder_name": "",
-            "account_number": "",
-            "ifsc_code": "",
-            "payment_notes": "",
+            "upi_id": "", "payment_terms": "Due upon receipt",
+            "bank_name": "", "account_holder_name": "", "account_number": "",
+            "ifsc_code": "", "payment_notes": "",
         },
         # TARGET user invoice logo specifically to 'logo.png'
-        "asset_paths": {
-            "logo": "assets/logo.png",
-            "signature": "assets/sign.png",
-            "upi_qr_code": "assets/upi_qr.png",
-        },
-        "pdf_settings": {
-            "footer_message": "Generated with Vyaprix • Business Made Smarter.",
-            "always_show_qr_code": False,
-            "amount_in_words": False,  # print "Rupees ... Only" under the invoice total
-            "default_terms": "",  # terms & conditions every new invoice starts with
-            "template": "classic",  # the invoice look (see PDF_TEMPLATES)
-            "accent_color": "",  # brand colour for the templates that take one ("" = the template's own)
-            "status_watermark": True,
-        },  # the faint PAID / BALANCE DUE ... stamp across the page
+        "asset_paths":     {"logo": "assets/logo.png", "signature": "assets/sign.png", "upi_qr_code": "assets/upi_qr.png"},
+        "pdf_settings":    {"footer_message": "Generated with Vyaprix • Business Made Smarter.", "always_show_qr_code": False,
+                            "amount_in_words": False,           # print "Rupees ... Only" under the invoice total
+                            "default_terms": "",                # terms & conditions every new invoice starts with
+                            "template": "classic",              # the invoice look (see PDF_TEMPLATES)
+                            "accent_color": "",                 # brand colour for the templates that take one ("" = the template's own)
+                            "status_watermark": True},          # the faint PAID / BALANCE DUE ... stamp across the page
         "currency_symbol": "₹",
+        "animations": True,                 # smooth movement: the sliding menu, fading pages, pop-up messages
+        "show_splash": True,                # the opening animation (off = the window simply appears)
+        "sidebar_collapsed": False,         # the menu was last left as the narrow strip
     }
 
 
 def _migrate_legacy_business_identity(config: Dict[str, Any]) -> bool:
     """Upgrades an older config in place; True if anything changed (so the caller saves it)."""
-    ud = config.get("user_details", {})
+    ud   = config.get("user_details", {})
     comp = config.setdefault("company_details", {})
-    pay = config.setdefault("payment_details", {})
+    pay  = config.setdefault("payment_details", {})
     changed = False
 
     # The sample GSTIN / UPI ID older builds pre-filled were never the user's own details.
@@ -656,9 +610,7 @@ def load_config() -> Dict[str, Any]:
             if _migrate_legacy_business_identity(data):
                 try:
                     _save_config_raw(data)
-                except (
-                    OSError
-                ) as exc:  # the upgrade is re-applied on the next start; never discard the loaded settings
+                except OSError as exc:      # the upgrade is re-applied on the next start; never discard the loaded settings
                     logger.warning("Could not save the upgraded settings: %s", exc)
             return data
     except Exception:
@@ -677,12 +629,10 @@ def _save_config_raw(data: Dict[str, Any]):
         os.replace(tmp, CONFIG_FILE)
         return
     except OSError:
-        pass  # e.g. the file is briefly locked by a virus scan: plain write below
+        pass                                # e.g. the file is briefly locked by a virus scan: plain write below
     finally:
         try:
-            tmp.unlink(
-                missing_ok=True
-            )  # nothing left to remove after a successful replace
+            tmp.unlink(missing_ok=True)     # nothing left to remove after a successful replace
         except OSError:
             pass
     with open(CONFIG_FILE, "w", encoding="utf-8") as fh:
@@ -692,11 +642,11 @@ def _save_config_raw(data: Dict[str, Any]):
 def save_config(data: Dict[str, Any]):
     _save_config_raw(data)
     global CONFIG, CURRENCY_SYMBOL
-    CONFIG = data
+    CONFIG          = data
     CURRENCY_SYMBOL = data.get("currency_symbol", "₹")
 
 
-CONFIG = load_config()
+CONFIG          = load_config()
 CURRENCY_SYMBOL = CONFIG.get("currency_symbol", "₹")
 
 
@@ -708,16 +658,16 @@ def parse_date(date_str: Optional[str], in_fmt: str, out_fmt: str) -> str:
         return "N/A"
     try:
         return datetime.datetime.strptime(date_str, in_fmt).strftime(out_fmt)
-    except ValueError, TypeError:
+    except (ValueError, TypeError):
         return date_str
 
 
 def fmt_money(value: Any) -> str:
     try:
         amount = float(value or 0)
-    except TypeError, ValueError:
+    except (TypeError, ValueError):
         amount = 0.0
-    if abs(amount) < 0.005:  # would round to 0.00 either way -- never display "-0.00"
+    if abs(amount) < 0.005:            # would round to 0.00 either way -- never display "-0.00"
         amount = 0.0
     return f"{CURRENCY_SYMBOL}{amount:,.2f}"
 
@@ -739,111 +689,57 @@ def _round2(value: Any) -> Decimal:
     return Decimal(str(value or 0)).quantize(_CENTS, rounding=ROUND_HALF_UP)
 
 
+def today_db() -> str:
+    """Today's date the way the database stores dates ('YYYY-MM-DD', which also sorts and compares correctly as text)."""
+    return datetime.date.today().strftime(DB_DATE_FORMAT)
+
+
 def safe_float(value: Any, fallback: float = 0.0) -> float:
     try:
         return float(value or 0)
-    except TypeError, ValueError:
+    except (TypeError, ValueError):
         return fallback
 
 
 def _allocate_2dp(total: Decimal, weights: List[Decimal]) -> List[Decimal]:
     """Splits `total` (a 2dp amount) over lines in proportion to `weights`. Every share is a 2dp amount, the shares
     add up to exactly `total` (the paise lost to rounding go to the lines with the largest remainders) and no
-    share is larger than its weight -- so an overall discount spread over the items never leaves a stray paisa.
-    """
+    share is larger than its weight -- so an overall discount spread over the items never leaves a stray paisa."""
     weight_sum = sum(weights, Decimal("0"))
     if total <= 0 or weight_sum <= 0:
         return [Decimal("0.00")] * len(weights)
-    exact = [total * w / weight_sum for w in weights]
+    exact  = [total * w / weight_sum for w in weights]
     shares = [e.quantize(_CENTS, rounding=ROUND_DOWN) for e in exact]
     missing = int(((total - sum(shares, Decimal("0"))) / _CENTS).to_integral_value())
-    for i in sorted(range(len(shares)), key=lambda k: (-(exact[k] - shares[k]), k))[
-        :missing
-    ]:
+    for i in sorted(range(len(shares)), key=lambda k: (-(exact[k] - shares[k]), k))[:missing]:
         shares[i] += _CENTS
     return shares
 
 
 # --- Item lines (quantity / unit / rate), GST rates, places of supply and amounts in words ---------------------
 UNIT_PRESETS: List[str] = [
-    "Nos",
-    "Pcs",
-    "Set",
-    "Unit",
-    "Day",
-    "Hour",
-    "Night",
-    "Month",
-    "Event",
-    "Person",
-    "Plate",
-    "Trip",
-    "Lot",
-    "Box",
-    "Pack",
-    "Dozen",
-    "Kg",
-    "Gm",
-    "Ltr",
-    "Mtr",
-    "Sq.ft",
-    "Sq.mtr",
+    "Nos", "Pcs", "Set", "Unit", "Day", "Hour", "Night", "Month", "Event", "Person", "Plate", "Trip", "Lot",
+    "Box", "Pack", "Dozen", "Kg", "Gm", "Ltr", "Mtr", "Sq.ft", "Sq.mtr",
 ]
 # GST slabs since the 22 Sep 2025 reform (0 / 5 / 18 / 40, plus the special 0.25 and 3 for gems and gold). Any other
 # rate -- an older invoice's 12 or 28, say -- can still be typed in.
 GST_RATE_PRESETS: List[str] = ["0", "0.25", "3", "5", "18", "40"]
 TAX_MODE_OVERALL, TAX_MODE_PER_ITEM = "overall", "per_item"
-_DUE_CUSTOM = -1  # the due-date list's "pick a date" choice
+_DUE_CUSTOM = -1        # the due-date list's "pick a date" choice
 #: the due-date list: (caption, days after the invoice date) -- None: no due date, _DUE_CUSTOM: a date picked by hand
-DUE_CHOICES: List[Tuple[str, Optional[int]]] = [
-    ("None", None),
-    ("On receipt", 0),
-    ("7 days", 7),
-    ("15 days", 15),
-    ("30 days", 30),
-    ("45 days", 45),
-    ("60 days", 60),
-    ("Custom", _DUE_CUSTOM),
-]
+DUE_CHOICES: List[Tuple[str, Optional[int]]] = [("None", None), ("On receipt", 0), ("7 days", 7), ("15 days", 15),
+                                                ("30 days", 30), ("45 days", 45), ("60 days", 60), ("Custom", _DUE_CUSTOM)]
 
 #: GST state / union-territory codes (the first two digits of a GSTIN) -- the "place of supply" list
 INDIAN_STATES: List[Tuple[str, str]] = [
-    ("01", "Jammu and Kashmir"),
-    ("02", "Himachal Pradesh"),
-    ("03", "Punjab"),
-    ("04", "Chandigarh"),
-    ("05", "Uttarakhand"),
-    ("06", "Haryana"),
-    ("07", "Delhi"),
-    ("08", "Rajasthan"),
-    ("09", "Uttar Pradesh"),
-    ("10", "Bihar"),
-    ("11", "Sikkim"),
-    ("12", "Arunachal Pradesh"),
-    ("13", "Nagaland"),
-    ("14", "Manipur"),
-    ("15", "Mizoram"),
-    ("16", "Tripura"),
-    ("17", "Meghalaya"),
-    ("18", "Assam"),
-    ("19", "West Bengal"),
-    ("20", "Jharkhand"),
-    ("21", "Odisha"),
-    ("22", "Chhattisgarh"),
-    ("23", "Madhya Pradesh"),
-    ("24", "Gujarat"),
-    ("26", "Dadra and Nagar Haveli and Daman and Diu"),
-    ("27", "Maharashtra"),
-    ("29", "Karnataka"),
-    ("30", "Goa"),
-    ("31", "Lakshadweep"),
-    ("32", "Kerala"),
-    ("33", "Tamil Nadu"),
-    ("34", "Puducherry"),
-    ("35", "Andaman and Nicobar Islands"),
-    ("36", "Telangana"),
-    ("37", "Andhra Pradesh"),
-    ("38", "Ladakh"),
+    ("01", "Jammu and Kashmir"), ("02", "Himachal Pradesh"), ("03", "Punjab"), ("04", "Chandigarh"),
+    ("05", "Uttarakhand"), ("06", "Haryana"), ("07", "Delhi"), ("08", "Rajasthan"), ("09", "Uttar Pradesh"),
+    ("10", "Bihar"), ("11", "Sikkim"), ("12", "Arunachal Pradesh"), ("13", "Nagaland"), ("14", "Manipur"),
+    ("15", "Mizoram"), ("16", "Tripura"), ("17", "Meghalaya"), ("18", "Assam"), ("19", "West Bengal"),
+    ("20", "Jharkhand"), ("21", "Odisha"), ("22", "Chhattisgarh"), ("23", "Madhya Pradesh"), ("24", "Gujarat"),
+    ("26", "Dadra and Nagar Haveli and Daman and Diu"), ("27", "Maharashtra"), ("29", "Karnataka"), ("30", "Goa"),
+    ("31", "Lakshadweep"), ("32", "Kerala"), ("33", "Tamil Nadu"), ("34", "Puducherry"),
+    ("35", "Andaman and Nicobar Islands"), ("36", "Telangana"), ("37", "Andhra Pradesh"), ("38", "Ladakh"),
     ("97", "Other Territory"),
 ]
 _STATE_NAME_BY_CODE: Dict[str, str] = dict(INDIAN_STATES)
@@ -851,27 +747,13 @@ _STATE_NAME_BY_CODE: Dict[str, str] = dict(INDIAN_STATES)
 
 def _state_key(text: Any) -> str:
     """A state name reduced to lower-case words ("Jammu & Kashmir" == "jammu and kashmir")."""
-    return " ".join(
-        re.sub(
-            r"[^a-z0-9 ]+", " ", str(text or "").lower().replace("&", " and ")
-        ).split()
-    )
+    return " ".join(re.sub(r"[^a-z0-9 ]+", " ", str(text or "").lower().replace("&", " and ")).split())
 
 
 _STATE_CODE_BY_NAME: Dict[str, str] = {_state_key(n): c for c, n in INDIAN_STATES}
-_STATE_CODE_BY_NAME.update(
-    {
-        "orissa": "21",
-        "pondicherry": "34",
-        "new delhi": "07",
-        "nct of delhi": "07",
-        "uttaranchal": "05",
-        "telengana": "36",
-        "daman and diu": "26",
-        "dadra and nagar haveli": "26",
-        "andaman nicobar islands": "35",
-    }
-)
+_STATE_CODE_BY_NAME.update({"orissa": "21", "pondicherry": "34", "new delhi": "07", "nct of delhi": "07",
+                            "uttaranchal": "05", "telengana": "36", "daman and diu": "26",
+                            "dadra and nagar haveli": "26", "andaman nicobar islands": "35"})
 
 
 def state_code_of(text: Any) -> str:
@@ -884,22 +766,20 @@ def state_code_of(text: Any) -> str:
 
 
 def state_label(code: str) -> str:
-    """ "27-Maharashtra" -- how a place of supply is written on an invoice."""
+    """"27-Maharashtra" -- how a place of supply is written on an invoice."""
     return f"{code}-{_STATE_NAME_BY_CODE[code]}" if code in _STATE_NAME_BY_CODE else ""
 
 
 def seller_state_code(config: Dict[str, Any]) -> str:
     """The state the business is registered in: the first two digits of its GSTIN, else the state typed in Settings."""
-    gstin = _real_value(
-        (config.get("company_details") or {}).get("gstin"), _SAMPLE_GSTIN
-    ).upper()
+    gstin = _real_value((config.get("company_details") or {}).get("gstin"), _SAMPLE_GSTIN).upper()
     if is_valid_gstin(gstin) and gstin[:2] in _STATE_NAME_BY_CODE:
         return gstin[:2]
     return state_code_of((config.get("user_details") or {}).get("state"))
 
 
 def gst_type_for_place(config: Dict[str, Any], place_of_supply: Any) -> Optional[str]:
-    """ "IGST" when the place of supply is in another state than the seller's, "CGST/SGST" when it is the same one,
+    """"IGST" when the place of supply is in another state than the seller's, "CGST/SGST" when it is the same one,
     None while either is unknown (then the tax split is left for the user to choose)."""
     seller, place = seller_state_code(config), state_code_of(place_of_supply)
     if not seller or not place:
@@ -907,40 +787,9 @@ def gst_type_for_place(config: Dict[str, Any], place_of_supply: Any) -> Optional
     return "CGST/SGST" if seller == place else "IGST"
 
 
-_WORDS_BELOW_20 = (
-    "Zero",
-    "One",
-    "Two",
-    "Three",
-    "Four",
-    "Five",
-    "Six",
-    "Seven",
-    "Eight",
-    "Nine",
-    "Ten",
-    "Eleven",
-    "Twelve",
-    "Thirteen",
-    "Fourteen",
-    "Fifteen",
-    "Sixteen",
-    "Seventeen",
-    "Eighteen",
-    "Nineteen",
-)
-_WORDS_TENS = (
-    "",
-    "",
-    "Twenty",
-    "Thirty",
-    "Forty",
-    "Fifty",
-    "Sixty",
-    "Seventy",
-    "Eighty",
-    "Ninety",
-)
+_WORDS_BELOW_20 = ("Zero", "One", "Two", "Three", "Four", "Five", "Six", "Seven", "Eight", "Nine", "Ten", "Eleven",
+                   "Twelve", "Thirteen", "Fourteen", "Fifteen", "Sixteen", "Seventeen", "Eighteen", "Nineteen")
+_WORDS_TENS = ("", "", "Twenty", "Thirty", "Forty", "Fifty", "Sixty", "Seventy", "Eighty", "Ninety")
 
 
 def _words_below_1000(n: int) -> str:
@@ -949,9 +798,7 @@ def _words_below_1000(n: int) -> str:
         parts.append(f"{_WORDS_BELOW_20[n // 100]} Hundred")
         n %= 100
     if n >= 20:
-        parts.append(
-            _WORDS_TENS[n // 10] + (f"-{_WORDS_BELOW_20[n % 10]}" if n % 10 else "")
-        )
+        parts.append(_WORDS_TENS[n // 10] + (f"-{_WORDS_BELOW_20[n % 10]}" if n % 10 else ""))
     elif n > 0:
         parts.append(_WORDS_BELOW_20[n])
     return " ".join(parts)
@@ -962,7 +809,7 @@ def _words_indian(n: int) -> str:
     if n == 0:
         return "Zero"
     parts: List[str] = []
-    for size, name in ((10**7, "Crore"), (10**5, "Lakh"), (1000, "Thousand")):
+    for size, name in ((10 ** 7, "Crore"), (10 ** 5, "Lakh"), (1000, "Thousand")):
         if n >= size:
             head, n = divmod(n, size)
             parts.append(f"{_words_indian(head)} {name}")
@@ -972,13 +819,13 @@ def _words_indian(n: int) -> str:
 
 
 def amount_in_words(amount: Any, symbol: str = "₹") -> str:
-    """ "Rupees One Thousand Two Hundred Thirty-Four and Fifty Paise Only" -- rupee amounts only ("" for any other currency)."""
+    """"Rupees One Thousand Two Hundred Thirty-Four and Fifty Paise Only" -- rupee amounts only ("" for any other currency)."""
     if symbol != "₹":
         return ""
-    value = _round2(abs(Decimal(str(amount or 0))))
+    value  = _round2(abs(Decimal(str(amount or 0))))
     rupees = int(value)
-    paise = int((value - rupees) * 100)
-    text = f"Rupees {_words_indian(rupees)}"
+    paise  = int((value - rupees) * 100)
+    text   = f"Rupees {_words_indian(rupees)}"
     if paise:
         text += f" and {_words_indian(paise)} Paise"
     return text + " Only"
@@ -996,19 +843,31 @@ def item_qty(item: Dict[str, Any]) -> float:
     return 1.0 if raw is None or raw == "" else safe_float(raw, 1.0)
 
 
+def item_discount(item: Dict[str, Any]) -> float:
+    """The discount that really comes off one line: what was typed, but never less than nothing and never more than
+    the line itself (a line cannot be worth less than zero)."""
+    gross = _round2(item.get("amount"))
+    return float(max(Decimal("0"), min(_round2(item.get("discount")), gross)))
+
+
+def item_net_amount(item: Dict[str, Any]) -> float:
+    """What one invoice line comes to -- (quantity x rate) less its own discount. A stored line keeps the amount BEFORE
+    its discount ("amount", which is quantity x rate) and the money taken off ("discount") side by side, so every
+    older invoice already has what this needs. This is the only place that rule lives: the AMOUNT column of the printed
+    invoice, the preview, the live line in the invoice form and the totals all use it."""
+    return float(_round2(item.get("amount")) - Decimal(str(item_discount(item))))
+
+
 def item_is_extended(item: Dict[str, Any]) -> bool:
-    """True when a line carries more than a title and an amount -- a quantity other than 1, a unit, an HSN/SAC code
-    or its own GST rate. Invoices made only of plain lines keep the compact two-column PDF table of earlier builds.
-    """
-    return bool(
-        item_qty(item) != 1.0
-        or str(item.get("unit") or "").strip()
-        or str(item.get("hsn") or "").strip()
-        or item.get("tax_rate") not in (None, "")
-    )
+    """True when a line carries more than a title and an amount -- a quantity other than 1, a unit, an HSN/SAC code,
+    its own GST rate or a discount. Invoices made only of plain lines keep the compact two-column PDF table of earlier
+    builds; a line with a discount always gets the full table, so the discount is printed beside the amount it
+    reduces."""
+    return bool(item_qty(item) != 1.0 or str(item.get("unit") or "").strip() or str(item.get("hsn") or "").strip()
+                or item.get("tax_rate") not in (None, "") or item_discount(item) > 0)
 
 
-_UNSET: Any = object()  # "argument not passed" (None is a real value for some of them)
+_UNSET: Any = object()        # "argument not passed" (None is a real value for some of them)
 
 
 def catalog_units(entry: Dict[str, Any]) -> List[Tuple[str, float]]:
@@ -1020,7 +879,7 @@ def catalog_units(entry: Dict[str, Any]) -> List[Tuple[str, float]]:
         units.append((main, safe_float(entry.get("amount"))))
     try:
         others = json.loads(entry.get("other_units") or "[]")
-    except TypeError, ValueError:
+    except (TypeError, ValueError):
         others = []
     for other in others if isinstance(others, list) else []:
         name = str(other.get("unit") or "").strip() if isinstance(other, dict) else ""
@@ -1050,6 +909,12 @@ def is_valid_phone(value: str) -> bool:
     return 7 <= digit_count <= 15
 
 
+def xml_escape(text: str) -> str:
+    """& < > made safe for the PDF text engine. The same as xml.sax.saxutils.escape, which pulls in a web client and an XML
+    parser (a good fifth of a second at start-up) just to run these three replacements."""
+    return text.replace("&", "&amp;").replace(">", "&gt;").replace("<", "&lt;")
+
+
 def safe_markup(value: Any) -> str:
     """Escape user-supplied text before it's embedded in ReportLab Paragraph
     strings, which parse a small XML/HTML-like markup subset. Unchanged --
@@ -1065,7 +930,7 @@ def compose_your_name(config: Dict[str, Any]) -> str:
     never drift into showing two different company names on one
     document. Falls back to the personal "Your Name" field only if no
     business name has been configured at all."""
-    company_name = (config.get("company_details", {}).get("name") or "").strip()
+    company_name  = (config.get("company_details", {}).get("name") or "").strip()
     personal_name = (config.get("user_details", {}).get("name") or "").strip()
     return company_name or personal_name or "Your Name/Company"
 
@@ -1087,22 +952,20 @@ def compose_your_contact(config: Dict[str, Any]) -> str:
     right after upgrading from an older build that only had that one
     field, so existing config doesn't suddenly show blank contact
     details until the user revisits Settings and re-enters them here."""
-    company_name = (config.get("company_details", {}).get("name") or "").strip()
-    user_details = config.get("user_details", {})
+    company_name  = (config.get("company_details", {}).get("name") or "").strip()
+    user_details  = config.get("user_details", {})
     personal_name = (user_details.get("name") or "").strip()
     lines = []
     if company_name and personal_name:
-        lines.append(
-            personal_name
-        )  # personal name already used as the headline when there's no business name
+        lines.append(personal_name)  # personal name already used as the headline when there's no business name
     for key in ("phone", "email", "website"):
         if val := (user_details.get(key) or "").strip():
             lines.append(val)
     if address := (user_details.get("address") or "").strip():
         lines.append(address)
-    city = (user_details.get("city") or "").strip()
+    city  = (user_details.get("city") or "").strip()
     state = (user_details.get("state") or "").strip()
-    pin = (user_details.get("pin_code") or "").strip()
+    pin   = (user_details.get("pin_code") or "").strip()
     city_state = ", ".join(p for p in (city, state) if p)
     if city_state and pin:
         lines.append(f"{city_state} - {pin}")
@@ -1197,30 +1060,28 @@ class DatabaseManager:
                 """)
 
                 # --- invoices: add newer columns as needed -----------------
-                existing = {
-                    r["name"]
-                    for r in c.execute("PRAGMA table_info(invoices)").fetchall()
-                }
+                existing = {r["name"] for r in c.execute("PRAGMA table_info(invoices)").fetchall()}
                 for col, ctype in {
-                    "advance_amount": "REAL DEFAULT 0",
-                    "advance_date": "TEXT",
-                    "gst_type": "TEXT DEFAULT 'CGST/SGST'",
-                    "notes": "TEXT DEFAULT ''",
-                    "grand_total": "REAL DEFAULT 0",
-                    "total_paid": "REAL DEFAULT 0",
-                    "balance_due": "REAL DEFAULT 0",
-                    "created_ts": "REAL DEFAULT 0",
+                    "advance_amount":       "REAL DEFAULT 0",
+                    "advance_date":         "TEXT",
+                    "gst_type":             "TEXT DEFAULT 'CGST/SGST'",
+                    "notes":                "TEXT DEFAULT ''",
+                    "grand_total":          "REAL DEFAULT 0",
+                    "total_paid":           "REAL DEFAULT 0",
+                    "balance_due":          "REAL DEFAULT 0",
+                    "created_ts":           "REAL DEFAULT 0",
                     # --- professional invoicing (items with quantity / unit / own GST rate, round off, ...) ---
-                    "tax_mode": "TEXT DEFAULT 'overall'",  # 'overall' (one GST rate) | 'per_item'
-                    "round_off": "INTEGER DEFAULT 0",  # round the grand total to the nearest rupee
-                    "place_of_supply": "TEXT DEFAULT ''",
-                    "po_number": "TEXT DEFAULT ''",  # customer's PO / reference number
-                    "due_date": "TEXT",
-                    "reverse_charge": "INTEGER DEFAULT 0",
-                    "customer_notes": "TEXT DEFAULT ''",  # printed on the invoice (`notes` is internal)
-                    "terms": "TEXT DEFAULT ''",  # terms & conditions, printed
-                    "pdf_template": "TEXT DEFAULT ''",  # this invoice's own look ('' = the Settings default)
-                    "pdf_watermark": "TEXT DEFAULT ''",  # its status stamp: '' = as Settings says | 'show' | 'hide'
+                    "tax_mode":             "TEXT DEFAULT 'overall'",     # 'overall' (one GST rate) | 'per_item'
+                    "round_off":            "INTEGER DEFAULT 0",          # round the grand total to the nearest rupee
+                    "place_of_supply":      "TEXT DEFAULT ''",
+                    "po_number":            "TEXT DEFAULT ''",            # customer's PO / reference number
+                    "due_date":             "TEXT",
+                    "reverse_charge":       "INTEGER DEFAULT 0",
+                    "customer_notes":       "TEXT DEFAULT ''",            # printed on the invoice (`notes` is internal)
+                    "terms":                "TEXT DEFAULT ''",            # terms & conditions, printed
+                    "pdf_template":         "TEXT DEFAULT ''",            # this invoice's own look ('' = the Settings default)
+                    "pdf_watermark":        "TEXT DEFAULT ''",            # its status stamp: '' = as Settings says | 'show' | 'hide'
+                    "print_extras":         "TEXT DEFAULT 'both'",        # printed under the totals: 'both' | 'terms' | 'notes' | 'none'
                 }.items():
                     if col not in existing:
                         c.execute(f"ALTER TABLE invoices ADD COLUMN {col} {ctype}")
@@ -1228,29 +1089,20 @@ class DatabaseManager:
                 # --- clients / catalog: migrate to id-keyed schema so a
                 #     dedicated manager screen can rename records safely ----
                 self._migrate_to_id_schema(
-                    c,
-                    "clients",
-                    "name",
-                    "contact TEXT, gstin TEXT",
-                    ["contact", "gstin"],
+                    c, "clients", "name",
+                    "contact TEXT, gstin TEXT", ["contact", "gstin"],
                 )
                 self._migrate_to_id_schema(
-                    c,
-                    "catalog",
-                    "title",
-                    "description TEXT, amount REAL",
-                    ["description", "amount"],
+                    c, "catalog", "title",
+                    "description TEXT, amount REAL", ["description", "amount"],
                 )
                 # --- catalog: unit, HSN/SAC, GST rate and the other units an item is sold in ------------
-                existing_catalog = {
-                    r["name"]
-                    for r in c.execute("PRAGMA table_info(catalog)").fetchall()
-                }
+                existing_catalog = {r["name"] for r in c.execute("PRAGMA table_info(catalog)").fetchall()}
                 for col, ctype in {
-                    "unit": "TEXT DEFAULT ''",  # the item's main unit; `amount` is the rate per that unit
-                    "hsn": "TEXT DEFAULT ''",
-                    "tax_rate": "REAL",  # NULL = no rate saved with the item
-                    "other_units": "TEXT DEFAULT ''",  # JSON [{"unit": "Dozen", "rate": 100.0}, ...]
+                    "unit":        "TEXT DEFAULT ''",     # the item's main unit; `amount` is the rate per that unit
+                    "hsn":         "TEXT DEFAULT ''",
+                    "tax_rate":    "REAL",                # NULL = no rate saved with the item
+                    "other_units": "TEXT DEFAULT ''",     # JSON [{"unit": "Dozen", "rate": 100.0}, ...]
                 }.items():
                     if col not in existing_catalog:
                         c.execute(f"ALTER TABLE catalog ADD COLUMN {col} {ctype}")
@@ -1264,52 +1116,35 @@ class DatabaseManager:
                         payment_date   TEXT,
                         mode           TEXT,
                         note           TEXT,
+                        reference      TEXT DEFAULT '',
                         FOREIGN KEY (invoice_number) REFERENCES invoices(invoice_number)
                             ON DELETE CASCADE ON UPDATE CASCADE
                     )
                 """)
+                # a payment can carry a reference (UPI UTR, cheque number ...): older databases get the column here
+                if "reference" not in {r["name"] for r in c.execute("PRAGMA table_info(payments)").fetchall()}:
+                    c.execute("ALTER TABLE payments ADD COLUMN reference TEXT DEFAULT ''")
 
                 # --- indexes for search / sort / filter perf ----------------
                 # One per column DashboardFrame can sort by server-side
                 # (see DatabaseManager.get_invoices_page) or that get_next_
                 # invoice_number()/backfill scan by, so none of those ever
                 # fall back to a full table scan even at 100,000+ rows.
-                c.execute(
-                    "CREATE INDEX IF NOT EXISTS idx_invoices_status  ON invoices(status)"
-                )
-                c.execute(
-                    "CREATE INDEX IF NOT EXISTS idx_invoices_date    ON invoices(invoice_date)"
-                )
-                c.execute(
-                    "CREATE INDEX IF NOT EXISTS idx_invoices_billto  ON invoices(bill_to)"
-                )
-                c.execute(
-                    "CREATE INDEX IF NOT EXISTS idx_invoices_total   ON invoices(grand_total)"
-                )
-                c.execute(
-                    "CREATE INDEX IF NOT EXISTS idx_invoices_paid    ON invoices(total_paid)"
-                )
-                c.execute(
-                    "CREATE INDEX IF NOT EXISTS idx_invoices_balance ON invoices(balance_due)"
-                )
-                c.execute(
-                    "CREATE INDEX IF NOT EXISTS idx_invoices_created ON invoices(created_ts)"
-                )
-                c.execute(
-                    "CREATE INDEX IF NOT EXISTS idx_payments_invnum  ON payments(invoice_number)"
-                )
+                c.execute("CREATE INDEX IF NOT EXISTS idx_invoices_status  ON invoices(status)")
+                c.execute("CREATE INDEX IF NOT EXISTS idx_invoices_date    ON invoices(invoice_date)")
+                c.execute("CREATE INDEX IF NOT EXISTS idx_invoices_billto  ON invoices(bill_to)")
+                c.execute("CREATE INDEX IF NOT EXISTS idx_invoices_total   ON invoices(grand_total)")
+                c.execute("CREATE INDEX IF NOT EXISTS idx_invoices_paid    ON invoices(total_paid)")
+                c.execute("CREATE INDEX IF NOT EXISTS idx_invoices_balance ON invoices(balance_due)")
+                c.execute("CREATE INDEX IF NOT EXISTS idx_invoices_created ON invoices(created_ts)")
+                c.execute("CREATE INDEX IF NOT EXISTS idx_payments_invnum  ON payments(invoice_number)")
 
                 self._migrate_legacy_payments(c)
                 self._backfill_financials(c)
 
     @staticmethod
-    def _migrate_to_id_schema(
-        c: sqlite3.Connection,
-        table: str,
-        key_col: str,
-        extra_cols_sql: str,
-        extra_col_names: List[str],
-    ):
+    def _migrate_to_id_schema(c: sqlite3.Connection, table: str, key_col: str,
+                               extra_cols_sql: str, extra_col_names: List[str]):
         """Give `clients`/`catalog` a stable integer id so records can be renamed."""
         cols = {r["name"] for r in c.execute(f"PRAGMA table_info({table})").fetchall()}
         if not cols or "id" in cols:
@@ -1323,9 +1158,7 @@ class DatabaseManager:
             )
         """)
         col_list = ", ".join([key_col] + extra_col_names)
-        c.execute(
-            f"INSERT OR IGNORE INTO {table} ({col_list}) SELECT {col_list} FROM {table}_legacy"
-        )
+        c.execute(f"INSERT OR IGNORE INTO {table} ({col_list}) SELECT {col_list} FROM {table}_legacy")
         c.execute(f"DROP TABLE {table}_legacy")
 
     @staticmethod
@@ -1346,26 +1179,16 @@ class DatabaseManager:
                 c.execute(
                     "INSERT INTO payments (invoice_number, amount, payment_date, mode, note) "
                     "VALUES (?,?,?,?,?)",
-                    (
-                        r["invoice_number"],
-                        adv,
-                        r["advance_date"] or r["invoice_date"],
-                        r["payment_mode"],
-                        "Advance payment",
-                    ),
+                    (r["invoice_number"], adv, r["advance_date"] or r["invoice_date"],
+                     r["payment_mode"], "Advance payment"),
                 )
             paid = float(r["amount_paid"] or 0)
             if paid > 0:
                 c.execute(
                     "INSERT INTO payments (invoice_number, amount, payment_date, mode, note) "
                     "VALUES (?,?,?,?,?)",
-                    (
-                        r["invoice_number"],
-                        paid,
-                        r["payment_date"] or r["invoice_date"],
-                        r["payment_mode"],
-                        "",
-                    ),
+                    (r["invoice_number"], paid, r["payment_date"] or r["invoice_date"],
+                     r["payment_mode"], ""),
                 )
 
     def _backfill_financials(self, c: sqlite3.Connection):
@@ -1381,15 +1204,12 @@ class DatabaseManager:
     #  Totals math (pure function -- also used by the PDF generator & UI)
     # ------------------------------------------------------------------ #
     @staticmethod
-    def calculate_totals(
-        items: List[Dict],
-        tax_rate: float,
-        global_disc_val: float = 0.0,
-        global_disc_type: str = "amount",
-        tax_mode: str = TAX_MODE_OVERALL,
-        gst_type: str = "CGST/SGST",
-        round_off: bool = False,
-    ) -> Dict[str, Any]:
+    def calculate_totals(items: List[Dict], tax_rate: float,
+                         global_disc_val: float = 0.0,
+                         global_disc_type: str = "amount",
+                         tax_mode: str = TAX_MODE_OVERALL,
+                         gst_type: str = "CGST/SGST",
+                         round_off: bool = False) -> Dict[str, Any]:
         """Computes every figure on the invoice summary, in this fixed
         order: Subtotal -> Discount -> Taxable Amount -> CGST/SGST ->
         (Round off ->) Grand Total. All arithmetic happens in Decimal with
@@ -1417,7 +1237,6 @@ class DatabaseManager:
         "tax" (all tax), "igst", "round_off" and "tax_groups": one {"rate", "taxable", "cgst", "sgst", "igst",
         "tax"} dict per GST rate, lowest rate first (empty when no tax is charged).
         """
-
         def d(x: Any) -> Decimal:
             return Decimal(str(x or 0))
 
@@ -1426,15 +1245,12 @@ class DatabaseManager:
         if per_item:
             # every line is rounded on its own, and a line's discount can never be larger than the line itself
             gross_list = [_round2(d(i.get("amount", 0))) for i in items]
-            disc_list = [
-                max(zero, min(_round2(d(i.get("discount", 0))), g))
-                for i, g in zip(items, gross_list)
-            ]
-            subtotal = sum(gross_list, zero)
-            item_disc = sum(disc_list, zero)
+            disc_list  = [max(zero, min(_round2(d(i.get("discount", 0))), g)) for i, g in zip(items, gross_list)]
+            subtotal   = sum(gross_list, zero)
+            item_disc  = sum(disc_list, zero)
         else:
-            subtotal = _round2(sum((d(i.get("amount", 0)) for i in items), zero))
-            item_disc = _round2(sum((d(i.get("discount", 0)) for i in items), zero))
+            subtotal   = _round2(sum((d(i.get("amount", 0)) for i in items), zero))
+            item_disc  = _round2(sum((d(i.get("discount", 0)) for i in items), zero))
         after_item = max(zero, subtotal - item_disc)
 
         if global_disc_type == "%":
@@ -1444,20 +1260,18 @@ class DatabaseManager:
         global_disc = max(zero, min(global_disc, after_item))
 
         total_disc = item_disc + global_disc
-        taxable = max(zero, subtotal - total_disc)
+        taxable    = max(zero, subtotal - total_disc)
 
         # (rate, taxable value at that rate) pairs, lowest rate first
         if per_item:
-            nets = [g - dsc for g, dsc in zip(gross_list, disc_list)]
+            nets   = [g - dsc for g, dsc in zip(gross_list, disc_list)]
             shares = _allocate_2dp(global_disc, nets)
             bases: Dict[Decimal, Decimal] = {}
             for item, net, share in zip(items, nets, shares):
-                raw = item.get("tax_rate")
+                raw  = item.get("tax_rate")
                 try:
                     rate = d(tax_rate) if raw is None or raw == "" else d(raw)
-                except (
-                    ArithmeticError
-                ):  # an unreadable rate counts as "no rate": the default
+                except ArithmeticError:                      # an unreadable rate counts as "no rate": the default
                     rate = d(tax_rate)
                 rate = max(zero, min(rate, Decimal("100")))
                 bases[rate] = bases.get(rate, zero) + (net - share)
@@ -1472,16 +1286,8 @@ class DatabaseManager:
             half = _round2(base * (rate / Decimal("2")) / Decimal("100"))
             cgst += half
             sgst += half
-            tax_groups.append(
-                {
-                    "rate": float(rate),
-                    "taxable": float(base),
-                    "cgst": float(half),
-                    "sgst": float(half),
-                    "igst": float(half + half),
-                    "tax": float(half + half),
-                }
-            )
+            tax_groups.append({"rate": float(rate), "taxable": float(base), "cgst": float(half), "sgst": float(half),
+                               "igst": float(half + half), "tax": float(half + half)})
 
         before_round = taxable + cgst + sgst
         if round_off:
@@ -1491,33 +1297,24 @@ class DatabaseManager:
         tax = cgst + sgst
 
         return {
-            "subtotal": float(subtotal),
-            "item_discount": float(item_disc),
-            "global_discount": float(global_disc),
-            "total_discount": float(total_disc),
-            "taxable": float(taxable),
-            "cgst": float(cgst),
-            "sgst": float(sgst),
+            "subtotal": float(subtotal), "item_discount": float(item_disc),
+            "global_discount": float(global_disc), "total_discount": float(total_disc),
+            "taxable": float(taxable), "cgst": float(cgst), "sgst": float(sgst),
             "grand_total": float(grand_total),
-            "tax": float(tax),
-            "igst": float(tax) if gst_type == "IGST" else 0.0,
-            "round_off": float(grand_total - before_round),
-            "tax_groups": tax_groups,
+            "tax": float(tax), "igst": float(tax) if gst_type == "IGST" else 0.0,
+            "round_off": float(grand_total - before_round), "tax_groups": tax_groups,
         }
 
     @classmethod
-    def totals_for(
-        cls, data: Dict[str, Any], items: Optional[List[Dict]] = None
-    ) -> Dict[str, Any]:
+    def totals_for(cls, data: Dict[str, Any], items: Optional[List[Dict]] = None) -> Dict[str, Any]:
         """The totals of one stored invoice -- `data` is its database row as a dict -- read from every column that
         matters (GST on/off, the rate or per-item mode, the tax split, the overall discount, round off). The database
         layer (_recompute_one), the PDF and the live invoice form all call this one function, so what is saved, printed
-        and shown while typing can never disagree. `items` may be passed to avoid parsing the JSON again.
-        """
+        and shown while typing can never disagree. `items` may be passed to avoid parsing the JSON again."""
         if items is None:
             try:
                 items = json.loads(data.get("items") or "[]")
-            except TypeError, ValueError:
+            except (TypeError, ValueError):
                 items = []
         is_gst = data.get("is_gst_invoice", 1)
         return cls.calculate_totals(
@@ -1525,19 +1322,13 @@ class DatabaseManager:
             safe_float(data.get("tax_rate")) if is_gst else 0.0,
             safe_float(data.get("global_discount_value")),
             data.get("global_discount_type") or "amount",
-            tax_mode=(
-                (data.get("tax_mode") or TAX_MODE_OVERALL)
-                if is_gst
-                else TAX_MODE_OVERALL
-            ),
+            tax_mode=(data.get("tax_mode") or TAX_MODE_OVERALL) if is_gst else TAX_MODE_OVERALL,
             gst_type=data.get("gst_type") or "CGST/SGST",
             round_off=bool(data.get("round_off")),
         )
 
     @staticmethod
-    def compute_payment_status(
-        grand_total: float, paid: float
-    ) -> Tuple[str, float, float]:
+    def compute_payment_status(grand_total: float, paid: float) -> Tuple[str, float, float]:
         """Given a grand total and amount paid, returns
         (status, balance_due, advance_credit) -- the single shared
         source of truth for "is this invoice unpaid, partially paid,
@@ -1553,25 +1344,19 @@ class DatabaseManager:
         can be written straight to the database.
         """
         gt, p = _round2(grand_total), _round2(paid)
-        diff = gt - p  # > 0 still owed, < 0 overpaid
+        diff = gt - p                                    # > 0 still owed, < 0 overpaid
         if diff > 0:
             status = InvoiceStatus.DUE.value if p <= 0 else InvoiceStatus.PARTIAL.value
             return status, float(diff), 0.0
         if diff < 0:
             return InvoiceStatus.OVERPAID.value, 0.0, float(-diff)
-        return (
-            (InvoiceStatus.PAID.value if gt > 0 else InvoiceStatus.DUE.value),
-            0.0,
-            0.0,
-        )
+        return (InvoiceStatus.PAID.value if gt > 0 else InvoiceStatus.DUE.value), 0.0, 0.0
 
     # ------------------------------------------------------------------ #
     #  Internal: recompute + persist grand_total/total_paid/balance/status
     # ------------------------------------------------------------------ #
     def _recompute_one(self, c: sqlite3.Connection, invoice_number: str):
-        row = c.execute(
-            "SELECT * FROM invoices WHERE invoice_number=?", (invoice_number,)
-        ).fetchone()
+        row = c.execute("SELECT * FROM invoices WHERE invoice_number=?", (invoice_number,)).fetchone()
         if not row:
             return
         d = dict(row)
@@ -1631,19 +1416,14 @@ class DatabaseManager:
             return
         with closing(self._conn()) as c:
             with c:
-                c.execute(
-                    """
+                c.execute("""
                     INSERT INTO clients (name, contact, gstin)
                     VALUES (?, ?, ?)
                     ON CONFLICT(name) DO UPDATE SET
                     contact=excluded.contact, gstin=excluded.gstin
-                """,
-                    (name, contact, gstin),
-                )
+                """, (name, contact, gstin))
 
-    def upsert_client_by_id(
-        self, client_id: Optional[int], name: str, contact: str, gstin: str
-    ) -> Tuple[bool, Optional[str]]:
+    def upsert_client_by_id(self, client_id: Optional[int], name: str, contact: str, gstin: str) -> Tuple[bool, Optional[str]]:
         """Used by the dedicated Clients manager screen -- supports renames."""
         if not name.strip():
             return False, "Client name is required."
@@ -1657,15 +1437,11 @@ class DatabaseManager:
                     if dupe:
                         return False, f"A client named '{name}' already exists."
                     if client_id is None:
-                        c.execute(
-                            "INSERT INTO clients (name, contact, gstin) VALUES (?,?,?)",
-                            (name, contact, gstin),
-                        )
+                        c.execute("INSERT INTO clients (name, contact, gstin) VALUES (?,?,?)",
+                                  (name, contact, gstin))
                     else:
-                        c.execute(
-                            "UPDATE clients SET name=?, contact=?, gstin=? WHERE id=?",
-                            (name, contact, gstin, client_id),
-                        )
+                        c.execute("UPDATE clients SET name=?, contact=?, gstin=? WHERE id=?",
+                                  (name, contact, gstin, client_id))
             return True, None
         except sqlite3.Error as exc:
             return False, str(exc)
@@ -1678,9 +1454,7 @@ class DatabaseManager:
     def delete_clients(self, client_ids: List[int]):
         with closing(self._conn()) as c:
             with c:
-                c.executemany(
-                    "DELETE FROM clients WHERE id=?", [(i,) for i in client_ids]
-                )
+                c.executemany("DELETE FROM clients WHERE id=?", [(i,) for i in client_ids])
 
     # ------------------------------------------------------------------ #
     #  Catalog
@@ -1701,23 +1475,15 @@ class DatabaseManager:
             row = c.execute("SELECT * FROM catalog WHERE id=?", (item_id,)).fetchone()
             return dict(row) if row else None
 
-    def save_catalog_item(
-        self,
-        title: str,
-        description: str,
-        amount: float,
-        unit: str = "",
-        hsn: str = "",
-        tax_rate: Optional[float] = None,
-    ):
+    def save_catalog_item(self, title: str, description: str, amount: float,
+                          unit: str = "", hsn: str = "", tax_rate: Optional[float] = None):
         """Upsert by title. The unit, HSN/SAC and GST rate are only changed when given (an empty one keeps what the
         item already has)."""
         if not title:
             return
         with closing(self._conn()) as c:
             with c:
-                c.execute(
-                    """
+                c.execute("""
                     INSERT INTO catalog (title, description, amount, unit, hsn, tax_rate)
                     VALUES (?, ?, ?, ?, ?, ?)
                     ON CONFLICT(title) DO UPDATE SET
@@ -1725,44 +1491,27 @@ class DatabaseManager:
                     unit=CASE WHEN excluded.unit != '' THEN excluded.unit ELSE catalog.unit END,
                     hsn=CASE WHEN excluded.hsn != '' THEN excluded.hsn ELSE catalog.hsn END,
                     tax_rate=COALESCE(excluded.tax_rate, catalog.tax_rate)
-                """,
-                    (title, description, amount, unit or "", hsn or "", tax_rate),
-                )
+                """, (title, description, amount, unit or "", hsn or "", tax_rate))
 
-    def remember_catalog_item(
-        self,
-        title: str,
-        description: str,
-        rate: float,
-        unit: str = "",
-        hsn: str = "",
-        tax_rate: Optional[float] = None,
-    ):
+    def remember_catalog_item(self, title: str, description: str, rate: float, unit: str = "", hsn: str = "",
+                              tax_rate: Optional[float] = None):
         """What saving an invoice teaches the catalog about one of its lines: the description, HSN/SAC and GST rate
         are refreshed, and `rate` is stored for the unit the line was sold in -- as the item's main rate, or as the
         rate of one of its other units (a unit it has not been sold in before is added to them). That is how one
-        item ends up with a price per unit ("Tent": Nos 500, Day 150) without any set-up.
-        """
+        item ends up with a price per unit ("Tent": Nos 500, Day 150) without any set-up."""
         if not title:
             return
         unit = (unit or "").strip()
         with closing(self._conn()) as c:
             with c:
-                row = c.execute(
-                    "SELECT * FROM catalog WHERE title=?", (title,)
-                ).fetchone()
+                row = c.execute("SELECT * FROM catalog WHERE title=?", (title,)).fetchone()
                 if row is None:
-                    c.execute(
-                        "INSERT INTO catalog (title, description, amount, unit, hsn, tax_rate) VALUES (?,?,?,?,?,?)",
-                        (title, description, rate, unit, hsn or "", tax_rate),
-                    )
+                    c.execute("INSERT INTO catalog (title, description, amount, unit, hsn, tax_rate) VALUES (?,?,?,?,?,?)",
+                              (title, description, rate, unit, hsn or "", tax_rate))
                     return
-                entry = dict(row)
-                main = str(entry.get("unit") or "").strip()
-                others = [
-                    {"unit": u, "rate": r}
-                    for u, r in catalog_units(entry)[1 if main else 0 :]
-                ]
+                entry  = dict(row)
+                main   = str(entry.get("unit") or "").strip()
+                others = [{"unit": u, "rate": r} for u, r in catalog_units(entry)[1 if main else 0:]]
                 amount, new_main = entry.get("amount"), main
                 if not unit or not main or unit.casefold() == main.casefold():
                     amount, new_main = rate, main or unit
@@ -1775,46 +1524,20 @@ class DatabaseManager:
                         others.append({"unit": unit, "rate": rate})
                 c.execute(
                     "UPDATE catalog SET description=?, amount=?, unit=?, hsn=?, tax_rate=?, other_units=? WHERE id=?",
-                    (
-                        description,
-                        amount,
-                        new_main,
-                        hsn or entry.get("hsn") or "",
-                        tax_rate if tax_rate is not None else entry.get("tax_rate"),
-                        json.dumps(others) if others else "",
-                        entry["id"],
-                    ),
-                )
+                    (description, amount, new_main, hsn or entry.get("hsn") or "",
+                     tax_rate if tax_rate is not None else entry.get("tax_rate"),
+                     json.dumps(others) if others else "", entry["id"]))
 
-    def upsert_catalog_item_by_id(
-        self,
-        item_id: Optional[int],
-        title: str,
-        description: str,
-        amount: float,
-        unit: Any = _UNSET,
-        hsn: Any = _UNSET,
-        tax_rate: Any = _UNSET,
-        other_units: Any = _UNSET,
-    ) -> Tuple[bool, Optional[str]]:
+    def upsert_catalog_item_by_id(self, item_id: Optional[int], title: str, description: str, amount: float,
+                                  unit: Any = _UNSET, hsn: Any = _UNSET, tax_rate: Any = _UNSET,
+                                  other_units: Any = _UNSET) -> Tuple[bool, Optional[str]]:
         """Used by the Catalog manager. `unit`, `hsn`, `tax_rate` (None = no rate) and `other_units` (a list of
         (unit, rate) pairs) are left as they are when not passed."""
         if not title.strip():
             return False, "Item title is required."
-        extra = {
-            "unit": unit,
-            "hsn": hsn,
-            "tax_rate": tax_rate,
-            "other_units": (
-                _UNSET
-                if other_units is _UNSET
-                else (
-                    json.dumps([{"unit": u, "rate": r} for u, r in other_units])
-                    if other_units
-                    else ""
-                )
-            ),
-        }
+        extra = {"unit": unit, "hsn": hsn, "tax_rate": tax_rate,
+                 "other_units": _UNSET if other_units is _UNSET else
+                 (json.dumps([{"unit": u, "rate": r} for u, r in other_units]) if other_units else "")}
         extra = {k: v for k, v in extra.items() if v is not _UNSET}
         try:
             with closing(self._conn()) as c:
@@ -1827,18 +1550,12 @@ class DatabaseManager:
                         return False, f"An item named '{title}' already exists."
                     if item_id is None:
                         cols = ["title", "description", "amount", *extra]
-                        c.execute(
-                            f"INSERT INTO catalog ({', '.join(cols)}) VALUES ({', '.join('?' * len(cols))})",
-                            (title, description, amount, *extra.values()),
-                        )
+                        c.execute(f"INSERT INTO catalog ({', '.join(cols)}) VALUES ({', '.join('?' * len(cols))})",
+                                  (title, description, amount, *extra.values()))
                     else:
-                        sets = ", ".join(
-                            f"{k}=?" for k in ("title", "description", "amount", *extra)
-                        )
-                        c.execute(
-                            f"UPDATE catalog SET {sets} WHERE id=?",
-                            (title, description, amount, *extra.values(), item_id),
-                        )
+                        sets = ", ".join(f"{k}=?" for k in ("title", "description", "amount", *extra))
+                        c.execute(f"UPDATE catalog SET {sets} WHERE id=?",
+                                  (title, description, amount, *extra.values(), item_id))
             return True, None
         except sqlite3.Error as exc:
             return False, str(exc)
@@ -1851,9 +1568,7 @@ class DatabaseManager:
     def delete_catalog_items(self, item_ids: List[int]):
         with closing(self._conn()) as c:
             with c:
-                c.executemany(
-                    "DELETE FROM catalog WHERE id=?", [(i,) for i in item_ids]
-                )
+                c.executemany("DELETE FROM catalog WHERE id=?", [(i,) for i in item_ids])
 
     # ------------------------------------------------------------------ #
     #  Payments
@@ -1866,45 +1581,80 @@ class DatabaseManager:
             ).fetchall()
             return [dict(r) for r in rows]
 
+    @staticmethod
+    def _insert_payment(c: sqlite3.Connection, invoice_number: str, p: Dict[str, Any]) -> None:
+        """The one statement that writes a payment (every way of saving one goes through here)."""
+        c.execute(
+            "INSERT INTO payments (invoice_number, amount, payment_date, mode, note, reference) VALUES (?,?,?,?,?,?)",
+            (invoice_number, p.get("amount", 0), p.get("payment_date"), p.get("mode"), p.get("note", ""),
+             str(p.get("reference") or "").strip()),
+        )
+
     def replace_payments(self, invoice_number: str, payments: List[Dict]):
         """Replace the full payment history for one invoice in a single
         transaction, then recompute its denormalized totals/status."""
         with closing(self._conn()) as c:
             with c:
-                c.execute(
-                    "DELETE FROM payments WHERE invoice_number=?", (invoice_number,)
-                )
+                c.execute("DELETE FROM payments WHERE invoice_number=?", (invoice_number,))
                 for p in payments:
-                    c.execute(
-                        "INSERT INTO payments (invoice_number, amount, payment_date, mode, note) "
-                        "VALUES (?,?,?,?,?)",
-                        (
-                            invoice_number,
-                            p.get("amount", 0),
-                            p.get("payment_date"),
-                            p.get("mode"),
-                            p.get("note", ""),
-                        ),
-                    )
+                    self._insert_payment(c, invoice_number, p)
                 self._recompute_one(c, invoice_number)
+
+    def add_payment(self, invoice_number: str, payment: Dict[str, Any]) -> Tuple[bool, Optional[str]]:
+        """Record one more payment on an invoice (the others stay exactly as they are) and refresh what it owes.
+        Returns (ok, reason) -- a free invoice, an unknown invoice or a nonsense amount is refused with a plain sentence."""
+        if safe_float(payment.get("amount")) <= 0:
+            return False, "The amount must be more than zero."
+        try:
+            with closing(self._conn()) as c:
+                with c:
+                    row = c.execute("SELECT is_complimentary FROM invoices WHERE invoice_number=?",
+                                    (invoice_number,)).fetchone()
+                    if row is None:
+                        return False, "This invoice no longer exists."
+                    if row["is_complimentary"]:
+                        return False, "This invoice is free of charge, so there is nothing to pay."
+                    self._insert_payment(c, invoice_number, payment)
+                    self._recompute_one(c, invoice_number)
+            return True, None
+        except sqlite3.Error as exc:
+            return False, str(exc)
 
     # ------------------------------------------------------------------ #
     #  Invoices
     # ------------------------------------------------------------------ #
-    def get_all_invoices(
-        self, search_query: str = "", status_filter: str = "All"
-    ) -> List[sqlite3.Row]:
+    # "Overdue" is not a stored status: it is an unpaid or part-paid invoice whose due date has passed (an invoice that is
+    # due today is not late yet, and a free invoice never is).
+    _OVERDUE_SQL = ("(COALESCE(is_complimentary, 0) = 0 AND balance_due > 0 "
+                    "AND due_date IS NOT NULL AND due_date != '' AND due_date < ?)")
+
+    @classmethod
+    def _status_clause(cls, status_filter: str) -> Tuple[str, List[Any]]:
+        """The WHERE test behind one of the status chips on the Invoices page."""
+        if status_filter.upper() == "OVERDUE":
+            return cls._OVERDUE_SQL, [today_db()]
+        return "UPPER(status) = ?", [status_filter.upper()]
+
+    def get_overdue_summary(self) -> Dict[str, Any]:
+        """How many invoices are overdue and how much money they still owe in total."""
+        with closing(self._conn()) as c:
+            row = c.execute(
+                f"SELECT COUNT(*) AS n, COALESCE(SUM(balance_due), 0) AS amount FROM invoices WHERE {self._OVERDUE_SQL}",
+                [today_db()],
+            ).fetchone()
+        return {"count": int(row["n"]), "amount": float(row["amount"])}
+
+    def get_all_invoices(self, search_query: str = "", status_filter: str = "All") -> List[sqlite3.Row]:
         clauses, params = [], []
         if search_query:
-            clauses.append(
-                "(invoice_number LIKE ? ESCAPE '\\' OR bill_to LIKE ? ESCAPE '\\' "
-                "OR notes LIKE ? ESCAPE '\\')"
-            )
+            clauses.append("(invoice_number LIKE ? ESCAPE '\\' OR bill_to LIKE ? ESCAPE '\\' "
+                           "OR notes LIKE ? ESCAPE '\\')")
             q = like_pattern(search_query)
             params += [q, q, q]
         if status_filter and status_filter != "All":
-            clauses.append("UPPER(status) = ?")
-            params.append(status_filter.upper())
+            clause, extra = self._status_clause(status_filter)
+            clauses.append(clause)
+            params += extra
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
 
         with closing(self._conn()) as c:
@@ -1917,25 +1667,17 @@ class DatabaseManager:
     # column (see the indexes created in _init_db()) -- "note" isn't a
     # real column, so it's expressed as a boolean CASE instead.
     _SORT_COLUMN_SQL = {
-        "id": "invoice_number",
-        "client": "bill_to",
-        "date": "invoice_date",
-        "status": "status",
-        "total": "grand_total",
-        "paid": "total_paid",
+        "id": "invoice_number", "client": "bill_to", "date": "invoice_date",
+        "status": "status", "total": "grand_total", "paid": "total_paid",
         "balance": "balance_due",
         "note": "(CASE WHEN notes IS NOT NULL AND TRIM(notes) != '' THEN 1 ELSE 0 END)",
+        # invoices without a due date always come last, whichever way the column is sorted
+        "due": "(CASE WHEN due_date IS NULL OR due_date = '' THEN 1 ELSE 0 END), due_date",
     }
 
-    def get_invoices_page(
-        self,
-        search_query: str = "",
-        status_filter: str = "All",
-        sort_col: str = "date",
-        sort_desc: bool = True,
-        page: int = 1,
-        page_size: int = 50,
-    ) -> Tuple[List[sqlite3.Row], int]:
+    def get_invoices_page(self, search_query: str = "", status_filter: str = "All",
+                           sort_col: str = "date", sort_desc: bool = True,
+                           page: int = 1, page_size: int = 50) -> Tuple[List[sqlite3.Row], int]:
         """Search + filter + sort + pagination, all done in SQL. This is
         the core of keeping the Dashboard fast at any invoice count: it
         never pulls more than one page's worth of rows into Python, no
@@ -1949,15 +1691,14 @@ class DatabaseManager:
         """
         clauses, params = [], []
         if search_query:
-            clauses.append(
-                "(invoice_number LIKE ? ESCAPE '\\' OR bill_to LIKE ? ESCAPE '\\' "
-                "OR notes LIKE ? ESCAPE '\\')"
-            )
+            clauses.append("(invoice_number LIKE ? ESCAPE '\\' OR bill_to LIKE ? ESCAPE '\\' "
+                           "OR notes LIKE ? ESCAPE '\\')")
             q = like_pattern(search_query)
             params += [q, q, q]
         if status_filter and status_filter != "All":
-            clauses.append("UPPER(status) = ?")
-            params.append(status_filter.upper())
+            clause, extra = self._status_clause(status_filter)
+            clauses.append(clause)
+            params += extra
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
 
         sql_col = self._SORT_COLUMN_SQL.get(sort_col, "invoice_date")
@@ -1973,9 +1714,7 @@ class DatabaseManager:
         offset = (page - 1) * page_size
 
         with closing(self._conn()) as c:
-            total = c.execute(
-                f"SELECT COUNT(*) FROM invoices {where}", params
-            ).fetchone()[0]
+            total = c.execute(f"SELECT COUNT(*) FROM invoices {where}", params).fetchone()[0]
             rows = c.execute(
                 f"SELECT * FROM invoices {where} {order_by} LIMIT ? OFFSET ?",
                 params + [page_size, offset],
@@ -2014,25 +1753,16 @@ class DatabaseManager:
 
     def get_invoice_by_id(self, inv_id: str) -> Optional[sqlite3.Row]:
         with closing(self._conn()) as c:
-            return c.execute(
-                "SELECT * FROM invoices WHERE invoice_number=?", (inv_id,)
-            ).fetchone()
+            return c.execute("SELECT * FROM invoices WHERE invoice_number=?", (inv_id,)).fetchone()
 
     def update_notes(self, invoice_number: str, notes: str):
         with closing(self._conn()) as c:
             with c:
-                c.execute(
-                    "UPDATE invoices SET notes=? WHERE invoice_number=?",
-                    (notes, invoice_number),
-                )
+                c.execute("UPDATE invoices SET notes=? WHERE invoice_number=?", (notes, invoice_number))
 
-    def save_invoice(
-        self,
-        data: Dict[str, Any],
-        is_update: bool,
-        original_id: Optional[str] = None,
-        payments: Optional[List[Dict]] = None,
-    ) -> Tuple[bool, Optional[str]]:
+    def save_invoice(self, data: Dict[str, Any], is_update: bool,
+                     original_id: Optional[str] = None,
+                     payments: Optional[List[Dict]] = None) -> Tuple[bool, Optional[str]]:
         try:
             with closing(self._conn()) as c:
                 with c:
@@ -2040,16 +1770,12 @@ class DatabaseManager:
                     data.setdefault("created_ts", time.time())
                     if is_update:
                         nid = data["invoice_number"]
-                        if (
-                            nid != original_id
-                            and c.execute(
-                                "SELECT 1 FROM invoices WHERE invoice_number=?", (nid,)
-                            ).fetchone()
-                        ):
+                        if nid != original_id and c.execute(
+                            "SELECT 1 FROM invoices WHERE invoice_number=?", (nid,)
+                        ).fetchone():
                             return False, f"Invoice number '{nid}' already exists."
                         existing = c.execute(
-                            "SELECT created_ts FROM invoices WHERE invoice_number=?",
-                            (original_id,),
+                            "SELECT created_ts FROM invoices WHERE invoice_number=?", (original_id,)
                         ).fetchone()
                         if existing and existing["created_ts"]:
                             data["created_ts"] = existing["created_ts"]
@@ -2059,40 +1785,22 @@ class DatabaseManager:
                             qd,
                         )
                         if payments is not None and nid != original_id:
-                            c.execute(
-                                "UPDATE payments SET invoice_number=? WHERE invoice_number=?",
-                                (nid, original_id),
-                            )
+                            c.execute("UPDATE payments SET invoice_number=? WHERE invoice_number=?",
+                                      (nid, original_id))
                     else:
                         if c.execute(
-                            "SELECT 1 FROM invoices WHERE invoice_number=?",
-                            (data["invoice_number"],),
+                            "SELECT 1 FROM invoices WHERE invoice_number=?", (data["invoice_number"],)
                         ).fetchone():
-                            return (
-                                False,
-                                f"Invoice number '{data['invoice_number']}' already exists.",
-                            )
+                            return False, f"Invoice number '{data['invoice_number']}' already exists."
                         c.execute(
                             f"INSERT INTO invoices ({', '.join(data)}) VALUES (:{', :'.join(data)})",
                             data,
                         )
                     final_id = data["invoice_number"]
                     if payments is not None:
-                        c.execute(
-                            "DELETE FROM payments WHERE invoice_number=?", (final_id,)
-                        )
+                        c.execute("DELETE FROM payments WHERE invoice_number=?", (final_id,))
                         for p in payments:
-                            c.execute(
-                                "INSERT INTO payments (invoice_number, amount, payment_date, mode, note) "
-                                "VALUES (?,?,?,?,?)",
-                                (
-                                    final_id,
-                                    p.get("amount", 0),
-                                    p.get("payment_date"),
-                                    p.get("mode"),
-                                    p.get("note", ""),
-                                ),
-                            )
+                            self._insert_payment(c, final_id, p)
                     self._recompute_one(c, final_id)
             return True, None
         except sqlite3.Error as exc:
@@ -2104,12 +1812,8 @@ class DatabaseManager:
                 c.execute("DELETE FROM invoices WHERE invoice_number=?", (inv_id,))
         return True
 
-    def delete_invoices(
-        self,
-        inv_ids: List[str],
-        chunk_size: int = 200,
-        progress_cb: Optional[Callable[[int, int], None]] = None,
-    ) -> int:
+    def delete_invoices(self, inv_ids: List[str], chunk_size: int = 200,
+                         progress_cb: Optional[Callable[[int, int], None]] = None) -> int:
         """Deletes the given invoices in fixed-size chunks, each its own
         short transaction, rather than one single executemany() covering
         everything at once. Two benefits at scale: any one write-lock is
@@ -2121,13 +1825,10 @@ class DatabaseManager:
         total = len(inv_ids)
         deleted = 0
         for i in range(0, total, chunk_size):
-            chunk = inv_ids[i : i + chunk_size]
+            chunk = inv_ids[i:i + chunk_size]
             with closing(self._conn()) as c:
                 with c:
-                    c.executemany(
-                        "DELETE FROM invoices WHERE invoice_number=?",
-                        [(x,) for x in chunk],
-                    )
+                    c.executemany("DELETE FROM invoices WHERE invoice_number=?", [(x,) for x in chunk])
             deleted += len(chunk)
             if progress_cb:
                 progress_cb(deleted, total)
@@ -2159,9 +1860,7 @@ class DatabaseManager:
                 return f"{prefix}{int(num_str) + 1:0{len(num_str)}d}"
         return "INV-001"
 
-    def export_to_csv(
-        self, file_path: str, invoice_ids: Optional[List[str]] = None
-    ) -> Tuple[bool, Optional[str]]:
+    def export_to_csv(self, file_path: str, invoice_ids: Optional[List[str]] = None) -> Tuple[bool, Optional[str]]:
         try:
             if invoice_ids:
                 with closing(self._conn()) as c:
@@ -2206,11 +1905,7 @@ class DatabaseManager:
 # Every copy of the database goes through SQLite's own online-backup API instead of a raw file copy. A raw copy of a
 # WAL-mode database can silently miss recent changes that still sit in the -wal file; the backup API always produces
 # a complete, consistent file, and it works while the application has the database open.
-_FILE_DIALOG_STATE: Dict[str, Optional[str]] = {
-    "backup_dir": None,
-    "import_dir": None,
-    "asset_dir": None,
-}
+_FILE_DIALOG_STATE: Dict[str, Optional[str]] = {"backup_dir": None, "import_dir": None, "asset_dir": None}
 
 
 def _start_dir(key: str) -> Path:
@@ -2234,10 +1929,7 @@ def _same_file(a: Path, b: Path) -> bool:
 
 def _overwrite_database(source: Path, dest: Path) -> None:
     """Makes the SQLite database at `dest` an exact copy of the one at `source`."""
-    with (
-        closing(sqlite3.connect(str(source), timeout=10)) as src,
-        closing(sqlite3.connect(str(dest), timeout=10)) as dst,
-    ):
+    with closing(sqlite3.connect(str(source), timeout=10)) as src, closing(sqlite3.connect(str(dest), timeout=10)) as dst:
         try:
             # SQLite refuses a backup into a WAL-mode database when the two page sizes differ.
             dst.execute("PRAGMA journal_mode = DELETE")
@@ -2248,27 +1940,22 @@ def _overwrite_database(source: Path, dest: Path) -> None:
 
 def _write_database_copy(source: Path, dest: Path) -> None:
     """Writes a complete single-file copy of the database `source` to `dest`, replacing whatever is there. The copy
-    is built under a temporary name beside `dest` first, so a failure half-way never leaves a damaged file behind.
-    """
+    is built under a temporary name beside `dest` first, so a failure half-way never leaves a damaged file behind."""
     source, dest = Path(source), Path(dest)
     if not source.is_file():
-        raise FileNotFoundError(f"The database file was not found:\n{source}")
+        raise FileNotFoundError(f"Your Vyaprix data file could not be found:\n{source}")
     if dest.exists() and _same_file(source, dest):
-        raise ValueError(
-            "That is the database Vyaprix is using right now.\nPlease choose a different file."
-        )
+        raise ValueError("That is the file Vyaprix is using right now.\nPlease choose a different file.")
     temp = dest.with_name(dest.name + ".part")
     sidecars = ("-wal", "-shm", "-journal")
     try:
         _overwrite_database(source, temp)
         try:
             with closing(sqlite3.connect(str(temp), timeout=10)) as conn:
-                conn.execute(
-                    "PRAGMA journal_mode = DELETE"
-                )  # a self-contained file: nothing left in a -wal
+                conn.execute("PRAGMA journal_mode = DELETE")        # a self-contained file: nothing left in a -wal
         except sqlite3.Error:
             pass
-        for suffix in sidecars:  # a stale -wal beside the old file must not be replayed
+        for suffix in sidecars:                                      # a stale -wal beside the old file must not be replayed
             try:
                 dest.with_name(dest.name + suffix).unlink()
             except OSError:
@@ -2288,9 +1975,7 @@ def backup_database_to(dest: Path) -> None:
 
 
 # Columns every Vyaprix database has had since the first release (newer ones are added by DatabaseManager).
-_CORE_INVOICE_COLUMNS = frozenset(
-    {"invoice_number", "bill_to", "items", "status", "invoice_date"}
-)
+_CORE_INVOICE_COLUMNS = frozenset({"invoice_number", "bill_to", "items", "status", "invoice_date"})
 
 
 def validate_import_database(path: Path) -> Optional[str]:
@@ -2300,40 +1985,26 @@ def validate_import_database(path: Path) -> Optional[str]:
         return "The file could not be found."
     try:
         with closing(sqlite3.connect(str(path), timeout=10)) as conn:
-            tables = {
-                row[0]
-                for row in conn.execute(
-                    "SELECT name FROM sqlite_master WHERE type = 'table'"
-                )
-            }
+            tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
             if "invoices" not in tables:
-                return "It is a database, but not a Vyaprix one (there is no invoices table in it)."
-            missing = sorted(
-                _CORE_INVOICE_COLUMNS
-                - {row[1] for row in conn.execute("PRAGMA table_info(invoices)")}
-            )
+                return "This file is not a Vyaprix backup: there are no invoices in it."
+            missing = sorted(_CORE_INVOICE_COLUMNS - {row[1] for row in conn.execute("PRAGMA table_info(invoices)")})
             if missing:
-                return f"It is a database, but not a Vyaprix one (its invoices table has no {', '.join(missing)} column)."
+                return "This file is not a Vyaprix backup: some of the invoice information is missing from it."
             verdict = conn.execute("PRAGMA quick_check(1)").fetchone()
             if not verdict or verdict[0] != "ok":
-                return f"The file failed SQLite's integrity check and may be damaged ({verdict[0] if verdict else 'no result'})."
+                return "This file may be damaged, so it cannot be used safely."
     except sqlite3.Error as exc:
-        return str(exc)
+        logger.info("Not a usable backup file: %s", exc)
+        return "This file is not a Vyaprix backup, or it cannot be read."
     return None
 
 
 class DatabaseImportError(Exception):
     """Raised by import_database_from(). `stage` is "backup" (the safety copy could not be made, nothing was touched)
-    or "import" (the import failed; `restored` says whether the previous database could be put back).
-    """
+    or "import" (the import failed; `restored` says whether the previous database could be put back)."""
 
-    def __init__(
-        self,
-        message: str,
-        stage: str,
-        restored: bool = True,
-        backup_path: Optional[Path] = None,
-    ):
+    def __init__(self, message: str, stage: str, restored: bool = True, backup_path: Optional[Path] = None):
         super().__init__(message)
         self.stage = stage
         self.restored = restored
@@ -2342,16 +2013,13 @@ class DatabaseImportError(Exception):
 
 def import_database_from(source: Path) -> Path:
     """Replaces everything in the live database with the contents of `source`. The current database is copied to a
-    timestamped safety file first (its path is returned) and put back if anything goes wrong.
-    """
+    timestamped safety file first (its path is returned) and put back if anything goes wrong."""
     source = Path(source)
     live = Path(DB_NAME)
     stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
     backup_path = DATA_DIR / f"Vyaprix-pre-import-backup-{stamp}.db"
     counter = 2
-    while (
-        backup_path.exists()
-    ):  # never overwrite an earlier safety copy (it may even be the file being imported)
+    while backup_path.exists():         # never overwrite an earlier safety copy (it may even be the file being imported)
         backup_path = DATA_DIR / f"Vyaprix-pre-import-backup-{stamp}-{counter}.db"
         counter += 1
     had_live = live.exists()
@@ -2362,9 +2030,7 @@ def import_database_from(source: Path) -> Path:
         raise DatabaseImportError(str(exc), "backup", backup_path=backup_path) from exc
     try:
         _overwrite_database(source, live)
-        DatabaseManager(
-            live
-        )  # adds anything an older / smaller file is missing; fails on a file that is not ours
+        DatabaseManager(live)       # adds anything an older / smaller file is missing; fails on a file that is not ours
     except Exception as exc:
         restored = False
         try:
@@ -2372,24 +2038,17 @@ def import_database_from(source: Path) -> Path:
                 _overwrite_database(backup_path, live)
                 restored = True
         except Exception:
-            logger.exception(
-                "Could not restore the previous database after a failed import"
-            )
+            logger.exception("Could not restore the previous database after a failed import")
         raise DatabaseImportError(str(exc), "import", restored, backup_path) from exc
     return backup_path
 
 
 def prompt_and_backup_database(parent: Optional[QWidget] = None) -> None:
-    """Asks where to save a copy of the live database, then writes it there. Shared by the Settings dialog's
-    "Save a Backup Copy" button and the Ctrl+B shortcut, so there is one definition of "back up the database".
-    """
+    """Asks where to save a copy of the live database, then writes it there. Shared by the Settings page's
+    "Save a Backup Copy" button and the Ctrl+B shortcut, so there is one definition of "back up the database"."""
     default_name = f"Vyaprix-backup-{datetime.date.today().isoformat()}.db"
-    path, _ = QFileDialog.getSaveFileName(
-        parent,
-        "Save Database Backup",
-        str(_start_dir("backup_dir") / default_name),
-        "SQLite Database (*.db)",
-    )
+    path, _ = QFileDialog.getSaveFileName(parent, "Save a Backup Copy", str(_start_dir("backup_dir") / default_name),
+                                          "Vyaprix backup (*.db)")
     if not path:
         return
     target = Path(path)
@@ -2399,11 +2058,9 @@ def prompt_and_backup_database(parent: Optional[QWidget] = None) -> None:
     try:
         backup_database_to(target)
     except Exception as exc:
-        Messagebox.show_error("Backup Failed", str(exc), parent=parent)
+        Messagebox.show_error("Backup Failed", f"Your backup could not be saved:\n{exc}", parent=parent)
         return
-    Messagebox.show_info(
-        "Backup Saved", f"Database backed up to:\n{target}", parent=parent
-    )
+    Messagebox.show_info("Backup Saved", f"Your backup was saved to:\n{target}", parent=parent)
 
 
 # =============================================================================
@@ -2412,16 +2069,10 @@ def prompt_and_backup_database(parent: Optional[QWidget] = None) -> None:
 _HEX_COLOR = re.compile(r"#[0-9A-Fa-f]{6}")
 
 
-def gst_breakdown_text(
-    taxed: List[Dict[str, float]], key: str, rate_share: float
-) -> str:
+def gst_breakdown_text(taxed: List[Dict[str, float]], key: str, rate_share: float) -> str:
     """One line per GST rate for a tooltip: "9% on 1,000.00 = 90.00". `key` is the tax figure to print ("cgst",
-    "sgst" or "tax") and `rate_share` the part of the group's rate that figure stands for (half for CGST / SGST).
-    """
-    return "\n".join(
-        f"{g['rate'] * rate_share:g}% on {fmt_money(g['taxable'])} = {fmt_money(g[key])}"
-        for g in taxed
-    )
+    "sgst" or "tax") and `rate_share` the part of the group's rate that figure stands for (half for CGST / SGST)."""
+    return "\n".join(f"{g['rate'] * rate_share:g}% on {fmt_money(g['taxable'])} = {fmt_money(g[key])}" for g in taxed)
 
 
 def normalize_hex_color(value: Any) -> str:
@@ -2436,9 +2087,7 @@ def _pdf_rgb(color: str) -> Tuple[int, int, int]:
 
 def _pdf_mix(color: str, other: str, share: float) -> str:
     """`color` blended with `other`: a share of 0 is all `color`, 1 is all `other`."""
-    return "#%02X%02X%02X" % tuple(
-        round(a + (b - a) * share) for a, b in zip(_pdf_rgb(color), _pdf_rgb(other))
-    )
+    return "#%02X%02X%02X" % tuple(round(a + (b - a) * share) for a, b in zip(_pdf_rgb(color), _pdf_rgb(other)))
 
 
 def _pdf_tint(color: str, share: float) -> str:
@@ -2448,11 +2097,9 @@ def _pdf_tint(color: str, share: float) -> str:
 
 def _pdf_readable_on(color: str) -> str:
     """The text colour to print on `color`: white on a dark fill, near-black on a light one."""
-
     def linear(channel: int) -> float:
         v = channel / 255.0
         return v / 12.92 if v <= 0.03928 else ((v + 0.055) / 1.055) ** 2.4
-
     r, g, b = (linear(c) for c in _pdf_rgb(color))
     return "#111827" if 0.2126 * r + 0.7152 * g + 0.0722 * b > 0.18 else "#FFFFFF"
 
@@ -2463,48 +2110,43 @@ class PDFTemplate:
     where) is the same for every template. Every field defaults to the CLASSIC look, the one invoices have always
     had, so a template lists only what it changes. A template with a `recipe` takes a brand colour: with_accent()
     recomputes its colours around it (the recipes are below)."""
-
     key: str
     label: str
     blurb: str = ""
     # --- colours --------------------------------------------------------------------------------------------
-    name_color: str = "#1F2937"  # company name
-    tagline_color: str = "#6B7280"  # the line under the company name
-    title_color: str = "#111827"  # INVOICE / RECEIPT
-    label_color: str = "#6B7280"  # FROM: / BILL TO:
-    rule: str = "#E5E7EB"  # line under the letterhead
-    meta_bg: str = "#F9FAFB"  # the invoice-number / date box ("" = no fill)
-    meta_border: str = "#E5E7EB"  # its outline ("" = none)
-    meta_lines: str = ""  # hairlines above and below it ("" = none)
-    head_bg: str = "#1F2937"  # item table header ("" = no fill)
-    head_fg: str = "#FFFFFF"
-    head_rule: str = ""  # line under the item header ("" = none)
-    row_line: str = "#F3F4F6"  # line between item rows
-    end_line: str = "#D1D5DB"  # line under the last item row ...
-    end_width: float = 2  # ... and its weight
-    zebra: str = ""  # fill of every second item row ("" = none)
-    grid: bool = False  # a full grid around the item cells ...
-    grid_line: str = "#D1D5DB"  # ... in this colour
-    pay_head_bg: str = "#374151"  # payment history header
-    pay_head_fg: str = "#FFFFFF"
-    total_bg: str = ""  # fill behind the "Invoice Total" row ("" = none)
-    total_fg: str = "#FFFFFF"  # ... and its text
-    total_rule: str = ""  # line above that row ("" = none)
+    name_color: str    = "#1F2937"      # company name
+    tagline_color: str = "#6B7280"      # the line under the company name
+    title_color: str   = "#111827"      # INVOICE / RECEIPT
+    label_color: str   = "#6B7280"      # FROM: / BILL TO:
+    rule: str          = "#E5E7EB"      # line under the letterhead
+    meta_bg: str       = "#F9FAFB"      # the invoice-number / date box ("" = no fill)
+    meta_border: str   = "#E5E7EB"      # its outline ("" = none)
+    meta_lines: str    = ""             # hairlines above and below it ("" = none)
+    head_bg: str       = "#1F2937"      # item table header ("" = no fill)
+    head_fg: str       = "#FFFFFF"
+    head_rule: str     = ""             # line under the item header ("" = none)
+    row_line: str      = "#F3F4F6"      # line between item rows
+    end_line: str      = "#D1D5DB"      # line under the last item row ...
+    end_width: float   = 2              # ... and its weight
+    zebra: str         = ""             # fill of every second item row ("" = none)
+    grid: bool         = False          # a full grid around the item cells ...
+    grid_line: str     = "#D1D5DB"      # ... in this colour
+    pay_head_bg: str   = "#374151"      # payment history header
+    pay_head_fg: str   = "#FFFFFF"
+    total_bg: str      = ""             # fill behind the "Invoice Total" row ("" = none)
+    total_fg: str      = "#FFFFFF"      # ... and its text
+    total_rule: str    = ""             # line above that row ("" = none)
     # --- shape ----------------------------------------------------------------------------------------------
-    header: str = (
-        "split"  # "split": name left, title right, a rule below  |  "band": one coloured band
-    )
-    band_bg: str = ""  # fill of the band
-    bar: str = ""  # colour of a strip across the top edge of every page ("" = none)
-    name_size: float = 16
-    title_size: float = 18
+    header: str          = "split"      # "split": name left, title right, a rule below  |  "band": one coloured band
+    band_bg: str         = ""           # fill of the band
+    bar: str             = ""           # colour of a strip across the top edge of every page ("" = none)
+    name_size: float     = 16
+    title_size: float    = 18
     title_leading: float = 12
-    rule_width: float = 1
+    rule_width: float    = 1
     # --- brand colour ---------------------------------------------------------------------------------------
-    accent: str = ""  # the template's accent colour ("" = it takes no brand colour)
-    recipe: str = (
-        ""  # how its colours follow the accent: "modern" | "minimal" | "corporate"
-    )
+    accent: str = ""                    # the template's accent colour ("" = it takes no brand colour)
+    recipe: str = ""                    # how its colours follow the accent: "modern" | "minimal" | "corporate"
 
     @property
     def brandable(self) -> bool:
@@ -2522,127 +2164,48 @@ class PDFTemplate:
 
 def _recipe_modern(a: str) -> Dict[str, Any]:
     on = _pdf_readable_on(a)
-    return dict(
-        title_color=a,
-        label_color=a,
-        rule=a,
-        bar=a,
-        meta_bg=_pdf_tint(a, 0.94),
-        meta_border=_pdf_tint(a, 0.80),
-        head_bg=a,
-        head_fg=on,
-        row_line=_pdf_tint(a, 0.86),
-        end_line=a,
-        zebra=_pdf_tint(a, 0.965),
-        pay_head_bg=a,
-        pay_head_fg=on,
-        total_bg=a,
-        total_fg=on,
-    )
+    return dict(title_color=a, label_color=a, rule=a, bar=a, meta_bg=_pdf_tint(a, 0.94), meta_border=_pdf_tint(a, 0.80),
+                head_bg=a, head_fg=on, row_line=_pdf_tint(a, 0.86), end_line=a, zebra=_pdf_tint(a, 0.965),
+                pay_head_bg=a, pay_head_fg=on, total_bg=a, total_fg=on)
 
 
 def _recipe_minimal(a: str) -> Dict[str, Any]:
-    return dict(
-        title_color=a,
-        rule=a,
-        meta_lines=_pdf_tint(a, 0.70),
-        head_rule=a,
-        end_line=a,
-        total_rule=a,
-    )
+    return dict(title_color=a, rule=a, meta_lines=_pdf_tint(a, 0.70), head_rule=a, end_line=a, total_rule=a)
 
 
 def _recipe_corporate(a: str) -> Dict[str, Any]:
     on = _pdf_readable_on(a)
-    return dict(
-        band_bg=a,
-        name_color=on,
-        title_color=on,
-        tagline_color=_pdf_mix(on, a, 0.25),
-        label_color=a,
-        meta_bg=_pdf_tint(a, 0.95),
-        meta_border=_pdf_tint(a, 0.65),
-        head_bg=a,
-        head_fg=on,
-        grid_line=_pdf_tint(a, 0.55),
-        end_line=a,
-        pay_head_bg=a,
-        pay_head_fg=on,
-        total_bg=a,
-        total_fg=on,
-    )
+    return dict(band_bg=a, name_color=on, title_color=on, tagline_color=_pdf_mix(on, a, 0.25), label_color=a,
+                meta_bg=_pdf_tint(a, 0.95), meta_border=_pdf_tint(a, 0.65), head_bg=a, head_fg=on, grid_line=_pdf_tint(a, 0.55),
+                end_line=a, pay_head_bg=a, pay_head_fg=on, total_bg=a, total_fg=on)
 
 
 _RECIPES: Dict[str, Callable[[str], Dict[str, Any]]] = {
-    "modern": _recipe_modern,
-    "minimal": _recipe_minimal,
-    "corporate": _recipe_corporate,
+    "modern": _recipe_modern, "minimal": _recipe_minimal, "corporate": _recipe_corporate,
 }
 
 PDF_TEMPLATE_CLASSIC = PDFTemplate(
-    "classic",
-    "Classic",
-    "The look Vyaprix invoices have always had: a plain letterhead and a dark table header.",
-)
+    "classic", "Classic", "The look Vyaprix invoices have always had: a plain letterhead and a dark table header.")
 PDF_TEMPLATE_MODERN = PDFTemplate(
-    "modern",
-    "Modern",
-    "A bold accent colour: a colour bar on every page, a coloured table header, tinted rows and a "
-    "coloured total.",
-    name_color="#111827",
-    title_size=22,
-    title_leading=26,
-    rule_width=2,
-    accent="#2563EB",
-    recipe="modern",
-).with_accent()
+    "modern", "Modern", "A bold accent colour: a colour bar on every page, a coloured table header, tinted rows and a "
+                        "coloured total.",
+    name_color="#111827", title_size=22, title_leading=26, rule_width=2,
+    accent="#2563EB", recipe="modern").with_accent()
 PDF_TEMPLATE_MINIMAL = PDFTemplate(
-    "minimal",
-    "Minimal",
-    "Clean lines and plenty of white space. Light on ink, and it photocopies well.",
-    name_color="#111827",
-    name_size=15,
-    title_size=14,
-    title_leading=18,
-    rule_width=0.6,
-    meta_bg="",
-    meta_border="",
-    head_bg="",
-    head_fg="#111827",
-    row_line="#E5E7EB",
-    end_width=0.8,
-    pay_head_bg="#F3F4F6",
-    pay_head_fg="#111827",
-    accent="#111827",
-    recipe="minimal",
-).with_accent()
+    "minimal", "Minimal", "Clean lines and plenty of white space. Light on ink, and it photocopies well.",
+    name_color="#111827", name_size=15, title_size=14, title_leading=18, rule_width=0.6, meta_bg="", meta_border="",
+    head_bg="", head_fg="#111827", row_line="#E5E7EB", end_width=0.8, pay_head_bg="#F3F4F6", pay_head_fg="#111827",
+    accent="#111827", recipe="minimal").with_accent()
 PDF_TEMPLATE_CORPORATE = PDFTemplate(
-    "corporate",
-    "Corporate",
-    "A formal look: a coloured header band, a ruled table and a boxed total.",
-    header="band",
-    name_size=17,
-    title_size=20,
-    title_leading=24,
-    grid=True,
-    accent="#1E3A5F",
-    recipe="corporate",
-).with_accent()
+    "corporate", "Corporate", "A formal look: a coloured header band, a ruled table and a boxed total.",
+    header="band", name_size=17, title_size=20, title_leading=24, grid=True,
+    accent="#1E3A5F", recipe="corporate").with_accent()
 
-PDF_TEMPLATES: Dict[str, PDFTemplate] = {
-    t.key: t
-    for t in (
-        PDF_TEMPLATE_CLASSIC,
-        PDF_TEMPLATE_MODERN,
-        PDF_TEMPLATE_MINIMAL,
-        PDF_TEMPLATE_CORPORATE,
-    )
-}
+PDF_TEMPLATES: Dict[str, PDFTemplate] = {t.key: t for t in (
+    PDF_TEMPLATE_CLASSIC, PDF_TEMPLATE_MODERN, PDF_TEMPLATE_MINIMAL, PDF_TEMPLATE_CORPORATE)}
 
 
-def pdf_template_for(
-    config: Dict[str, Any], data: Optional[Dict[str, Any]] = None
-) -> PDFTemplate:
+def pdf_template_for(config: Dict[str, Any], data: Optional[Dict[str, Any]] = None) -> PDFTemplate:
     """The template an invoice prints in: its own choice, else the one picked in Settings, else Classic -- in the
     brand colour from Settings when the template takes one."""
     settings = config.get("pdf_settings") or {}
@@ -2654,14 +2217,12 @@ def pdf_template_for(
     return chosen.with_accent(settings.get("accent_color"))
 
 
-# The status stamp ("PAID", "BALANCE DUE" ...) across a printed invoice. Settings > PDF has the general switch; an
+# The status stamp ("PAID", "BALANCE DUE" ...) across a printed invoice. Settings > Invoice Design has the general switch; an
 # invoice can override it for itself (the New Invoice form's "Status Watermark" box): '' follows Settings.
 WATERMARK_DEFAULT, WATERMARK_SHOW, WATERMARK_HIDE = "", "show", "hide"
 
 
-def watermark_enabled(
-    config: Dict[str, Any], data: Optional[Dict[str, Any]] = None
-) -> bool:
+def watermark_enabled(config: Dict[str, Any], data: Optional[Dict[str, Any]] = None) -> bool:
     """Does this invoice print with the status stamp? Its own choice (show / hide) wins, else the Settings switch."""
     own = str((data or {}).get("pdf_watermark") or "").strip().lower()
     if own == WATERMARK_SHOW:
@@ -2681,45 +2242,40 @@ class PDFGenerator:
     Every width comes from the printable width of the page, so the layout always fills A4 exactly. A long invoice flows
     onto more pages: the item table repeats its header, a very long item description may split between pages, the
     totals are kept in one piece, a running header names the invoice on every page after the first, and every page
-    says "Page x of y". What the page looks like (colours, letterhead, table style) comes from the template.
-    """
+    says "Page x of y". What the page looks like (colours, letterhead, table style) comes from the template."""
 
-    MARGIN_X, MARGIN_TOP, MARGIN_BOTTOM = 1.5, 1.8, 2.3  # centimetres
-    SUMMARY_SHARE = 0.48  # the totals box: a share of the printable width
+    MARGIN_X, MARGIN_TOP, MARGIN_BOTTOM = 1.5, 1.8, 2.3           # centimetres
+    SUMMARY_SHARE = 0.48                                          # the totals box: a share of the printable width
     # Auto-fit: an invoice that runs only a little onto a second page is printed again with tighter gaps and row padding
     # (never smaller type) and kept when that saves a page. "A little" = the last page is filled less than this share.
     TIGHT_SCALE = 0.55
     TIGHT_WHEN_LAST_PAGE_BELOW = 0.30
 
-    def __init__(
-        self,
-        data: Dict[str, Any],
-        config: Dict[str, Any],
-        payments: Optional[List[Dict]] = None,
-        out_dir: Optional[Path] = None,
-    ):
-        self.data = data
-        self.config = config
+    def __init__(self, data: Dict[str, Any], config: Dict[str, Any],
+                 payments: Optional[List[Dict]] = None, out_dir: Optional[Path] = None):
+        self.data     = data
+        self.config   = config
         self.payments = payments or []
-        self.tpl = pdf_template_for(config, data)
-        self.font = PDF_FONT
-        self.bold = f"{PDF_FONT}-Bold" if PDF_FONT != "Helvetica" else "Helvetica-Bold"
+        self.tpl      = pdf_template_for(config, data)
+        font          = ensure_pdf_fonts()
+        self.font     = font
+        self.bold     = f"{font}-Bold" if font != "Helvetica" else "Helvetica-Bold"
 
         # --- Smart File Naming to bypass Windows file locks ---
         # Defensive re-sanitize: invoice_number is validated at save time now,
         # but older rows (saved before that check existed) could still carry
         # unsafe characters, so never trust it blindly as a path component.
-        raw_number = str(data.get("invoice_number") or "NA").strip()
-        safe_number = INVALID_FILENAME_CHARS.sub("_", raw_number).strip(". ") or "NA"
+        raw_number    = str(data.get('invoice_number') or 'NA').strip()
+        safe_number   = INVALID_FILENAME_CHARS.sub('_', raw_number).strip('. ') or "NA"
         base_filename = f"Invoice-{safe_number}"
-        target_dir = out_dir or INVOICES_DIR
+        target_dir    = out_dir or INVOICES_DIR
         self.filename = target_dir / f"{base_filename}.pdf"
 
         counter = 1
         while self.filename.exists():
             try:
                 # Test if we can write to the existing file without altering it yet
-                with open(self.filename, "a"):
+                with open(self.filename, 'a'):
                     pass
                 break  # If successful, no PermissionError is thrown; we are clear to overwrite.
             except PermissionError:
@@ -2728,22 +2284,14 @@ class PDFGenerator:
                 counter += 1
         # ------------------------------------------------------
 
-        self.is_gst = bool(data.get("is_gst_invoice", 1))
-        self.tax_mode = (
-            (data.get("tax_mode") or TAX_MODE_OVERALL)
-            if self.is_gst
-            else TAX_MODE_OVERALL
-        )
-        self.styles = self._setup_styles()
-        self.page_height = (
-            A4[1] - (self.MARGIN_TOP + self.MARGIN_BOTTOM) * cm
-        )  # what a page can hold, in points
-        self.tight = False  # laying out with tighter gaps (the auto-fit pass)
-        self.tightened = False  # the tight layout is the one that was printed
-        self.page_count = 0  # pages of the last layout
-        self._room_left = (
-            0.0  # room left under the last flowable of the last layout, in points
-        )
+        self.is_gst   = bool(data.get("is_gst_invoice", 1))
+        self.tax_mode = (data.get("tax_mode") or TAX_MODE_OVERALL) if self.is_gst else TAX_MODE_OVERALL
+        self.styles   = self._setup_styles()
+        self.page_height = A4[1] - (self.MARGIN_TOP + self.MARGIN_BOTTOM) * cm      # what a page can hold, in points
+        self.tight      = False                  # laying out with tighter gaps (the auto-fit pass)
+        self.tightened  = False                  # the tight layout is the one that was printed
+        self.page_count = 0                      # pages of the last layout
+        self._room_left = 0.0                    # room left under the last flowable of the last layout, in points
 
     def _g(self, points: float) -> float:
         """A gap or padding: as designed, or scaled down in the auto-fit pass."""
@@ -2761,10 +2309,8 @@ class PDFGenerator:
         try:
             path = path.resolve()
             path.relative_to(DATA_DIR.resolve())
-        except OSError, ValueError:
-            logger.warning(
-                "Ignoring asset outside Vyaprix's ProgramData folder: %s", path
-            )
+        except (OSError, ValueError):
+            logger.warning("Ignoring asset outside Vyaprix's ProgramData folder: %s", path)
             return None
 
         if path.is_file():
@@ -2773,159 +2319,51 @@ class PDFGenerator:
 
     def _setup_styles(self) -> Dict[str, ParagraphStyle]:
         ss, base, bold, t = getSampleStyleSheet(), self.font, self.bold, self.tpl
-        ss.add(
-            ParagraphStyle(
-                "NC", fontName=base, fontSize=9, parent=ss["Normal"], leading=11
-            )
-        )
-        ss.add(ParagraphStyle("Right", parent=ss["NC"], alignment=TA_RIGHT))
-        ss.add(ParagraphStyle("Center", parent=ss["NC"], alignment=TA_CENTER))
-        ss.add(
-            ParagraphStyle(
-                "Small",
-                parent=ss["NC"],
-                fontSize=7.5,
-                textColor=colors.HexColor("#6B7280"),
-            )
-        )
-        ss.add(ParagraphStyle("SmallRight", parent=ss["Small"], alignment=TA_RIGHT))
-        ss.add(ParagraphStyle("BillTo", parent=ss["NC"], leading=11.5))
-        ss.add(
-            ParagraphStyle(
-                "PartyLabel",
-                parent=ss["NC"],
-                fontName=bold,
-                fontSize=7,
-                leading=9,
-                textColor=colors.HexColor(t.label_color),
-            )
-        )
-        ss.add(
-            ParagraphStyle(
-                "PartyName", parent=ss["NC"], fontName=bold, fontSize=10.5, leading=13
-            )
-        )
-        ss.add(
-            ParagraphStyle(
-                "ItemDesc",
-                parent=ss["NC"],
-                textColor=colors.HexColor("#6B7280"),
-                fontSize=8,
-                leading=10,
-            )
-        )
-        ss.add(
-            ParagraphStyle(
-                "CompanyName",
-                fontName=bold,
-                fontSize=t.name_size,
-                textColor=colors.HexColor(t.name_color),
-                leading=t.name_size + 2,
-            )
-        )
-        ss.add(
-            ParagraphStyle(
-                "Tagline",
-                parent=ss["NC"],
-                fontSize=8.5,
-                textColor=colors.HexColor(t.tagline_color),
-            )
-        )
-        ss.add(
-            ParagraphStyle(
-                "InvoiceTitle",
-                fontName=bold,
-                fontSize=t.title_size,
-                alignment=TA_RIGHT,
-                textColor=colors.HexColor(t.title_color),
-                leading=t.title_leading,
-            )
-        )
-        ss.add(
-            ParagraphStyle(
-                "NoteBox",
-                parent=ss["NC"],
-                fontSize=8,
-                leading=10.5,
-                textColor=colors.HexColor("#374151"),
-            )
-        )
-        ss.add(
-            ParagraphStyle(
-                "NoteText",
-                parent=ss["NC"],
-                fontSize=8,
-                leading=10.5,
-                textColor=colors.HexColor("#4B5563"),
-            )
-        )
-        ss.add(
-            ParagraphStyle(
-                "Caption",
-                parent=ss["NC"],
-                fontName=bold,
-                fontSize=7.5,
-                leading=9.5,
-                textColor=colors.HexColor(t.label_color),
-                keepWithNext=1,
-            )
-        )
-        ss.add(
-            ParagraphStyle(
-                "PayLabel",
-                parent=ss["NC"],
-                fontSize=8,
-                leading=10,
-                textColor=colors.HexColor("#6B7280"),
-            )
-        )
-        ss.add(ParagraphStyle("PayValue", parent=ss["NC"], fontSize=8.5, leading=10.5))
+        ss.add(ParagraphStyle("NC",          fontName=base, fontSize=9,  parent=ss["Normal"],   leading=11))
+        ss.add(ParagraphStyle("Right",       parent=ss["NC"], alignment=TA_RIGHT))
+        ss.add(ParagraphStyle("Center",      parent=ss["NC"], alignment=TA_CENTER))
+        ss.add(ParagraphStyle("Small",       parent=ss["NC"], fontSize=7.5, textColor=colors.HexColor("#6B7280")))
+        ss.add(ParagraphStyle("SmallRight",  parent=ss["Small"], alignment=TA_RIGHT))
+        ss.add(ParagraphStyle("BillTo",      parent=ss["NC"], leading=11.5))
+        ss.add(ParagraphStyle("PartyLabel",  parent=ss["NC"], fontName=bold, fontSize=7, leading=9,
+                              textColor=colors.HexColor(t.label_color)))
+        ss.add(ParagraphStyle("PartyName",   parent=ss["NC"], fontName=bold, fontSize=10.5, leading=13))
+        ss.add(ParagraphStyle("ItemDesc",    parent=ss["NC"], textColor=colors.HexColor("#6B7280"), fontSize=8, leading=10))
+        ss.add(ParagraphStyle("CompanyName", fontName=bold,   fontSize=t.name_size, textColor=colors.HexColor(t.name_color),
+                              leading=t.name_size + 2))
+        ss.add(ParagraphStyle("Tagline",     parent=ss["NC"], fontSize=8.5, textColor=colors.HexColor(t.tagline_color)))
+        ss.add(ParagraphStyle("InvoiceTitle",fontName=bold,   fontSize=t.title_size, alignment=TA_RIGHT,
+                              textColor=colors.HexColor(t.title_color), leading=t.title_leading))
+        ss.add(ParagraphStyle("NoteBox",     parent=ss["NC"], fontSize=8, leading=10.5, textColor=colors.HexColor("#374151")))
+        ss.add(ParagraphStyle("NoteText",    parent=ss["NC"], fontSize=8, leading=10.5, textColor=colors.HexColor("#4B5563")))
+        ss.add(ParagraphStyle("Caption",     parent=ss["NC"], fontName=bold, fontSize=7.5, leading=9.5,
+                              textColor=colors.HexColor(t.label_color), keepWithNext=1))
+        ss.add(ParagraphStyle("PayLabel",    parent=ss["NC"], fontSize=8, leading=10, textColor=colors.HexColor("#6B7280")))
+        ss.add(ParagraphStyle("PayValue",    parent=ss["NC"], fontSize=8.5, leading=10.5))
         return ss
 
     def _text_width(self, text: str, size: float, bold: bool = False) -> float:
         """How wide `text` prints, in points -- used to size the table columns from what they hold."""
         return pdfmetrics.stringWidth(text, self.bold if bold else self.font, size)
 
-    def _head_styles(
-        self, size: float = 8.0
-    ) -> Tuple[ParagraphStyle, ParagraphStyle, ParagraphStyle]:
+    def _head_styles(self, size: float = 8.0) -> Tuple[ParagraphStyle, ParagraphStyle, ParagraphStyle]:
         """Table-header text: left, right and centred, in the template's header colour."""
-        left = ParagraphStyle(
-            "HS",
-            parent=self.styles["NC"],
-            fontSize=size,
-            leading=size + 2,
-            textColor=colors.HexColor(self.tpl.head_fg),
-        )
-        return (
-            left,
-            ParagraphStyle("HSR", parent=left, alignment=TA_RIGHT),
-            ParagraphStyle("HSC", parent=left, alignment=TA_CENTER),
-        )
+        left = ParagraphStyle("HS", parent=self.styles["NC"], fontSize=size, leading=size + 2,
+                              textColor=colors.HexColor(self.tpl.head_fg))
+        return left, ParagraphStyle("HSR", parent=left, alignment=TA_RIGHT), ParagraphStyle("HSC", parent=left, alignment=TA_CENTER)
 
     # ------------------------------------------------------------------ #
     #  Letterhead, parties, reference details
     # ------------------------------------------------------------------ #
     def _build_header(self, width: float) -> Table:
-        comp = self.config.get("company_details", {})
-        left = [
-            Paragraph(
-                safe_markup(compose_your_name(self.config)), self.styles["CompanyName"]
-            )
-        ]
+        comp  = self.config.get("company_details", {})
+        left  = [Paragraph(safe_markup(compose_your_name(self.config)), self.styles["CompanyName"])]
         if d := comp.get("description"):
             left += [Spacer(1, 2), Paragraph(safe_markup(d), self.styles["Tagline"])]
 
-        status = self.data.get("status")
-        doc_title = (
-            "RECEIPT"
-            if status in (InvoiceStatus.PAID.value, InvoiceStatus.OVERPAID.value)
-            else (
-                "COMPLIMENTARY"
-                if status == InvoiceStatus.COMPLIMENTARY.value
-                else "INVOICE"
-            )
-        )
+        status    = self.data.get("status")
+        doc_title = ("RECEIPT"       if status in (InvoiceStatus.PAID.value, InvoiceStatus.OVERPAID.value) else
+                     "COMPLIMENTARY" if status == InvoiceStatus.COMPLIMENTARY.value else "INVOICE")
 
         # --- BARCODE GENERATION ---
         # Code128 only supports a limited ASCII character set, and invoice
@@ -2935,91 +2373,49 @@ class PDFGenerator:
         title_block_rows = []
         if BARCODE_AVAILABLE:
             try:
-                code128 = barcode.get(
-                    "code128",
-                    str(self.data.get("invoice_number") or "000"),
-                    writer=ImageWriter(),
-                )
+                code128 = barcode.get('code128', str(self.data.get('invoice_number') or '000'), writer=ImageWriter())
                 buffer = io.BytesIO()
-                code128.write(
-                    buffer,
-                    options={
-                        "write_text": False,
-                        "module_width": 0.2,
-                        "module_height": 5.0,
-                    },
-                )
+                code128.write(buffer, options={"write_text": False, "module_width": 0.2, "module_height": 5.0})
                 buffer.seek(0)
-                title_block_rows.append(
-                    [Image(buffer, width=3.5 * cm, height=0.8 * cm)]
-                )
+                title_block_rows.append([Image(buffer, width=3.5*cm, height=0.8*cm)])
             except Exception as exc:
-                logger.warning(
-                    f"Skipping barcode for invoice "
-                    f"{self.data.get('invoice_number')!r}: {exc}"
-                )
+                logger.warning(f"Skipping barcode for invoice "
+                            f"{self.data.get('invoice_number')!r}: {exc}")
         # --------------------------
 
         # Stack the barcode ABOVE the status title (barcode omitted if it failed)
         title_block_rows.append([Paragraph(doc_title, self.styles["InvoiceTitle"])])
-        title_block = Table(
-            title_block_rows, style=[("ALIGN", (0, 0), (-1, -1), "RIGHT")]
-        )
+        title_block = Table(title_block_rows, style=[("ALIGN", (0,0), (-1,-1), "RIGHT")])
 
         t = self.tpl
         band = t.header == "band"
         half = width / 2.0
         if logo := self._asset("logo"):
             try:
-                img = Image(str(logo), 2.0 * cm, 2.0 * cm, kind="proportional")
-                logo_style = [
-                    ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-                    ("LEFTPADDING", (0, 0), (-1, -1), 0),
-                ]
-                if (
-                    band
-                ):  # on the coloured band the logo sits on a white tile, so any logo stays readable
-                    logo_style += [
-                        ("BACKGROUND", (0, 0), (0, 0), colors.white),
-                        ("ALIGN", (0, 0), (0, 0), "CENTER"),
-                        ("LEFTPADDING", (1, 0), (1, 0), 10),
-                    ]
-                left_side = Table(
-                    [[img, left]],
-                    colWidths=[2.5 * cm, half - 2.5 * cm - (24 if band else 0)],
-                    style=logo_style,
-                )
+                img = Image(str(logo), 2.0*cm, 2.0*cm, kind="proportional")
+                logo_style = [("VALIGN",(0,0),(-1,-1),"MIDDLE"), ("LEFTPADDING",(0,0),(-1,-1),0)]
+                if band:        # on the coloured band the logo sits on a white tile, so any logo stays readable
+                    logo_style += [("BACKGROUND",(0,0),(0,0),colors.white), ("ALIGN",(0,0),(0,0),"CENTER"),
+                                   ("LEFTPADDING",(1,0),(1,0),10)]
+                left_side = Table([[img, left]], colWidths=[2.5*cm, half - 2.5*cm - (24 if band else 0)], style=logo_style)
             except Exception:
                 left_side = left
         else:
             left_side = left
 
         if band:
-            return Table(
-                [[left_side, title_block]],
-                colWidths=[half, half],
-                style=[
-                    ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor(t.band_bg)),
-                    ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-                    ("ALIGN", (1, 0), (1, -1), "RIGHT"),
-                    ("LEFTPADDING", (0, 0), (-1, -1), 12),
-                    ("RIGHTPADDING", (0, 0), (-1, -1), 12),
-                    ("TOPPADDING", (0, 0), (-1, -1), self._g(12)),
-                    ("BOTTOMPADDING", (0, 0), (-1, -1), self._g(12)),
-                ],
-            )
-        return Table(
-            [[left_side, title_block]],
-            colWidths=[half, half],
-            style=[
-                ("VALIGN", (0, 0), (-1, -1), "TOP"),
-                ("ALIGN", (1, 0), (1, -1), "RIGHT"),
-                ("LEFTPADDING", (0, 0), (-1, -1), 0),
-                ("RIGHTPADDING", (0, 0), (-1, -1), 0),
-                ("LINEBELOW", (0, 0), (-1, -1), t.rule_width, colors.HexColor(t.rule)),
-                ("BOTTOMPADDING", (0, 0), (-1, -1), self._g(10)),
-            ],
-        )
+            return Table([[left_side, title_block]], colWidths=[half, half], style=[
+                ("BACKGROUND",(0,0),(-1,-1),colors.HexColor(t.band_bg)),
+                ("VALIGN",(0,0),(-1,-1),"MIDDLE"), ("ALIGN",(1,0),(1,-1),"RIGHT"),
+                ("LEFTPADDING",(0,0),(-1,-1),12),   ("RIGHTPADDING",(0,0),(-1,-1),12),
+                ("TOPPADDING",(0,0),(-1,-1),self._g(12)),    ("BOTTOMPADDING",(0,0),(-1,-1),self._g(12)),
+            ])
+        return Table([[left_side, title_block]], colWidths=[half, half], style=[
+            ("VALIGN",(0,0),(-1,-1),"TOP"), ("ALIGN",(1,0),(1,-1),"RIGHT"),
+            ("LEFTPADDING",(0,0),(-1,-1),0),   ("RIGHTPADDING",(0,0),(-1,-1),0),
+            ("LINEBELOW",(0,0),(-1,-1),t.rule_width,colors.HexColor(t.rule)),
+            ("BOTTOMPADDING",(0,0),(-1,-1),self._g(10)),
+        ])
 
     def _build_parties(self, width: float) -> Table:
         """BILL TO and FROM, side by side."""
@@ -3027,20 +2423,15 @@ class PDFGenerator:
         if self.is_gst:
             if cgstin := self.data.get("client_gstin"):
                 cg = f"GSTIN: {safe_markup(cgstin)}"
-            if ygstin := _real_value(
-                self.config.get("company_details", {}).get("gstin"), _SAMPLE_GSTIN
-            ):
+            if ygstin := _real_value(self.config.get("company_details", {}).get("gstin"), _SAMPLE_GSTIN):
                 yg = f"GSTIN: {safe_markup(ygstin)}"
         # Escape first, THEN turn newlines into <br/> -- safe_markup() only
         # touches &/</>, so it won't disturb the newlines we're about to replace.
-        your_c = safe_markup(self.data.get("your_contact")).replace("\n", "<br/>")
+        your_c   = safe_markup(self.data.get("your_contact")).replace("\n", "<br/>")
         client_c = safe_markup(self.data.get("client_contact")).replace("\n", "<br/>")
 
         def block(label: str, name: str, *lines: str) -> List[Any]:
-            cell = [
-                Paragraph(label, self.styles["PartyLabel"]),
-                Paragraph(name, self.styles["PartyName"]),
-            ]
+            cell = [Paragraph(label, self.styles["PartyLabel"]), Paragraph(name, self.styles["PartyName"])]
             body = "<br/>".join(line for line in lines if line)
             if body:
                 cell.append(Paragraph(body, self.styles["BillTo"]))
@@ -3048,93 +2439,53 @@ class PDFGenerator:
 
         bill = block("BILL TO", safe_markup(self.data.get("bill_to")), client_c, cg)
         mine = block("FROM", safe_markup(self.data.get("your_name")), your_c, yg)
-        return Table(
-            [[bill, mine]],
-            colWidths=[width / 2.0, width / 2.0],
-            style=[
-                ("VALIGN", (0, 0), (-1, -1), "TOP"),
-                ("LEFTPADDING", (0, 0), (0, 0), 0),
-                ("RIGHTPADDING", (0, 0), (0, 0), 14),
-                ("LEFTPADDING", (1, 0), (1, 0), 14),
-                ("RIGHTPADDING", (1, 0), (1, 0), 0),
-            ],
-        )
+        return Table([[bill, mine]], colWidths=[width / 2.0, width / 2.0], style=[
+            ("VALIGN",(0,0),(-1,-1),"TOP"),
+            ("LEFTPADDING",(0,0),(0,0),0),  ("RIGHTPADDING",(0,0),(0,0),14),
+            ("LEFTPADDING",(1,0),(1,0),14), ("RIGHTPADDING",(1,0),(1,0),0),
+        ])
 
     def _build_meta(self, width: float) -> Table:
         """The reference details as a strip of labelled cells: invoice number and date, due date, payment terms and,
-        when they are used, the customer's PO number, the place of supply and the reverse-charge flag.
-        """
-        date_str = parse_date(
-            self.data.get("invoice_date"), DB_DATE_FORMAT, DISPLAY_DATE_FORMAT
-        )
-        free = not self.data.get("is_complimentary")
-        cells = [
-            ("Invoice #", safe_markup(self.data.get("invoice_number"))),
-            ("Invoice Date", date_str),
-        ]
-        if free and self.data.get("due_date"):
-            cells.append(
-                (
-                    "Due Date",
-                    parse_date(
-                        self.data.get("due_date"), DB_DATE_FORMAT, DISPLAY_DATE_FORMAT
-                    ),
-                )
-            )
-        if free:
-            cells.append(
-                ("Payment Terms", safe_markup(self.data.get("payment_terms") or "N/A"))
-            )
+        when they are used, the customer's PO number, the place of supply and the reverse-charge flag."""
+        date_str = parse_date(self.data.get("invoice_date"), DB_DATE_FORMAT, DISPLAY_DATE_FORMAT)
+        billable = not self.data.get("is_complimentary")                  # a free (complimentary) invoice is not billable
+        cells    = [("Invoice #", safe_markup(self.data.get("invoice_number"))), ("Invoice Date", date_str)]
+        if billable and self.data.get("due_date"):
+            cells.append(("Due Date", parse_date(self.data.get("due_date"), DB_DATE_FORMAT, DISPLAY_DATE_FORMAT)))
+        terms = str(self.data.get("payment_terms") or "").strip()
+        cells.append(("Payment Terms", safe_markup(terms or ("N/A" if billable else NO_PAYMENT_TERMS))))   # a free invoice says so
+        if billable:
             if po := str(self.data.get("po_number") or "").strip():
                 cells.append(("PO / Ref #", safe_markup(po)))
-            if self.is_gst and (
-                place := str(self.data.get("place_of_supply") or "").strip()
-            ):
+            if self.is_gst and (place := str(self.data.get("place_of_supply") or "").strip()):
                 cells.append(("Place of Supply", safe_markup(place)))
             if self.is_gst and self.data.get("reverse_charge"):
                 cells.append(("Reverse Charge", "Yes"))
 
         t = self.tpl
         count = len(cells)
-        per_row = (
-            count if count <= 4 else (3 if count <= 6 else 4)
-        )  # 5-6 cells: two even rows of three
+        per_row = count if count <= 4 else (3 if count <= 6 else 4)        # 5-6 cells: two even rows of three
         rows: List[List[Any]] = []
         for start in range(0, count, per_row):
-            chunk = cells[start : start + per_row]
-            row = [
-                Paragraph(
-                    f"<font size='7' color='{t.label_color}'>{label}</font><br/><b>{value}</b>",
-                    self.styles["NC"],
-                )
-                for label, value in chunk
-            ]
+            chunk = cells[start:start + per_row]
+            row = [Paragraph(f"<font size='7' color='{t.label_color}'>{label}</font><br/><b>{value}</b>", self.styles["NC"])
+                   for label, value in chunk]
             rows.append(row + [""] * (per_row - len(row)))
         style: List[Tuple] = []
         if t.meta_border:
-            style.append(("BOX", (0, 0), (-1, -1), 1, colors.HexColor(t.meta_border)))
+            style.append(("BOX",(0,0),(-1,-1),1,colors.HexColor(t.meta_border)))
         if t.meta_bg:
-            style.append(("BACKGROUND", (0, 0), (-1, -1), colors.HexColor(t.meta_bg)))
+            style.append(("BACKGROUND",(0,0),(-1,-1),colors.HexColor(t.meta_bg)))
         if t.meta_lines:
-            style += [
-                ("LINEABOVE", (0, 0), (-1, 0), 0.6, colors.HexColor(t.meta_lines)),
-                ("LINEBELOW", (0, -1), (-1, -1), 0.6, colors.HexColor(t.meta_lines)),
-            ]
-        pad = (
-            8 if (t.meta_border or t.meta_bg) else 0
-        )  # an unboxed strip lines up with the page margin
-        style += [
-            ("VALIGN", (0, 0), (-1, -1), "TOP"),
-            ("TOPPADDING", (0, 0), (-1, -1), self._g(6)),
-            ("BOTTOMPADDING", (0, 0), (-1, -1), self._g(6)),
-            ("LEFTPADDING", (0, 0), (-1, -1), pad),
-            ("RIGHTPADDING", (0, 0), (-1, -1), 4),
-        ]
+            style += [("LINEABOVE",(0,0),(-1,0),0.6,colors.HexColor(t.meta_lines)),
+                      ("LINEBELOW",(0,-1),(-1,-1),0.6,colors.HexColor(t.meta_lines))]
+        pad = 8 if (t.meta_border or t.meta_bg) else 0          # an unboxed strip lines up with the page margin
+        style += [("VALIGN",(0,0),(-1,-1),"TOP"), ("TOPPADDING",(0,0),(-1,-1),self._g(6)), ("BOTTOMPADDING",(0,0),(-1,-1),self._g(6)),
+                  ("LEFTPADDING",(0,0),(-1,-1),pad), ("RIGHTPADDING",(0,0),(-1,-1),4)]
         if not pad:
-            style.append(("LEFTPADDING", (1, 0), (-1, -1), 8))
-        return Table(
-            rows, colWidths=[width / per_row] * per_row, style=TableStyle(style)
-        )
+            style.append(("LEFTPADDING",(1,0),(-1,-1),8))
+        return Table(rows, colWidths=[width / per_row] * per_row, style=TableStyle(style))
 
     # ------------------------------------------------------------------ #
     #  Items
@@ -3142,7 +2493,7 @@ class PDFGenerator:
     def _items(self) -> List[Dict[str, Any]]:
         try:
             items = json.loads(self.data.get("items") or "[]")
-        except TypeError, ValueError:
+        except (TypeError, ValueError):
             items = []
         return items if isinstance(items, list) else []
 
@@ -3151,44 +2502,29 @@ class PDFGenerator:
         t = self.tpl
         style: List[Tuple] = []
         if t.head_bg:
-            style.append(("BACKGROUND", (0, 0), (-1, 0), colors.HexColor(t.head_bg)))
+            style.append(("BACKGROUND",(0,0),(-1,0),colors.HexColor(t.head_bg)))
         style += [
-            ("VALIGN", (0, 0), (-1, -1), "TOP"),
-            ("LINEBELOW", (0, 1), (-1, -2), 1, colors.HexColor(t.row_line)),
-            ("LINEBELOW", (0, -1), (-1, -1), t.end_width, colors.HexColor(t.end_line)),
-            ("TOPPADDING", (0, 0), (-1, -1), self._g(5)),
-            ("BOTTOMPADDING", (0, 0), (-1, -1), self._g(5)),
-            ("LEFTPADDING", (0, 0), (-1, -1), 6),
-            ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+            ("VALIGN",(0,0),(-1,-1),"TOP"),
+            ("LINEBELOW",(0,1),(-1,-2),1,colors.HexColor(t.row_line)),
+            ("LINEBELOW",(0,-1),(-1,-1),t.end_width,colors.HexColor(t.end_line)),
+            ("TOPPADDING",(0,0),(-1,-1),self._g(5)),   ("BOTTOMPADDING",(0,0),(-1,-1),self._g(5)),
+            ("LEFTPADDING",(0,0),(-1,-1),6),  ("RIGHTPADDING",(0,0),(-1,-1),6),
         ]
         if t.head_rule:
-            style.append(
-                ("LINEBELOW", (0, 0), (-1, 0), 1.2, colors.HexColor(t.head_rule))
-            )
+            style.append(("LINEBELOW",(0,0),(-1,0),1.2,colors.HexColor(t.head_rule)))
         if t.zebra:
-            style += [
-                ("BACKGROUND", (0, r), (-1, r), colors.HexColor(t.zebra))
-                for r in range(2, last_row + 1, 2)
-            ]
+            style += [("BACKGROUND",(0,r),(-1,r),colors.HexColor(t.zebra)) for r in range(2, last_row + 1, 2)]
         if t.grid:
-            style.append(("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor(t.grid_line)))
+            style.append(("GRID",(0,0),(-1,-1),0.5,colors.HexColor(t.grid_line)))
         return style
 
-    def _items_table(
-        self, rows: List[List[Any]], widths: List[float], style: List[Tuple]
-    ) -> Table:
+    def _items_table(self, rows: List[List[Any]], widths: List[float], style: List[Tuple]) -> Table:
         """The item table, its header repeated on every page. A row is never cut between two pages -- unless it is
         taller than a whole page (an enormous description), when it has to be."""
         table = Table(rows, colWidths=widths, repeatRows=1, style=TableStyle(style))
         table.wrap(sum(widths), self.page_height)
         if max(getattr(table, "_rowHeights", None) or [0]) > self.page_height - 2 * cm:
-            table = Table(
-                rows,
-                colWidths=widths,
-                repeatRows=1,
-                splitInRow=1,
-                style=TableStyle(style),
-            )
+            table = Table(rows, colWidths=widths, repeatRows=1, splitInRow=1, style=TableStyle(style))
         return table
 
     def _build_items(self, width: float) -> Table:
@@ -3198,74 +2534,37 @@ class PDFGenerator:
         if any(item_is_extended(i) for i in items):
             return self._build_items_full(items, width)
         hs, hsr, _hsc = self._head_styles()
-        rows = [
-            [
-                Paragraph("<b>ITEM / DESCRIPTION</b>", hs),
-                Paragraph("<b>AMOUNT</b>", hsr),
-            ]
-        ]
+        rows = [[Paragraph("<b>ITEM / DESCRIPTION</b>", hs), Paragraph("<b>AMOUNT</b>", hsr)]]
         for item in items:
-            title = item.get("title") or ""
-            desc = item.get("description") or ""
-            amount = safe_float(item.get("amount"))
+            title  = item.get("title")       or ""
+            desc   = item.get("description") or ""
+            amount = item_net_amount(item)
             if not title.strip() and not desc.strip() and amount == 0:
-                rows.append(
-                    [
-                        [Paragraph("<br/>", self.styles["NC"])],
-                        Paragraph("", self.styles["Right"]),
-                    ]
-                )
+                rows.append([[Paragraph("<br/>", self.styles["NC"])], Paragraph("", self.styles["Right"])])
             else:
                 cell = [Paragraph(f"<b>{safe_markup(title)}</b>", self.styles["NC"])]
                 if desc.strip():
                     cell.append(Paragraph(safe_markup(desc), self.styles["ItemDesc"]))
-                rows.append(
-                    [
-                        cell,
-                        Paragraph(
-                            f"{CURRENCY_SYMBOL}{amount:,.2f}", self.styles["Right"]
-                        ),
-                    ]
-                )
+                rows.append([cell, Paragraph(f"{CURRENCY_SYMBOL}{amount:,.2f}", self.styles["Right"])])
         # the amount column is as wide as the biggest figure needs (never less than a fifth of the page)
-        figure = max(
-            [
-                self._text_width(
-                    f"{CURRENCY_SYMBOL}{safe_float(i.get('amount')):,.2f}", 9
-                )
-                for i in items
-            ]
-            + [0.0]
-        )
+        figure = max([self._text_width(f"{CURRENCY_SYMBOL}{item_net_amount(i):,.2f}", 9) for i in items] + [0.0])
         amount_w = min(max(width * 0.20, figure + 16), width * 0.5)
-        return self._items_table(
-            rows,
-            [width - amount_w, amount_w],
-            [*self._items_style(len(rows) - 1), ("ALIGN", (1, 0), (1, -1), "RIGHT")],
-        )
+        return self._items_table(rows, [width - amount_w, amount_w],
+                                 [*self._items_style(len(rows) - 1), ("ALIGN",(1,0),(1,-1),"RIGHT")])
 
     # the share of the page each number column of the full item table asks for, in per cent -- a column takes more
     # when its figures need it (see _build_items_full)
-    _ITEM_COLUMN_SHARES = {
-        "no": 4.5,
-        "hsn": 10.5,
-        "qty": 10.5,
-        "rate": 12.5,
-        "disc": 12.0,
-        "gst": 6.5,
-        "amount": 14.5,
-    }
+    _ITEM_COLUMN_SHARES = {"no": 4.5, "hsn": 10.5, "qty": 10.5, "rate": 12.5, "disc": 12.0, "gst": 6.5, "amount": 14.5}
 
     def _build_items_full(self, items: List[Dict[str, Any]], width: float) -> Table:
         """# | item (+ description) | HSN/SAC | quantity + unit | rate | discount | GST % | amount. The HSN/SAC column
         only appears when a line has a code, the discount column when a line has a discount and the GST column when GST
         is charged per item. The number columns are as wide as their longest figure needs (measured, never guessed) and
-        the item column takes the rest, so no figure is ever cut and the table always spans the page exactly.
-        """
+        the item column takes the rest, so no figure is ever cut and the table always spans the page exactly."""
         per_item = self.is_gst and self.tax_mode == TAX_MODE_PER_ITEM
         default_rate = safe_float(self.data.get("tax_rate"))
-        show_hsn = any(str(i.get("hsn") or "").strip() for i in items)
-        show_disc = any(safe_float(i.get("discount")) > 0 for i in items)
+        show_hsn  = any(str(i.get("hsn") or "").strip() for i in items)
+        show_disc = any(item_discount(i) > 0 for i in items)
         cols: List[Tuple[str, str]] = [("no", "#"), ("item", "ITEM / DESCRIPTION")]
         if show_hsn:
             cols.append(("hsn", "HSN/SAC"))
@@ -3281,38 +2580,29 @@ class PDFGenerator:
         number = 0
         for item in items:
             title = str(item.get("title") or "")
-            desc = str(item.get("description") or "")
+            desc  = str(item.get("description") or "")
             gross = safe_float(item.get("amount"))
             if not title.strip() and not desc.strip() and gross == 0:
-                lines.append(None)  # a blank line stays a blank row
+                lines.append(None)                                        # a blank line stays a blank row
                 continue
             number += 1
-            qty = item_qty(item)
+            qty  = item_qty(item)
             unit = str(item.get("unit") or "").strip()
             raw_rate = item.get("rate")
-            rate = (
-                safe_float(raw_rate)
-                if raw_rate not in (None, "")
-                else (gross / qty if qty else gross)
-            )
+            rate = safe_float(raw_rate) if raw_rate not in (None, "") else (gross / qty if qty else gross)
             line: Dict[str, Any] = {
-                "title": title,
-                "desc": desc,
-                "no": str(number),
+                "title": title, "desc": desc, "no": str(number),
                 "hsn": str(item.get("hsn") or "").strip() or "-",
                 "qty": fmt_qty(qty) + (f" {unit}" if unit else ""),
-                "rate": f"{CURRENCY_SYMBOL}{rate:,.2f}",
-                "amount": f"{CURRENCY_SYMBOL}{gross:,.2f}",
+                "rate": f"{CURRENCY_SYMBOL}{rate:,.2f}", "amount": f"{CURRENCY_SYMBOL}{item_net_amount(item):,.2f}",
                 "disc_pct": "",
             }
-            disc = safe_float(item.get("discount"))
+            disc = item_discount(item)
             line["disc"] = f"{CURRENCY_SYMBOL}{disc:,.2f}" if disc > 0 else "-"
             if disc > 0 and item.get("disc_type") == "percent":
                 line["disc_pct"] = f"({safe_float(item.get('disc_value')):g}%)"
             raw_tax = item.get("tax_rate")
-            line["gst"] = (
-                f"{(default_rate if raw_tax in (None, '') else safe_float(raw_tax, default_rate)):g}%"
-            )
+            line["gst"] = f"{(default_rate if raw_tax in (None, '') else safe_float(raw_tax, default_rate)):g}%"
             lines.append(line)
 
         # --- column widths ---------------------------------------------------------------------------------------
@@ -3326,31 +2616,16 @@ class PDFGenerator:
                 longest = self._text_width(header, size - 1, bold=True)
                 for line in lines:
                     if line:
-                        longest = max(
-                            longest,
-                            self._text_width(line[key], size),
-                            (
-                                self._text_width(line["disc_pct"], size - 1)
-                                if key == "disc"
-                                else 0.0
-                            ),
-                        )
-                share = (
-                    self._ITEM_COLUMN_SHARES[key]
-                    / 100.0
-                    * width
-                    * (1.0 if attempt == 0 else 0.92)
-                )
+                        longest = max(longest, self._text_width(line[key], size),
+                                      self._text_width(line["disc_pct"], size - 1) if key == "disc" else 0.0)
+                share = self._ITEM_COLUMN_SHARES[key] / 100.0 * width * (1.0 if attempt == 0 else 0.92)
                 fixed[key] = max(share, longest + 2 * pad + 2)
             item_w = width - sum(fixed.values())
             if item_w >= max(width * 0.30, 140.0):
                 break
-            size, pad = (
-                8.0,
-                4.0,
-            )  # the figures need so much room that the item column would be too
-            # narrow: print them a size smaller, with less padding
-        if item_w < 60.0:  # extreme figures even at the smaller size: squeeze them all
+            size, pad = 8.0, 4.0                    # the figures need so much room that the item column would be too
+                                                    # narrow: print them a size smaller, with less padding
+        if item_w < 60.0:                           # extreme figures even at the smaller size: squeeze them all
             scale = (width - 60.0) / sum(fixed.values())
             fixed = {k: v * scale for k, v in fixed.items()}
             item_w = 60.0
@@ -3359,67 +2634,34 @@ class PDFGenerator:
         # --- the cells -------------------------------------------------------------------------------------------
         hs, hsr, hsc = self._head_styles()
         head_style = {"no": hsc, "item": hs, "hsn": hsc}
-        num = ParagraphStyle(
-            "ItemNum",
-            parent=self.styles["NC"],
-            fontSize=size,
-            leading=size + 2,
-            alignment=TA_RIGHT,
-        )
-        mid = ParagraphStyle("ItemMid", parent=num, alignment=TA_CENTER)
-        rows = [
-            [
-                Paragraph(f"<b>{header}</b>", head_style.get(key, hsr))
-                for key, header in cols
-            ]
-        ]
+        num  = ParagraphStyle("ItemNum", parent=self.styles["NC"], fontSize=size, leading=size + 2, alignment=TA_RIGHT)
+        mid  = ParagraphStyle("ItemMid", parent=num, alignment=TA_CENTER)
+        rows = [[Paragraph(f"<b>{header}</b>", head_style.get(key, hsr)) for key, header in cols]]
         for line in lines:
             if line is None:
-                rows.append(
-                    [
-                        (
-                            [Paragraph("<br/>", self.styles["NC"])]
-                            if key == "item"
-                            else Paragraph("", num)
-                        )
-                        for key, _ in cols
-                    ]
-                )
+                rows.append([[Paragraph("<br/>", self.styles["NC"])] if key == "item" else Paragraph("", num) for key, _ in cols])
                 continue
-            cell = [
-                Paragraph(f"<b>{safe_markup(line['title'])}</b>", self.styles["NC"])
-            ]
+            cell = [Paragraph(f"<b>{safe_markup(line['title'])}</b>", self.styles["NC"])]
             if line["desc"].strip():
-                cell.append(
-                    Paragraph(safe_markup(line["desc"]), self.styles["ItemDesc"])
-                )
+                cell.append(Paragraph(safe_markup(line["desc"]), self.styles["ItemDesc"]))
             disc_cell = safe_markup(line["disc"])
             if line["disc_pct"]:
                 disc_cell += f"<br/><font size='{size - 1:g}' color='#6B7280'>{safe_markup(line['disc_pct'])}</font>"
             values: Dict[str, Any] = {
-                "no": Paragraph(line["no"], mid),
-                "item": cell,
-                "hsn": Paragraph(safe_markup(line["hsn"]), mid),
-                "qty": Paragraph(safe_markup(line["qty"]), num),
-                "rate": Paragraph(safe_markup(line["rate"]), num),
-                "disc": Paragraph(disc_cell, num),
-                "gst": Paragraph(safe_markup(line["gst"]), num),
+                "no": Paragraph(line["no"], mid), "item": cell, "hsn": Paragraph(safe_markup(line["hsn"]), mid),
+                "qty": Paragraph(safe_markup(line["qty"]), num), "rate": Paragraph(safe_markup(line["rate"]), num),
+                "disc": Paragraph(disc_cell, num), "gst": Paragraph(safe_markup(line["gst"]), num),
                 "amount": Paragraph(safe_markup(line["amount"]), num),
             }
             rows.append([values[key] for key, _ in cols])
         style = [*self._items_style(len(rows) - 1)]
         keys = [key for key, _ in cols]
         first_number = keys.index("qty")
-        style += [
-            ("ALIGN", (first_number, 0), (-1, -1), "RIGHT"),
-            ("ALIGN", (0, 0), (0, -1), "CENTER"),
-            ("LEFTPADDING", (2, 0), (-1, -1), pad),
-            ("RIGHTPADDING", (2, 0), (-1, -1), pad),
-            ("LEFTPADDING", (0, 0), (0, -1), pad),
-            ("RIGHTPADDING", (0, 0), (0, -1), pad),
-        ]
+        style += [("ALIGN",(first_number,0),(-1,-1),"RIGHT"), ("ALIGN",(0,0),(0,-1),"CENTER"),
+                  ("LEFTPADDING",(2,0),(-1,-1),pad), ("RIGHTPADDING",(2,0),(-1,-1),pad),
+                  ("LEFTPADDING",(0,0),(0,-1),pad), ("RIGHTPADDING",(0,0),(0,-1),pad)]
         if show_hsn:
-            style.append(("ALIGN", (2, 0), (2, -1), "CENTER"))
+            style.append(("ALIGN",(2,0),(2,-1),"CENTER"))
         return self._items_table(rows, widths, style)
 
     # ------------------------------------------------------------------ #
@@ -3430,292 +2672,127 @@ class PDFGenerator:
         invoice has; the rate-wise split goes into the GST summary beside it."""
         right = self.styles["Right"]
         total_paid = sum(safe_float(p.get("amount")) for p in self.payments)
-        _status, balance, credit = DatabaseManager.compute_payment_status(
-            totals["grand_total"], total_paid
-        )
+        _status, balance, credit = DatabaseManager.compute_payment_status(totals["grand_total"], total_paid)
 
-        rows = [
-            [
-                Paragraph("Subtotal", right),
-                Paragraph(fmt_money(totals["subtotal"]), right),
-            ]
-        ]
+        rows = [[Paragraph("Subtotal", right), Paragraph(fmt_money(totals['subtotal']), right)]]
         if totals["total_discount"] > 0:
-            rows.append(
-                [
-                    Paragraph("Discount", right),
-                    Paragraph(f"- {fmt_money(totals['total_discount'])}", right),
-                ]
-            )
+            rows.append([Paragraph("Discount", right), Paragraph(f"- {fmt_money(totals['total_discount'])}", right)])
 
         # --- IGST vs CGST/SGST PDF Rendering Logic ---
         taxed = [g for g in totals["tax_groups"] if g["rate"] > 0]
         if self.is_gst and taxed:
-            rows.append(
-                [
-                    Paragraph("Taxable Amount", right),
-                    Paragraph(fmt_money(totals["taxable"]), right),
-                ]
-            )
+            rows.append([Paragraph("Taxable Amount", right), Paragraph(fmt_money(totals['taxable']), right)])
             several = len(taxed) > 1
             if self.data.get("gst_type") == "IGST":
-                rows.append(
-                    [
-                        Paragraph(
-                            "IGST" if several else f"IGST ({taxed[0]['rate']:g}%)",
-                            right,
-                        ),
-                        Paragraph(fmt_money(totals["tax"]), right),
-                    ]
-                )
+                rows.append([Paragraph("IGST" if several else f"IGST ({taxed[0]['rate']:g}%)", right),
+                             Paragraph(fmt_money(totals["tax"]), right)])
             else:
                 half_rate = taxed[0]["rate"] / 2.0
                 rows += [
-                    [
-                        Paragraph(
-                            "CGST" if several else f"CGST ({half_rate:g}%)", right
-                        ),
-                        Paragraph(fmt_money(totals["cgst"]), right),
-                    ],
-                    [
-                        Paragraph(
-                            "SGST" if several else f"SGST ({half_rate:g}%)", right
-                        ),
-                        Paragraph(fmt_money(totals["sgst"]), right),
-                    ],
+                    [Paragraph("CGST" if several else f"CGST ({half_rate:g}%)", right),
+                     Paragraph(fmt_money(totals["cgst"]), right)],
+                    [Paragraph("SGST" if several else f"SGST ({half_rate:g}%)", right),
+                     Paragraph(fmt_money(totals["sgst"]), right)],
                 ]
         # ---------------------------------------------
         if totals["round_off"]:
             sign = "+" if totals["round_off"] > 0 else "-"
-            rows.append(
-                [
-                    Paragraph("Round Off", right),
-                    Paragraph(f"{sign} {fmt_money(abs(totals['round_off']))}", right),
-                ]
-            )
+            rows.append([Paragraph("Round Off", right), Paragraph(f"{sign} {fmt_money(abs(totals['round_off']))}", right)])
 
         t = self.tpl
         total_row = len(rows)
-        if t.total_bg:  # the total on a coloured bar
-            rows.append(
-                [
-                    Paragraph(
-                        f"<font color='{t.total_fg}'><b>Invoice Total</b></font>", right
-                    ),
-                    Paragraph(
-                        f"<font color='{t.total_fg}'><b>{fmt_money(totals['grand_total'])}</b></font>",
-                        right,
-                    ),
-                ]
-            )
+        if t.total_bg:                                       # the total on a coloured bar
+            rows.append([Paragraph(f"<font color='{t.total_fg}'><b>Invoice Total</b></font>", right),
+                         Paragraph(f"<font color='{t.total_fg}'><b>{fmt_money(totals['grand_total'])}</b></font>", right)])
         else:
-            rows.append(
-                [
-                    Paragraph("<b>Invoice Total</b>", right),
-                    Paragraph(f"<b>{fmt_money(totals['grand_total'])}</b>", right),
-                ]
-            )
+            rows.append([Paragraph("<b>Invoice Total</b>", right),
+                         Paragraph(f"<b>{fmt_money(totals['grand_total'])}</b>", right)])
         if total_paid > 0:
-            rows.append(
-                [
-                    Paragraph("Total Paid", right),
-                    Paragraph(f"- {fmt_money(total_paid)}", right),
-                ]
-            )
+            rows.append([Paragraph("Total Paid", right), Paragraph(f"- {fmt_money(total_paid)}", right)])
 
         # Balance Due is never negative -- an overpayment prints as
         # "Advance / Credit" instead, in green, the same way the
         # invoice-form badge shows it on screen.
         if credit > 0:
             bc = "#059669"
-            rows.append(
-                [
-                    Paragraph("<b>Advance / Credit</b>", right),
-                    Paragraph(
-                        f"<font color='{bc}'><b>{fmt_money(credit)}</b></font>", right
-                    ),
-                ]
-            )
+            rows.append([Paragraph("<b>Advance / Credit</b>", right),
+                         Paragraph(f"<font color='{bc}'><b>{fmt_money(credit)}</b></font>", right)])
         else:
             bc = "#059669" if balance <= 0 else "#DC2626"
-            rows.append(
-                [
-                    Paragraph("<b>Balance Due</b>", right),
-                    Paragraph(
-                        f"<font color='{bc}'><b>{fmt_money(balance)}</b></font>", right
-                    ),
-                ]
-            )
+            rows.append([Paragraph("<b>Balance Due</b>", right),
+                         Paragraph(f"<font color='{bc}'><b>{fmt_money(balance)}</b></font>", right)])
         style: List[Tuple] = [
-            ("ALIGN", (0, 0), (-1, -1), "RIGHT"),
-            ("LEFTPADDING", (0, 0), (-1, -1), 10),
-            ("TOPPADDING", (0, 0), (-1, -1), self._g(3)),
-            ("BOTTOMPADDING", (0, 0), (-1, -1), self._g(3)),
-            (
-                "BACKGROUND",
-                (0, -1),
-                (1, -1),
-                colors.HexColor(
-                    "#FEF2F2" if (balance > 0 and credit <= 0) else "#ECFDF5"
-                ),
-            ),
-            ("GRID", (0, -1), (1, -1), 1, colors.HexColor("#E5E7EB")),
+            ("ALIGN",(0,0),(-1,-1),"RIGHT"), ("LEFTPADDING",(0,0),(-1,-1),10),
+            ("TOPPADDING",(0,0),(-1,-1),self._g(3)),  ("BOTTOMPADDING",(0,0),(-1,-1),self._g(3)),
+            ("BACKGROUND",(0,-1),(1,-1),colors.HexColor("#FEF2F2" if (balance > 0 and credit <= 0) else "#ECFDF5")),
+            ("GRID",(0,-1),(1,-1),1,colors.HexColor("#E5E7EB")),
         ]
         if t.total_bg:
-            style.append(
-                (
-                    "BACKGROUND",
-                    (0, total_row),
-                    (1, total_row),
-                    colors.HexColor(t.total_bg),
-                )
-            )
+            style.append(("BACKGROUND",(0,total_row),(1,total_row),colors.HexColor(t.total_bg)))
         if t.total_rule:
-            style.append(
-                (
-                    "LINEABOVE",
-                    (0, total_row),
-                    (1, total_row),
-                    0.8,
-                    colors.HexColor(t.total_rule),
-                )
-            )
-        return Table(
-            rows,
-            colWidths=[width * 0.58, width * 0.42],
-            hAlign="RIGHT",
-            style=TableStyle(style),
-        )
+            style.append(("LINEABOVE",(0,total_row),(1,total_row),0.8,colors.HexColor(t.total_rule)))
+        return Table(rows, colWidths=[width * 0.58, width * 0.42], hAlign="RIGHT", style=TableStyle(style))
 
-    def _build_gst_summary(
-        self, width: float, totals: Dict[str, Any]
-    ) -> Optional[Table]:
+    def _build_gst_summary(self, width: float, totals: Dict[str, Any]) -> Optional[Table]:
         """Tax by rate -- the taxable value and the CGST + SGST (or IGST) at each rate. Printed only when GST is charged
-        at more than one rate, which is why the totals box can show a single CGST and a single SGST line.
-        """
+        at more than one rate, which is why the totals box can show a single CGST and a single SGST line."""
         taxed = [g for g in totals["tax_groups"] if g["rate"] > 0]
-        if not (
-            self.is_gst and not self.data.get("is_complimentary") and len(taxed) > 1
-        ):
+        if not (self.is_gst and not self.data.get("is_complimentary") and len(taxed) > 1):
             return None
         igst = self.data.get("gst_type") == "IGST"
         t = self.tpl
-        head_bg, head_fg = (
-            (t.head_bg, t.head_fg) if t.head_bg else (t.pay_head_bg, t.pay_head_fg)
-        )
+        head_bg, head_fg = (t.head_bg, t.head_fg) if t.head_bg else (t.pay_head_bg, t.pay_head_fg)
         small, small_right = self.styles["Small"], self.styles["SmallRight"]
-        ink = ParagraphStyle(
-            "GSTHead",
-            parent=small,
-            textColor=colors.HexColor(head_fg),
-            fontName=self.bold,
-        )
+        ink = ParagraphStyle("GSTHead", parent=small, textColor=colors.HexColor(head_fg), fontName=self.bold)
         ink_right = ParagraphStyle("GSTHeadR", parent=ink, alignment=TA_RIGHT)
-        bold_right = ParagraphStyle(
-            "GSTTotalR",
-            parent=small_right,
-            fontName=self.bold,
-            textColor=colors.HexColor("#111827"),
-        )
-        bold_left = ParagraphStyle(
-            "GSTTotalL",
-            parent=small,
-            fontName=self.bold,
-            textColor=colors.HexColor("#111827"),
-        )
+        bold_right = ParagraphStyle("GSTTotalR", parent=small_right, fontName=self.bold, textColor=colors.HexColor("#111827"))
+        bold_left = ParagraphStyle("GSTTotalL", parent=small, fontName=self.bold, textColor=colors.HexColor("#111827"))
 
         def money(value: float) -> str:
             return f"{value:,.2f}"
 
-        head = [
-            Paragraph("RATE", ink),
-            Paragraph(f"TAXABLE ({CURRENCY_SYMBOL})", ink_right),
-        ]
-        head += (
-            [Paragraph("IGST", ink_right)]
-            if igst
-            else [Paragraph("CGST", ink_right), Paragraph("SGST", ink_right)]
-        )
+        head = [Paragraph("RATE", ink), Paragraph(f"TAXABLE ({CURRENCY_SYMBOL})", ink_right)]
+        head += [Paragraph("IGST", ink_right)] if igst else [Paragraph("CGST", ink_right), Paragraph("SGST", ink_right)]
         rows = [head]
         for g in taxed:
-            row = [
-                Paragraph(f"{g['rate']:g}%", small),
-                Paragraph(money(g["taxable"]), small_right),
-            ]
-            row += (
-                [Paragraph(money(g["tax"]), small_right)]
-                if igst
-                else [
-                    Paragraph(money(g["cgst"]), small_right),
-                    Paragraph(money(g["sgst"]), small_right),
-                ]
-            )
+            row = [Paragraph(f"{g['rate']:g}%", small), Paragraph(money(g["taxable"]), small_right)]
+            row += [Paragraph(money(g["tax"]), small_right)] if igst else [Paragraph(money(g["cgst"]), small_right),
+                                                                              Paragraph(money(g["sgst"]), small_right)]
             rows.append(row)
-        total = [
-            Paragraph("Total", bold_left),
-            Paragraph(money(sum(g["taxable"] for g in taxed)), bold_right),
-        ]
-        total += (
-            [Paragraph(money(totals["tax"]), bold_right)]
-            if igst
-            else [
-                Paragraph(money(totals["cgst"]), bold_right),
-                Paragraph(money(totals["sgst"]), bold_right),
-            ]
-        )
+        total = [Paragraph("Total", bold_left), Paragraph(money(sum(g["taxable"] for g in taxed)), bold_right)]
+        total += [Paragraph(money(totals["tax"]), bold_right)] if igst else [Paragraph(money(totals["cgst"]), bold_right),
+                                                                              Paragraph(money(totals["sgst"]), bold_right)]
         rows.append(total)
         shares = [0.18, 0.40, 0.42] if igst else [0.15, 0.31, 0.27, 0.27]
         style: List[Tuple] = [
-            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor(head_bg)),
-            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-            ("LINEBELOW", (0, 1), (-1, -2), 0.5, colors.HexColor(t.row_line)),
-            ("LINEABOVE", (0, -1), (-1, -1), 0.8, colors.HexColor(t.end_line)),
-            ("LINEBELOW", (0, -1), (-1, -1), 0.8, colors.HexColor(t.end_line)),
-            ("TOPPADDING", (0, 0), (-1, -1), self._g(3)),
-            ("BOTTOMPADDING", (0, 0), (-1, -1), self._g(3)),
-            ("LEFTPADDING", (0, 0), (-1, -1), 5),
-            ("RIGHTPADDING", (0, 0), (-1, -1), 5),
+            ("BACKGROUND",(0,0),(-1,0),colors.HexColor(head_bg)),
+            ("VALIGN",(0,0),(-1,-1),"MIDDLE"),
+            ("LINEBELOW",(0,1),(-1,-2),0.5,colors.HexColor(t.row_line)),
+            ("LINEABOVE",(0,-1),(-1,-1),0.8,colors.HexColor(t.end_line)),
+            ("LINEBELOW",(0,-1),(-1,-1),0.8,colors.HexColor(t.end_line)),
+            ("TOPPADDING",(0,0),(-1,-1),self._g(3)), ("BOTTOMPADDING",(0,0),(-1,-1),self._g(3)),
+            ("LEFTPADDING",(0,0),(-1,-1),5), ("RIGHTPADDING",(0,0),(-1,-1),5),
         ]
-        return Table(
-            rows, colWidths=[width * s_ for s_ in shares], style=TableStyle(style)
-        )
+        return Table(rows, colWidths=[width * s_ for s_ in shares], style=TableStyle(style))
 
     def _build_amount_in_words(self, grand_total: float) -> Optional[List[Any]]:
-        """ "Amount in words: Rupees ... Only" under the totals -- when Settings turns it on, for rupee invoices."""
-        if not self.config.get("pdf_settings", {}).get(
-            "amount_in_words", False
-        ) or self.data.get("is_complimentary"):
+        """"Amount in words: Rupees ... Only" under the totals -- when Settings turns it on, for rupee invoices."""
+        if not self.config.get("pdf_settings", {}).get("amount_in_words", False) or self.data.get("is_complimentary"):
             return None
         words = amount_in_words(grand_total, CURRENCY_SYMBOL)
         if not words:
             return None
-        return [
-            Paragraph("Amount in words", self.styles["Caption"]),
-            Spacer(1, 2),
-            Paragraph(safe_markup(words), self.styles["NoteBox"]),
-        ]
+        return [Paragraph("Amount in words", self.styles["Caption"]), Spacer(1, 2),
+                Paragraph(safe_markup(words), self.styles["NoteBox"])]
 
     def _build_summary(self, width: float) -> List[Any]:
         """The totals box on the right; the amount in words and the GST summary, when there are any, on the left."""
         right_w = width * self.SUMMARY_SHARE
         if self.data.get("is_complimentary"):
             right = self.styles["Right"]
-            box = Table(
-                [
-                    [
-                        Paragraph("<b>Total</b>", right),
-                        Paragraph("<b>No Charge</b>", right),
-                    ]
-                ],
-                colWidths=[right_w * 0.58, right_w * 0.42],
-                hAlign="RIGHT",
-                style=TableStyle(
-                    [
-                        ("ALIGN", (0, 0), (-1, -1), "RIGHT"),
-                        ("LEFTPADDING", (0, 0), (-1, -1), 10),
-                    ]
-                ),
-            )
+            box = Table([[Paragraph("<b>Total</b>", right), Paragraph("<b>No Charge</b>", right)]],
+                        colWidths=[right_w * 0.58, right_w * 0.42], hAlign="RIGHT",
+                        style=TableStyle([("ALIGN",(0,0),(-1,-1),"RIGHT"), ("LEFTPADDING",(0,0),(-1,-1),10)]))
             return [KeepTogether([box])]
         # Same calculation engine the invoice form uses live (and the database stores), so the
         # printed PDF can never show different numbers than what the
@@ -3728,25 +2805,15 @@ class PDFGenerator:
         if words := self._build_amount_in_words(totals["grand_total"]):
             left += words
         if summary := self._build_gst_summary(left_w, totals):
-            left += ([Spacer(1, self._g(0.3 * cm))] if left else []) + [
-                Paragraph("GST Summary", self.styles["Caption"]),
-                Spacer(1, 2),
-                summary,
-            ]
+            left += ([Spacer(1, self._g(0.3 * cm))] if left else []) + [Paragraph("GST Summary", self.styles["Caption"]),
+                                                               Spacer(1, 2), summary]
         if not left:
             return [KeepTogether([box])]
-        outer = Table(
-            [[left, box]],
-            colWidths=[left_w + gap, right_w],
-            style=[
-                ("VALIGN", (0, 0), (-1, -1), "TOP"),
-                ("LEFTPADDING", (0, 0), (-1, -1), 0),
-                ("RIGHTPADDING", (0, 0), (0, 0), gap),
-                ("RIGHTPADDING", (1, 0), (1, 0), 0),
-                ("TOPPADDING", (0, 0), (-1, -1), 0),
-                ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
-            ],
-        )
+        outer = Table([[left, box]], colWidths=[left_w + gap, right_w], style=[
+            ("VALIGN",(0,0),(-1,-1),"TOP"),
+            ("LEFTPADDING",(0,0),(-1,-1),0), ("RIGHTPADDING",(0,0),(0,0),gap), ("RIGHTPADDING",(1,0),(1,0),0),
+            ("TOPPADDING",(0,0),(-1,-1),0),  ("BOTTOMPADDING",(0,0),(-1,-1),0),
+        ])
         return [KeepTogether([outer])]
 
     # ------------------------------------------------------------------ #
@@ -3757,59 +2824,33 @@ class PDFGenerator:
         there is no payment history to show (keeps simple invoices simple)."""
         if self.data.get("is_complimentary") or not self.payments:
             return None
-        hs = ParagraphStyle(
-            "PHS",
-            parent=self.styles["Small"],
-            textColor=colors.HexColor(self.tpl.pay_head_fg),
-        )
-        rows = [
-            [
-                Paragraph("<b>DATE</b>", hs),
-                Paragraph("<b>MODE</b>", hs),
-                Paragraph("<b>NOTE</b>", hs),
-                Paragraph(
-                    "<b>AMOUNT</b>",
-                    ParagraphStyle("PHSR", parent=hs, alignment=TA_RIGHT),
-                ),
-            ]
-        ]
+        hs = ParagraphStyle("PHS", parent=self.styles["Small"], textColor=colors.HexColor(self.tpl.pay_head_fg))
+        # a REFERENCE column (UTR, cheque number ...) appears only when at least one payment has one
+        with_ref = any(str(p.get("reference") or "").strip() for p in self.payments)
+        head = [Paragraph("<b>DATE</b>", hs), Paragraph("<b>MODE</b>", hs)]
+        if with_ref:
+            head.append(Paragraph("<b>REFERENCE</b>", hs))
+        head += [Paragraph("<b>NOTE</b>", hs), Paragraph("<b>AMOUNT</b>", ParagraphStyle("PHSR", parent=hs, alignment=TA_RIGHT))]
+        rows = [head]
         for p in sorted(self.payments, key=lambda x: x.get("payment_date") or ""):
-            date_txt = parse_date(
-                p.get("payment_date"), DB_DATE_FORMAT, DISPLAY_DATE_FORMAT
-            )
-            rows.append(
-                [
-                    Paragraph(date_txt, self.styles["Small"]),
-                    Paragraph(safe_markup(p.get("mode") or "-"), self.styles["Small"]),
-                    Paragraph(safe_markup(p.get("note") or "-"), self.styles["Small"]),
-                    Paragraph(
-                        f"{CURRENCY_SYMBOL}{safe_float(p.get('amount')):,.2f}",
-                        self.styles["SmallRight"],
-                    ),
-                ]
-            )
-        return Table(
-            rows,
-            colWidths=[width * 0.22, width * 0.20, width * 0.33, width * 0.25],
-            repeatRows=1,
-            style=TableStyle(
-                [
-                    (
-                        "BACKGROUND",
-                        (0, 0),
-                        (-1, 0),
-                        colors.HexColor(self.tpl.pay_head_bg),
-                    ),
-                    ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-                    ("LINEBELOW", (0, 0), (-1, -2), 0.5, colors.HexColor("#F3F4F6")),
-                    ("LINEBELOW", (0, -1), (-1, -1), 0.8, colors.HexColor("#E5E7EB")),
-                    ("TOPPADDING", (0, 0), (-1, -1), self._g(3)),
-                    ("BOTTOMPADDING", (0, 0), (-1, -1), self._g(3)),
-                    ("LEFTPADDING", (0, 0), (-1, -1), 6),
-                    ("RIGHTPADDING", (0, 0), (-1, -1), 6),
-                ]
-            ),
-        )
+            date_txt = parse_date(p.get("payment_date"), DB_DATE_FORMAT, DISPLAY_DATE_FORMAT)
+            row = [Paragraph(date_txt, self.styles["Small"]),
+                   Paragraph(safe_markup(p.get("mode") or "-"), self.styles["Small"])]
+            if with_ref:
+                row.append(Paragraph(safe_markup(str(p.get("reference") or "").strip() or "-"), self.styles["Small"]))
+            row += [Paragraph(safe_markup(p.get("note") or "-"), self.styles["Small"]),
+                    Paragraph(f"{CURRENCY_SYMBOL}{safe_float(p.get('amount')):,.2f}", self.styles["SmallRight"])]
+            rows.append(row)
+        shares = [0.19, 0.15, 0.24, 0.24, 0.18] if with_ref else [0.22, 0.20, 0.33, 0.25]
+        return Table(rows, colWidths=[width * s_ for s_ in shares], repeatRows=1,
+                     style=TableStyle([
+            ("BACKGROUND",(0,0),(-1,0),colors.HexColor(self.tpl.pay_head_bg)),
+            ("VALIGN",(0,0),(-1,-1),"MIDDLE"),
+            ("LINEBELOW",(0,0),(-1,-2),0.5,colors.HexColor("#F3F4F6")),
+            ("LINEBELOW",(0,-1),(-1,-1),0.8,colors.HexColor("#E5E7EB")),
+            ("TOPPADDING",(0,0),(-1,-1),self._g(3)),   ("BOTTOMPADDING",(0,0),(-1,-1),self._g(3)),
+            ("LEFTPADDING",(0,0),(-1,-1),6),  ("RIGHTPADDING",(0,0),(-1,-1),6),
+        ]))
 
     def _invoice_needs_payment(self) -> bool:
         """Whether there's still money owed on this invoice -- the shared
@@ -3819,10 +2860,7 @@ class PDFGenerator:
         switch (Settings > Payment) is turned on."""
         if self.config.get("pdf_settings", {}).get("always_show_qr_code", False):
             return True
-        return self.data.get("status") in (
-            InvoiceStatus.DUE.value,
-            InvoiceStatus.PARTIAL.value,
-        )
+        return self.data.get("status") in (InvoiceStatus.DUE.value, InvoiceStatus.PARTIAL.value)
 
     def _should_show_qr(self) -> bool:
         """Whether the QR code prints on this invoice.
@@ -3851,18 +2889,10 @@ class PDFGenerator:
             return []
         pd = self.config.get("payment_details", {})
         rows: List[Tuple[str, str]] = []
-        for label, key in (
-            ("Bank", "bank_name"),
-            ("A/C Holder", "account_holder_name"),
-            ("A/C No", "account_number"),
-            ("IFSC", "ifsc_code"),
-            ("UPI ID", "upi_id"),
-        ):
-            val = (
-                _real_value(pd.get(key), _SAMPLE_UPI_ID)
-                if key == "upi_id"
-                else pd.get(key)
-            )
+        for label, key in (("Bank", "bank_name"), ("A/C Holder", "account_holder_name"),
+                           ("A/C No", "account_number"), ("IFSC", "ifsc_code"),
+                           ("UPI ID", "upi_id")):
+            val = _real_value(pd.get(key), _SAMPLE_UPI_ID) if key == "upi_id" else pd.get(key)
             if val:
                 rows.append((label, safe_markup(val)))
         if notes := pd.get("payment_notes"):
@@ -3878,60 +2908,29 @@ class PDFGenerator:
         if not rows:
             rows = [("", "Scan to pay.")]
         qr_w = 2.6 * cm if qr else 0.0
-        inner_w = width - qr_w - 20  # the box's own padding
+        inner_w = width - qr_w - 20                                  # the box's own padding
         label_w = 1.9 * cm
         # a row without a label (the payment notes) is one cell across both columns -- a span shows its FIRST cell
-        lines = Table(
-            [
-                (
-                    [
-                        Paragraph(label, self.styles["PayLabel"]),
-                        Paragraph(value, self.styles["PayValue"]),
-                    ]
-                    if label
-                    else [Paragraph(value, self.styles["PayValue"]), ""]
-                )
-                for label, value in rows
-            ],
-            colWidths=[label_w, inner_w - label_w],
-            style=TableStyle(
-                [
-                    ("VALIGN", (0, 0), (-1, -1), "TOP"),
-                    ("LEFTPADDING", (0, 0), (-1, -1), 0),
-                    ("RIGHTPADDING", (0, 0), (-1, -1), 4),
-                    ("TOPPADDING", (0, 0), (-1, -1), 1.5),
-                    ("BOTTOMPADDING", (0, 0), (-1, -1), 1.5),
-                ]
-                + [
-                    ("SPAN", (0, i), (1, i))
-                    for i, (label, _v) in enumerate(rows)
-                    if not label
-                ]
-            ),
-        )
-        cells: List[Any] = [
-            [Paragraph("PAYMENT DETAILS", self.styles["Caption"]), Spacer(1, 3), lines]
-        ]
+        lines = Table([[Paragraph(label, self.styles["PayLabel"]), Paragraph(value, self.styles["PayValue"])] if label else
+                       [Paragraph(value, self.styles["PayValue"]), ""] for label, value in rows],
+                      colWidths=[label_w, inner_w - label_w],
+                      style=TableStyle([("VALIGN",(0,0),(-1,-1),"TOP"), ("LEFTPADDING",(0,0),(-1,-1),0),
+                                        ("RIGHTPADDING",(0,0),(-1,-1),4), ("TOPPADDING",(0,0),(-1,-1),1.5),
+                                        ("BOTTOMPADDING",(0,0),(-1,-1),1.5)] +
+                                       [("SPAN",(0,i),(1,i)) for i, (label, _v) in enumerate(rows) if not label]))
+        cells: List[Any] = [[Paragraph("PAYMENT DETAILS", self.styles["Caption"]), Spacer(1, 3), lines]]
         col_widths = [inner_w + 20 - qr_w]
         if qr:
-            cells.append(Image(str(qr), 2.2 * cm, 2.2 * cm, kind="proportional"))
+            cells.append(Image(str(qr), 2.2*cm, 2.2*cm, kind="proportional"))
             col_widths.append(qr_w)
         t = self.tpl
-        style: List[Tuple] = [
-            ("VALIGN", (0, 0), (-1, -1), "TOP"),
-            ("LEFTPADDING", (0, 0), (-1, -1), 10),
-            ("RIGHTPADDING", (0, 0), (-1, -1), 10),
-            ("TOPPADDING", (0, 0), (-1, -1), self._g(8)),
-            ("BOTTOMPADDING", (0, 0), (-1, -1), self._g(8)),
-            ("BOX", (0, 0), (-1, -1), 0.8, colors.HexColor(t.meta_border or "#E5E7EB")),
-        ]
+        style: List[Tuple] = [("VALIGN",(0,0),(-1,-1),"TOP"), ("LEFTPADDING",(0,0),(-1,-1),10), ("RIGHTPADDING",(0,0),(-1,-1),10),
+                              ("TOPPADDING",(0,0),(-1,-1),self._g(8)), ("BOTTOMPADDING",(0,0),(-1,-1),self._g(8)),
+                              ("BOX",(0,0),(-1,-1),0.8,colors.HexColor(t.meta_border or "#E5E7EB"))]
         if qr:
-            style += [
-                ("ALIGN", (1, 0), (1, 0), "CENTER"),
-                ("LEFTPADDING", (1, 0), (1, 0), 0),
-            ]
+            style += [("ALIGN",(1,0),(1,0),"CENTER"), ("LEFTPADDING",(1,0),(1,0),0)]
         if t.meta_bg:
-            style.append(("BACKGROUND", (0, 0), (-1, -1), colors.HexColor(t.meta_bg)))
+            style.append(("BACKGROUND",(0,0),(-1,-1),colors.HexColor(t.meta_bg)))
         return Table([cells], colWidths=col_widths, style=TableStyle(style))
 
     def _build_signature(self) -> Optional[Table]:
@@ -3939,21 +2938,10 @@ class PDFGenerator:
         if not (sig := self._asset("signature")):
             return None
         name = safe_markup(self.data.get("your_name"))
-        return Table(
-            [
-                [Image(str(sig), 4.0 * cm, 2.0 * cm, kind="proportional")],
-                [Paragraph(f"<b>{name}</b>", self.styles["Center"])],
-            ],
-            colWidths=[5.0 * cm],
-            hAlign="RIGHT",
-            style=[
-                ("LINEABOVE", (0, 1), (0, 1), 1, colors.black),
-                ("TOPPADDING", (0, 1), (0, 1), 3),
-                ("ALIGN", (0, 0), (-1, -1), "CENTER"),
-                ("LEFTPADDING", (0, 0), (-1, -1), 0),
-                ("RIGHTPADDING", (0, 0), (-1, -1), 0),
-            ],
-        )
+        return Table([[Image(str(sig), 4.0*cm, 2.0*cm, kind="proportional")],
+                      [Paragraph(f"<b>{name}</b>", self.styles["Center"])]], colWidths=[5.0*cm], hAlign="RIGHT",
+                     style=[("LINEABOVE",(0,1),(0,1),1,colors.black), ("TOPPADDING",(0,1),(0,1),3),
+                            ("ALIGN",(0,0),(-1,-1),"CENTER"), ("LEFTPADDING",(0,0),(-1,-1),0), ("RIGHTPADDING",(0,0),(-1,-1),0)])
 
     def _build_footer_section(self, width: float) -> Optional[Table]:
         """Payment details (with the QR code) on the left, the signature on the right -- None when there is neither."""
@@ -3961,38 +2949,23 @@ class PDFGenerator:
         sig = self._build_signature()
         if box is None and sig is None:
             return None
-        return Table(
-            [[box if box is not None else "", sig if sig is not None else ""]],
-            colWidths=[width * 0.62, width * 0.38],
-            style=[
-                ("VALIGN", (0, 0), (-1, -1), "BOTTOM"),
-                ("LEFTPADDING", (0, 0), (-1, -1), 0),
-                ("RIGHTPADDING", (0, 0), (-1, -1), 0),
-                ("TOPPADDING", (0, 0), (-1, -1), 0),
-                ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
-            ],
-        )
+        return Table([[box if box is not None else "", sig if sig is not None else ""]],
+                     colWidths=[width * 0.62, width * 0.38],
+                     style=[("VALIGN",(0,0),(-1,-1),"BOTTOM"), ("LEFTPADDING",(0,0),(-1,-1),0), ("RIGHTPADDING",(0,0),(-1,-1),0),
+                            ("TOPPADDING",(0,0),(-1,-1),0), ("BOTTOMPADDING",(0,0),(-1,-1),0)])
 
     def _build_notes_terms(self) -> List[Any]:
         """The customer-facing notes and the terms & conditions (the internal notes are never printed). A heading always
         stays with the first lines under it; a long text flows over to the next page."""
         out: List[Any] = []
-        for label, key in (
-            ("Notes", "customer_notes"),
-            ("Terms &amp; Conditions", "terms"),
-        ):
+        choice = str(self.data.get("print_extras") or "both").strip().lower()      # what this invoice was set to print
+        wanted = {"both": ("customer_notes", "terms"), "terms": ("terms",), "notes": ("customer_notes",),
+                  "none": ()}.get(choice, ("customer_notes", "terms"))
+        for label, key in (("Notes", "customer_notes"), ("Terms &amp; Conditions", "terms")):
             text = str(self.data.get(key) or "").strip()
-            if text:
-                out += [
-                    CondPageBreak(1.6 * cm),
-                    Paragraph(label, self.styles["Caption"]),
-                    Spacer(1, self._g(0.1 * cm)),
-                    Paragraph(
-                        safe_markup(text).replace("\n", "<br/>"),
-                        self.styles["NoteText"],
-                    ),
-                    Spacer(1, self._g(0.3 * cm)),
-                ]
+            if text and key in wanted:
+                out += [CondPageBreak(1.6*cm), Paragraph(label, self.styles["Caption"]), Spacer(1, self._g(0.1*cm)),
+                        Paragraph(safe_markup(text).replace("\n", "<br/>"), self.styles["NoteText"]), Spacer(1, self._g(0.3*cm))]
         return out
 
     # ------------------------------------------------------------------ #
@@ -4004,17 +2977,10 @@ class PDFGenerator:
             return
         canvas.saveState()
         canvas.setFillColor(colors.HexColor(self.tpl.bar))
-        canvas.rect(0, A4[1] - 0.6 * cm, A4[0], 0.6 * cm, stroke=0, fill=1)
+        canvas.rect(0, A4[1] - 0.6*cm, A4[0], 0.6*cm, stroke=0, fill=1)
         canvas.restoreState()
 
-    def _fit_text(
-        self,
-        canvas,
-        text: str,
-        max_width: float,
-        size: float,
-        font: Optional[str] = None,
-    ) -> str:
+    def _fit_text(self, canvas, text: str, max_width: float, size: float, font: Optional[str] = None) -> str:
         """`text`, cut with an ellipsis when it is wider than `max_width`."""
         font = font or self.font
         if canvas.stringWidth(text, font, size) <= max_width:
@@ -4030,39 +2996,29 @@ class PDFGenerator:
         canvas.saveState()
         canvas.setFont(self.bold, 9)
         canvas.setFillColor(colors.HexColor("#111827"))
-        canvas.drawString(
-            left,
-            height - 1.2 * cm,
-            self._fit_text(
-                canvas, compose_your_name(self.config), 9.0 * cm, 9, self.bold
-            ),
-        )
+        canvas.drawString(left, height - 1.2*cm, self._fit_text(canvas, compose_your_name(self.config), 9.0*cm, 9, self.bold))
         canvas.setFont(self.font, 8.5)
         canvas.setFillColor(colors.HexColor("#6B7280"))
         number = str(self.data.get("invoice_number") or "")
-        canvas.drawRightString(
-            right,
-            height - 1.2 * cm,
-            self._fit_text(canvas, f"Invoice {number}  ·  continued", 8.0 * cm, 8.5),
-        )
+        canvas.drawRightString(right, height - 1.2*cm, self._fit_text(canvas, f"Invoice {number}  ·  continued", 8.0*cm, 8.5))
         canvas.setStrokeColor(colors.HexColor(self.tpl.rule))
         canvas.setLineWidth(0.6)
-        canvas.line(left, height - 1.5 * cm, right, height - 1.5 * cm)
+        canvas.line(left, height - 1.5*cm, right, height - 1.5*cm)
         canvas.restoreState()
 
     # The status stamp across the page: (words, colour, biggest size in points). Every stamp is as wide as the page
     # allows (a long phrase gets a smaller size than "PAID"), so they all look alike.
     _STAMPS = {
-        InvoiceStatus.PAID.value: ("PAID", "#10B981", 150),
-        InvoiceStatus.DUE.value: ("BALANCE DUE", "#EF4444", 100),
-        InvoiceStatus.PARTIAL.value: ("PARTIAL PAYMENT", "#F59E0B", 100),
-        InvoiceStatus.OVERPAID.value: ("ADVANCE / CREDIT", "#8B5CF6", 100),
-        InvoiceStatus.COMPLIMENTARY.value: ("COMPLIMENTARY", "#3B82F6", 100),
+        InvoiceStatus.PAID.value:          ("PAID",             "#10B981", 150),
+        InvoiceStatus.DUE.value:           ("BALANCE DUE",      "#EF4444", 100),
+        InvoiceStatus.PARTIAL.value:       ("PARTIAL PAYMENT",  "#F59E0B", 100),
+        InvoiceStatus.OVERPAID.value:      ("ADVANCE / CREDIT", "#8B5CF6", 100),
+        InvoiceStatus.COMPLIMENTARY.value: ("COMPLIMENTARY",    "#3B82F6", 100),
     }
-    STAMP_ANGLE = 35  # degrees, counter-clockwise
-    STAMP_COS = 0.8192  # cos(35 degrees)
-    STAMP_WIDTH = 0.82  # the share of the page width the slanted word may take up
-    STAMP_ALPHA = 0.14  # how strong it is: faint enough to read through, strong enough to see everywhere
+    STAMP_ANGLE = 35                    # degrees, counter-clockwise
+    STAMP_COS = 0.8192                  # cos(35 degrees)
+    STAMP_WIDTH = 0.82                  # the share of the page width the slanted word may take up
+    STAMP_ALPHA = 0.14                  # how strong it is: faint enough to read through, strong enough to see everywhere
 
     def _apply_watermark(self, canvas, doc=None):
         """The status stamp (PAID, BALANCE DUE ...): one big, slanted word in the middle of the page, drawn with real
@@ -4078,58 +3034,37 @@ class PDFGenerator:
             return
         words, colour, biggest = entry
         page_width, page_height = A4
-        size = min(
-            biggest,
-            page_width
-            * self.STAMP_WIDTH
-            / self.STAMP_COS
-            / max(canvas.stringWidth(words, self.bold, 1), 0.01),
-        )
+        size = min(biggest, page_width * self.STAMP_WIDTH / self.STAMP_COS / max(canvas.stringWidth(words, self.bold, 1), 0.01))
         canvas.saveState()
         canvas.setFont(self.bold, size)
         canvas.setFillColor(colors.HexColor(colour))
         canvas.setFillAlpha(self.STAMP_ALPHA)
         canvas.translate(page_width / 2.0, page_height / 2.0)
         canvas.rotate(self.STAMP_ANGLE)
-        canvas.drawCentredString(
-            0, -size * 0.35, words
-        )  # 0.35 em below the baseline: the capitals sit centred
+        canvas.drawCentredString(0, -size * 0.35, words)          # 0.35 em below the baseline: the capitals sit centred
         canvas.restoreState()
 
     def _draw_footer(self, canvas, page: int, total: int):
         """A hairline, the invoice number, the footer note from Settings (up to two lines) and "Page x of y"."""
         width, _height = A4
         left, right = self.MARGIN_X * cm, width - self.MARGIN_X * cm
-        first = 1.45 * cm  # baseline of the first line of text
+        first = 1.45 * cm                                   # baseline of the first line of text
         canvas.saveState()
         canvas.setStrokeColor(colors.HexColor("#E5E7EB"))
         canvas.setLineWidth(0.6)
-        canvas.line(left, 1.95 * cm, right, 1.95 * cm)
+        canvas.line(left, 1.95*cm, right, 1.95*cm)
         canvas.setFont(self.font, 8)
         canvas.setFillColor(colors.HexColor("#6B7280"))
-        canvas.drawString(
-            left,
-            first,
-            self._fit_text(
-                canvas, str(self.data.get("invoice_number") or ""), 4.0 * cm, 8
-            ),
-        )
+        canvas.drawString(left, first, self._fit_text(canvas, str(self.data.get("invoice_number") or ""), 4.0*cm, 8))
         canvas.drawRightString(right, first, f"Page {page} of {total}")
-        note = str(
-            self.config.get("pdf_settings", {}).get("footer_message", "Thank you!")
-            or ""
-        )
-        lines = [
-            line
-            for part in note.splitlines()
-            for line in (simpleSplit(part, self.font, 8, 9.5 * cm) or [""])
-        ]
+        note = str(self.config.get("pdf_settings", {}).get("footer_message", "Thank you!") or "")
+        lines = [line for part in note.splitlines() for line in (simpleSplit(part, self.font, 8, 9.5*cm) or [""])]
         lines = [line for line in lines if line.strip()]
         shown = lines[:2]
-        if len(lines) > 2:  # more text than two lines can hold
-            shown[1] = self._fit_text(canvas, shown[1] + "…", 9.5 * cm, 8)
+        if len(lines) > 2:                                  # more text than two lines can hold
+            shown[1] = self._fit_text(canvas, shown[1] + "…", 9.5*cm, 8)
         for n, line in enumerate(shown):
-            canvas.drawCentredString(width / 2.0, first - n * 0.4 * cm, line)
+            canvas.drawCentredString(width / 2.0, first - n * 0.4*cm, line)
         canvas.restoreState()
 
     def _on_page(self, canvas, doc):
@@ -4159,9 +3094,7 @@ class PDFGenerator:
                 for state in self._page_states:
                     self.__dict__.update(state)
                     generator._draw_footer(self, self._pageNumber, total)
-                    generator._apply_watermark(
-                        self, None
-                    )  # last: on top of everything on the page
+                    generator._apply_watermark(self, None)           # last: on top of everything on the page
                     super().showPage()
                 super().save()
 
@@ -4169,8 +3102,7 @@ class PDFGenerator:
 
     def _tail_marker(self):
         """A flowable with no size that goes last: when the layout reaches it, it is told how much room is left on the
-        last page (the auto-fit pass decides from that whether the last page is nearly empty).
-        """
+        last page (the auto-fit pass decides from that whether the last page is nearly empty)."""
         generator = self
 
         class TailMarker(Flowable):
@@ -4185,99 +3117,56 @@ class PDFGenerator:
 
     def _layout(self, target) -> None:
         """Lays the whole invoice out on A4 pages and writes the PDF to `target` (a path or a file-like object). Leaves
-        the number of pages in self.page_count and the room left on the last page in self._room_left.
-        """
+        the number of pages in self.page_count and the room left on the last page in self._room_left."""
         number = str(self.data.get("invoice_number") or "")
-        doc = BaseDocTemplate(
-            target,
-            pagesize=A4,
-            rightMargin=self.MARGIN_X * cm,
-            leftMargin=self.MARGIN_X * cm,
-            topMargin=self.MARGIN_TOP * cm,
-            bottomMargin=self.MARGIN_BOTTOM * cm,
-            title=f"Invoice {number}",
-            author=compose_your_name(self.config),
-            subject=f"Invoice {number} for {self.data.get('bill_to') or ''}".strip(),
-            creator=f"{APP_NAME} {APP_VERSION} (build {APP_BUILD_VERSION})",
-        )
+        doc = BaseDocTemplate(target, pagesize=A4,
+                              rightMargin=self.MARGIN_X*cm, leftMargin=self.MARGIN_X*cm,
+                              topMargin=self.MARGIN_TOP*cm, bottomMargin=self.MARGIN_BOTTOM*cm,
+                              title=f"Invoice {number}", author=compose_your_name(self.config),
+                              subject=f"Invoice {number} for {self.data.get('bill_to') or ''}".strip(),
+                              creator=f"{APP_NAME} {APP_VERSION} (build {APP_BUILD_VERSION})")
         # A frame without padding: every table is exactly as wide as the printable area, so the page edges line up.
-        frame = Frame(
-            doc.leftMargin,
-            doc.bottomMargin,
-            doc.width,
-            doc.height,
-            id="page",
-            leftPadding=0,
-            rightPadding=0,
-            topPadding=0,
-            bottomPadding=0,
-        )
-        doc.addPageTemplates(
-            [
-                PageTemplate(
-                    id="invoice", frames=[frame], onPage=self._on_page, pagesize=A4
-                )
-            ]
-        )
+        frame = Frame(doc.leftMargin, doc.bottomMargin, doc.width, doc.height, id="page",
+                      leftPadding=0, rightPadding=0, topPadding=0, bottomPadding=0)
+        doc.addPageTemplates([PageTemplate(id="invoice", frames=[frame], onPage=self._on_page, pagesize=A4)])
         width, gap = doc.width, self._g
         story: List[Any] = [
-            self._build_header(width),
-            Spacer(1, gap(0.45 * cm)),
-            self._build_parties(width),
-            Spacer(1, gap(0.4 * cm)),
-            self._build_meta(width),
-            Spacer(1, gap(0.45 * cm)),
-            self._build_items(width),
-            Spacer(1, gap(0.4 * cm)),
+            self._build_header(width),         Spacer(1, gap(0.45*cm)),
+            self._build_parties(width),        Spacer(1, gap(0.4*cm)),
+            self._build_meta(width),           Spacer(1, gap(0.45*cm)),
+            self._build_items(width),          Spacer(1, gap(0.4*cm)),
             *self._build_summary(width),
         ]
         if history := self._build_payment_history(width):
-            story += [
-                Spacer(1, gap(0.35 * cm)),
-                CondPageBreak(2.5 * cm),
-                Paragraph("Payment History", self.styles["Caption"]),
-                Spacer(1, gap(0.12 * cm)),
-                history,
-            ]
+            story += [Spacer(1, gap(0.35*cm)), CondPageBreak(2.5*cm), Paragraph("Payment History", self.styles["Caption"]),
+                      Spacer(1, gap(0.12*cm)), history]
         if footer := self._build_footer_section(width):
-            story += [Spacer(1, gap(0.4 * cm)), KeepTogether([footer])]
+            story += [Spacer(1, gap(0.4*cm)), KeepTogether([footer])]
         # Internal notes (self.data["notes"]) are intentionally never printed
         # on the customer-facing PDF -- they're for Vyaprix's eyes only. The customer notes and the terms are.
         notes = self._build_notes_terms()
         if notes:
-            story += [Spacer(1, gap(0.4 * cm)), *notes]
+            story += [Spacer(1, gap(0.4*cm)), *notes]
         story.append(self._tail_marker())
         doc.build(story, canvasmaker=self._numbered_canvas())
 
     def generate(self) -> Path:
         """Writes the invoice PDF and returns its path. An invoice that runs only a little onto a second (or later) page
-        is laid out a second time with tighter gaps and row padding, and that version is printed when it saves a page.
-        """
+        is laid out a second time with tighter gaps and row padding, and that version is printed when it saves a page."""
         self.tight = self.tightened = False
         plain = io.BytesIO()
         self._layout(plain)
         result, pages = plain.getvalue(), self.page_count
-        if (
-            pages > 1
-            and self._room_left
-            >= (1.0 - self.TIGHT_WHEN_LAST_PAGE_BELOW) * self.page_height
-        ):
+        if pages > 1 and self._room_left >= (1.0 - self.TIGHT_WHEN_LAST_PAGE_BELOW) * self.page_height:
             self.tight = True
             try:
                 snug = io.BytesIO()
                 self._layout(snug)
                 if self.page_count < pages:
-                    result, pages, self.tightened = (
-                        snug.getvalue(),
-                        self.page_count,
-                        True,
-                    )
+                    result, pages, self.tightened = snug.getvalue(), self.page_count, True
             except Exception:
-                logger.warning(
-                    "The tighter layout of invoice %r failed; printing it as designed.",
-                    self.data.get("invoice_number"),
-                    exc_info=True,
-                )
+                logger.warning("The tighter layout of invoice %r failed; printing it as designed.",
+                               self.data.get("invoice_number"), exc_info=True)
             finally:
                 self.tight = False
                 self.page_count = pages
@@ -4285,91 +3174,36 @@ class PDFGenerator:
         return self.filename
 
 
-def sample_invoice_data(
-    config: Dict[str, Any],
-) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
+def sample_invoice_data(config: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
     """A made-up invoice with one payment, for previewing a template: printed under the user's own business details
     (name, logo, bank details), with the kinds of lines a real invoice has -- quantities, units, HSN codes and a GST
     rate per item -- so the whole table shows."""
     today = datetime.date.today()
     items = [
-        {
-            "title": "Stage and sound setup",
-            "description": "Truss stage 20 x 16 ft with PA system",
-            "amount": 90000.0,
-            "discount": 9000.0,
-            "qty": 2.0,
-            "unit": "Event",
-            "rate": 45000.0,
-            "hsn": "998596",
-            "tax_rate": 18.0,
-            "disc_type": "percent",
-            "disc_value": 10.0,
-        },
-        {
-            "title": "Banquet chairs",
-            "description": "With covers",
-            "amount": 12500.0,
-            "discount": 0.0,
-            "qty": 250.0,
-            "unit": "Nos",
-            "rate": 50.0,
-            "hsn": "997212",
-            "tax_rate": 18.0,
-        },
-        {
-            "title": "Printed brochures",
-            "description": "A5 glossy, 4 colour",
-            "amount": 8000.0,
-            "discount": 0.0,
-            "qty": 1000.0,
-            "unit": "Pcs",
-            "rate": 8.0,
-            "hsn": "4911",
-            "tax_rate": 5.0,
-        },
+        {"title": "Stage and sound setup", "description": "Truss stage 20 x 16 ft with PA system", "amount": 90000.0,
+         "discount": 9000.0, "qty": 2.0, "unit": "Event", "rate": 45000.0, "hsn": "998596", "tax_rate": 18.0,
+         "disc_type": "percent", "disc_value": 10.0},
+        {"title": "Banquet chairs", "description": "With covers", "amount": 12500.0, "discount": 0.0, "qty": 250.0,
+         "unit": "Nos", "rate": 50.0, "hsn": "997212", "tax_rate": 18.0},
+        {"title": "Printed brochures", "description": "A5 glossy, 4 colour", "amount": 8000.0, "discount": 0.0,
+         "qty": 1000.0, "unit": "Pcs", "rate": 8.0, "hsn": "4911", "tax_rate": 5.0},
     ]
     data = {
-        "invoice_number": "INV-0001",
-        "bill_to": "Sample Customer Pvt Ltd",
-        "client_contact": "12 Park Street\nKolkata - 700016\naccounts@example.com",
-        "client_gstin": "",
-        "your_name": compose_your_name(config),
-        "your_contact": compose_your_contact(config),
-        "items": json.dumps(items),
-        "amount_paid": 0.0,
-        "tax_rate": 18.0,
-        "invoice_date": today.strftime(DB_DATE_FORMAT),
-        "payment_date": None,
-        "status": InvoiceStatus.PARTIAL.value,
-        "payment_terms": "Net 15",
-        "payment_mode": None,
-        "show_qr_code": 1,
-        "is_complimentary": 0,
-        "is_gst_invoice": 1,
-        "global_discount_value": 0.0,
-        "global_discount_type": "amount",
-        "advance_amount": 0.0,
-        "advance_date": None,
-        "gst_type": "CGST/SGST",
-        "notes": "",
-        "tax_mode": TAX_MODE_PER_ITEM,
-        "round_off": 1,
-        "place_of_supply": "",
-        "po_number": "",
-        "due_date": (today + datetime.timedelta(days=15)).strftime(DB_DATE_FORMAT),
-        "reverse_charge": 0,
+        "invoice_number": "INV-0001", "bill_to": "Sample Customer Pvt Ltd",
+        "client_contact": "12 Park Street\nKolkata - 700016\naccounts@example.com", "client_gstin": "",
+        "your_name": compose_your_name(config), "your_contact": compose_your_contact(config),
+        "items": json.dumps(items), "amount_paid": 0.0, "tax_rate": 18.0,
+        "invoice_date": today.strftime(DB_DATE_FORMAT), "payment_date": None,
+        "status": InvoiceStatus.PARTIAL.value, "payment_terms": "Net 15", "payment_mode": None,
+        "show_qr_code": 1, "is_complimentary": 0, "is_gst_invoice": 1,
+        "global_discount_value": 0.0, "global_discount_type": "amount", "advance_amount": 0.0, "advance_date": None,
+        "gst_type": "CGST/SGST", "notes": "", "tax_mode": TAX_MODE_PER_ITEM, "round_off": 1,
+        "place_of_supply": "", "po_number": "",
+        "due_date": (today + datetime.timedelta(days=15)).strftime(DB_DATE_FORMAT), "reverse_charge": 0,
         "customer_notes": "Thank you for your business!",
         "terms": "1. Payment within 15 days of the invoice date.\n2. Goods once sold are not returnable.",
     }
-    payments = [
-        {
-            "amount": 25000.0,
-            "payment_date": today.strftime(DB_DATE_FORMAT),
-            "mode": "UPI",
-            "note": "Advance",
-        }
-    ]
+    payments = [{"amount": 25000.0, "payment_date": today.strftime(DB_DATE_FORMAT), "mode": "UPI", "note": "Advance"}]
     return data, payments
 
 
@@ -4399,164 +3233,60 @@ def merge_pdfs(paths: List[Path], out_path: Path) -> Path:
 #  11. THEME ENGINE
 #  Eight named themes. Each is one palette; the Qt palette, the global stylesheet and the generated icons derive from it.
 # =============================================================================
-THEME_NAMES: List[str] = [
-    "litera",
-    "cosmo",
-    "flatly",
-    "darkly",
-    "cyborg",
-    "superhero",
-    "morph",
-    "pulse",
-]
+THEME_NAMES: List[str] = ["litera", "cosmo", "flatly", "darkly", "cyborg", "superhero", "morph", "pulse"]
 DEFAULT_THEME: str = "litera"
+#  What people see in the "Colour theme" list. The short names above are only used behind the scenes.
+THEME_LABELS: Dict[str, str] = {
+    "litera": "Classic (light)", "cosmo": "Sky (light)", "flatly": "Slate (light)", "morph": "Soft blue (light)",
+    "pulse": "Violet (light)", "darkly": "Night (dark)", "cyborg": "Midnight (dark)", "superhero": "Navy (dark)",
+}
 
 #  bg      window background          surface  cards / inputs / menus
 #  alt     zebra rows, headers, hover  border   hairlines
 #  fg      body text                   muted    secondary text
 THEMES: Dict[str, Dict[str, Any]] = {
-    "litera": dict(
-        dark=False,
-        bg="#F4F6FA",
-        surface="#FFFFFF",
-        alt="#F1F3F7",
-        border="#DDE1E7",
-        fg="#343A40",
-        muted="#6C757D",
-        primary="#4582EC",
-        secondary="#ADB5BD",
-        success="#02B875",
-        info="#17A2B8",
-        warning="#F0AD4E",
-        danger="#D9534F",
-    ),
-    "cosmo": dict(
-        dark=False,
-        bg="#F5F7FA",
-        surface="#FFFFFF",
-        alt="#EFF2F6",
-        border="#D9DEE4",
-        fg="#373A3C",
-        muted="#6B7075",
-        primary="#2780E3",
-        secondary="#7E8081",
-        success="#3FB618",
-        info="#9954BB",
-        warning="#FF7518",
-        danger="#FF0039",
-    ),
-    "flatly": dict(
-        dark=False,
-        bg="#F3F5F6",
-        surface="#FFFFFF",
-        alt="#ECF0F1",
-        border="#D5DBDE",
-        fg="#2C3E50",
-        muted="#7B8A8B",
-        primary="#2C3E50",
-        secondary="#95A5A6",
-        success="#18BC9C",
-        info="#3498DB",
-        warning="#F39C12",
-        danger="#E74C3C",
-    ),
-    "darkly": dict(
-        dark=True,
-        bg="#222222",
-        surface="#2D2D2D",
-        alt="#363636",
-        border="#454545",
-        fg="#F1F1F1",
-        muted="#ADB5BD",
-        primary="#375A7F",
-        secondary="#444444",
-        success="#00BC8C",
-        info="#3498DB",
-        warning="#F39C12",
-        danger="#E74C3C",
-    ),
-    "cyborg": dict(
-        dark=True,
-        bg="#060606",
-        surface="#121212",
-        alt="#1C1C1C",
-        border="#2E2E2E",
-        fg="#E4E4E4",
-        muted="#9A9A9A",
-        primary="#2A9FD6",
-        secondary="#555555",
-        success="#77B300",
-        info="#9933CC",
-        warning="#FF8800",
-        danger="#CC0000",
-    ),
-    "superhero": dict(
-        dark=True,
-        bg="#2B3E50",
-        surface="#34495E",
-        alt="#3E5367",
-        border="#4E6377",
-        fg="#EBEBEB",
-        muted="#A9B8C6",
-        primary="#4C9BE8",
-        secondary="#4E5D6C",
-        success="#5CB85C",
-        info="#5BC0DE",
-        warning="#F0AD4E",
-        danger="#D9534F",
-    ),
-    "morph": dict(
-        dark=False,
-        bg="#DCE5F1",
-        surface="#EDF2F9",
-        alt="#E2EAF4",
-        border="#C3D1E3",
-        fg="#44546A",
-        muted="#6F7F94",
-        primary="#378DFC",
-        secondary="#AAAAAA",
-        success="#43CC29",
-        info="#5B62F4",
-        warning="#FFC107",
-        danger="#E52527",
-    ),
-    "pulse": dict(
-        dark=False,
-        bg="#F6F4FA",
-        surface="#FFFFFF",
-        alt="#F0ECF6",
-        border="#DAD3E8",
-        fg="#3D3D4A",
-        muted="#7A7589",
-        primary="#593196",
-        secondary="#69676E",
-        success="#13B955",
-        info="#009CDC",
-        warning="#EFA31D",
-        danger="#FC3939",
-    ),
+    "litera": dict(dark=False, bg="#F4F6FA", surface="#FFFFFF", alt="#F1F3F7", border="#DDE1E7",
+                   fg="#343A40", muted="#6C757D",
+                   primary="#4582EC", secondary="#ADB5BD", success="#02B875",
+                   info="#17A2B8", warning="#F0AD4E", danger="#D9534F"),
+    "cosmo":  dict(dark=False, bg="#F5F7FA", surface="#FFFFFF", alt="#EFF2F6", border="#D9DEE4",
+                   fg="#373A3C", muted="#6B7075",
+                   primary="#2780E3", secondary="#7E8081", success="#3FB618",
+                   info="#9954BB", warning="#FF7518", danger="#FF0039"),
+    "flatly": dict(dark=False, bg="#F3F5F6", surface="#FFFFFF", alt="#ECF0F1", border="#D5DBDE",
+                   fg="#2C3E50", muted="#7B8A8B",
+                   primary="#2C3E50", secondary="#95A5A6", success="#18BC9C",
+                   info="#3498DB", warning="#F39C12", danger="#E74C3C"),
+    "darkly": dict(dark=True, bg="#222222", surface="#2D2D2D", alt="#363636", border="#454545",
+                   fg="#F1F1F1", muted="#ADB5BD",
+                   primary="#375A7F", secondary="#444444", success="#00BC8C",
+                   info="#3498DB", warning="#F39C12", danger="#E74C3C"),
+    "cyborg": dict(dark=True, bg="#060606", surface="#121212", alt="#1C1C1C", border="#2E2E2E",
+                   fg="#E4E4E4", muted="#9A9A9A",
+                   primary="#2A9FD6", secondary="#555555", success="#77B300",
+                   info="#9933CC", warning="#FF8800", danger="#CC0000"),
+    "superhero": dict(dark=True, bg="#2B3E50", surface="#34495E", alt="#3E5367", border="#4E6377",
+                      fg="#EBEBEB", muted="#A9B8C6",
+                      primary="#4C9BE8", secondary="#4E5D6C", success="#5CB85C",
+                      info="#5BC0DE", warning="#F0AD4E", danger="#D9534F"),
+    "morph":  dict(dark=False, bg="#DCE5F1", surface="#EDF2F9", alt="#E2EAF4", border="#C3D1E3",
+                   fg="#44546A", muted="#6F7F94",
+                   primary="#378DFC", secondary="#AAAAAA", success="#43CC29",
+                   info="#5B62F4", warning="#FFC107", danger="#E52527"),
+    "pulse":  dict(dark=False, bg="#F6F4FA", surface="#FFFFFF", alt="#F0ECF6", border="#DAD3E8",
+                   fg="#3D3D4A", muted="#7A7589",
+                   primary="#593196", secondary="#69676E", success="#13B955",
+                   info="#009CDC", warning="#EFA31D", danger="#FC3939"),
 }
 
-_LEGACY_THEME_NAMES = {
-    "light": "litera",
-    "dark": "darkly",
-}  # written by early PySide6 previews
-TONES: Tuple[str, ...] = (
-    "primary",
-    "secondary",
-    "success",
-    "info",
-    "warning",
-    "danger",
-)
+_LEGACY_THEME_NAMES = {"light": "litera", "dark": "darkly"}   # written by early PySide6 previews
+TONES: Tuple[str, ...] = ("primary", "secondary", "success", "info", "warning", "danger")
 _ACTIVE_THEME_NAME: str = DEFAULT_THEME
 _ACTIVE_PALETTE: Dict[str, str] = {}
 
 
 def normalize_theme_name(name: Optional[str]) -> str:
-    name = _LEGACY_THEME_NAMES.get(
-        (name or "").strip().lower(), (name or "").strip().lower()
-    )
+    name = _LEGACY_THEME_NAMES.get((name or "").strip().lower(), (name or "").strip().lower())
     return name if name in THEMES else DEFAULT_THEME
 
 
@@ -4567,9 +3297,7 @@ def _rgb(h: str) -> Tuple[int, int, int]:
 
 
 def _hex(r: float, g: float, b: float) -> str:
-    return "#{:02X}{:02X}{:02X}".format(
-        *(max(0, min(255, int(round(v)))) for v in (r, g, b))
-    )
+    return "#{:02X}{:02X}{:02X}".format(*(max(0, min(255, int(round(v)))) for v in (r, g, b)))
 
 
 def _mix(a: str, b: str, t: float) -> str:
@@ -4583,7 +3311,6 @@ def _lum(h: str) -> float:
     def f(c):
         c /= 255.0
         return c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4
-
     r, g, b = _rgb(h)
     return 0.2126 * f(r) + 0.7152 * f(g) + 0.0722 * f(b)
 
@@ -4596,8 +3323,7 @@ def _contrast(a: str, b: str) -> float:
 
 def _on(bg: str) -> str:
     """Text colour for a filled background. White -- exactly what ttkbootstrap's `selectfg` gives every tone in all
-    eight themes -- except on the rare pale fill where white would be close to invisible (Morph's yellow warning).
-    """
+    eight themes -- except on the rare pale fill where white would be close to invisible (Morph's yellow warning)."""
     return "#FFFFFF" if _contrast(bg, "#FFFFFF") >= 1.8 else "#1F2937"
 
 
@@ -4633,15 +3359,11 @@ def resolve_palette(theme: Dict[str, Any]) -> Dict[str, str]:
         p[f"{tone}_soft"] = _mix(p["surface"], base, 0.18 if dark else 0.12)
         p[f"{tone}_text"] = _readable(base, p["surface"])
     p["muted_text"] = _readable(p["muted"], p["surface"], 3.0)
-    p["nav_sel_fg"] = (
-        p["fg"] if dark else p["primary_text"]
-    )  # the chosen page in Settings: plain text on a dark theme
+    p["nav_sel_fg"] = p["fg"] if dark else p["primary_text"]       # the chosen page in Settings: plain text on a dark theme
     p["hero_bg"] = p["primary"]
     p["hero_fg"] = _on(p["primary"])
     p["hero_sub"] = _mix(p["primary"], p["hero_fg"], 0.78)
-    p["backdrop"] = _mix(
-        p["bg"], "#000000", 0.18 if not dark else 0.30
-    )  # PDF viewer / canvas surround
+    p["backdrop"] = _mix(p["bg"], "#000000", 0.18 if not dark else 0.30)    # PDF viewer / canvas surround
     return p
 
 
@@ -4714,13 +3436,9 @@ def _paint_icon(kind: str, color: str, px: int = 24) -> QImage:
         qp.setBrush(QBrush(QColor(color)))
         path = QPainterPath()
         if kind == "tri_up":
-            path.moveTo(12.0 * s, 8.0 * s)
-            path.lineTo(18.0 * s, 16.0 * s)
-            path.lineTo(6.0 * s, 16.0 * s)
+            path.moveTo(12.0 * s, 8.0 * s); path.lineTo(18.0 * s, 16.0 * s); path.lineTo(6.0 * s, 16.0 * s)
         else:
-            path.moveTo(12.0 * s, 16.0 * s)
-            path.lineTo(18.0 * s, 8.0 * s)
-            path.lineTo(6.0 * s, 8.0 * s)
+            path.moveTo(12.0 * s, 16.0 * s); path.lineTo(18.0 * s, 8.0 * s); path.lineTo(6.0 * s, 8.0 * s)
         path.closeSubpath()
         qp.drawPath(path)
     qp.end()
@@ -4755,8 +3473,6 @@ QFrame[role="stat"][tone="warning"]   { border-left: 4px solid @warning@; }
 QFrame[role="stat"][tone="info"]      { border-left: 4px solid @info@; }
 QFrame[role="stat"][tone="secondary"] { border-left: 4px solid @secondary@; }
 QFrame[role="stat-solid"] { border: none; border-radius: 10px; }   /* Dashboard cards: solid tone block, as in the Tk build */
-QFrame[role="splash"]  { background: @surface@; border: none; }
-QFrame[role="splash-border"] { background: @primary@; border: none; }      /* square, like the Tk splash window */
 QFrame[role="thumb"]   { background: @alt@; border: 1px solid @border@; border-radius: 6px; }
 QFrame[role="tpl"]     { background: @surface@; border: 2px solid @border@; border-radius: 8px; }      /* a template in Settings */
 QFrame[role="tpl"][selected="true"] { border: 2px solid @primary@; }
@@ -4776,6 +3492,7 @@ QLabel[role="display"] { font-size: 34px; font-weight: 700; }            /* Abou
 QLabel[role="stat-value"] { font-size: 22px; font-weight: 700; }
 QLabel[role="stat-title"] { font-size: 11px; font-weight: 700; color: @muted_text@; }
 QLabel[role="stat-solid-title"] { font-size: 12px; }
+QLabel[role="stat-solid-note"] { font-size: 11px; }
 QLabel[role="stat-solid-value"] { font-size: 24px; font-weight: 700; }
 QLabel[role="stat-solid-value"][compact="true"] { font-size: 18px; }
 QLabel[role="hero-title"] { color: @hero_fg@; font-size: 20px; font-weight: 700; }
@@ -4832,8 +3549,6 @@ QPushButton[role="link"] { background: transparent; border: none; color: @primar
 QPushButton[role="link"]:hover { background: @primary_soft@; }
 QPushButton[role="tool"] { padding: 4px 8px; min-width: 22px; font-size: 14px; background: @surface@; }
 QPushButton[glyph="true"] { padding: 7px 6px; }                                 /* one-symbol buttons ("✕"): no wide side padding */
-QPushButton[align="left"] { text-align: left; padding: 11px 15px; }        /* sidebar navigation / system buttons */
-QPushButton[align="icon"] { text-align: center; padding: 11px 0px; }       /* ... in the compact (icons only) sidebar */
 QToolButton { background: transparent; border: 1px solid transparent; border-radius: 6px; padding: 4px; }
 QToolButton:hover { background: @alt@; border-color: @border@; }
 
@@ -4916,20 +3631,12 @@ def _label_tone_rules() -> str:
     out = []
     for tone in TONES:
         out.append(f'QLabel[tone="{tone}"] {{ color: @{tone}_text@; }}')
-        out.append(
-            f'QLabel[role="badge"][tone="{tone}"] {{ background: @{tone}@; color: @{tone}_on@; }}'
-        )
-        out.append(
-            f'QLabel[role="badge-soft"][tone="{tone}"] {{ background: @{tone}_soft@; color: @{tone}_text@; font-weight: 700; '
-            f"border-radius: 9px; padding: 3px 10px; font-size: 11px; }}"
-        )
-        out.append(
-            f'QFrame[role="stat-solid"][tone="{tone}"] {{ background: @{tone}@; }}'
-        )
-        out.append(
-            f'QLabel[role="stat-solid-title"][tone="{tone}"], QLabel[role="stat-solid-value"][tone="{tone}"] '
-            f"{{ color: @{tone}_on@; }}"
-        )
+        out.append(f'QLabel[role="badge"][tone="{tone}"] {{ background: @{tone}@; color: @{tone}_on@; }}')
+        out.append(f'QLabel[role="badge-soft"][tone="{tone}"] {{ background: @{tone}_soft@; color: @{tone}_text@; font-weight: 700; '
+                   f'border-radius: 9px; padding: 3px 10px; font-size: 11px; }}')
+        out.append(f'QFrame[role="stat-solid"][tone="{tone}"] {{ background: @{tone}@; }}')
+        out.append(f'QLabel[role="stat-solid-title"][tone="{tone}"], QLabel[role="stat-solid-value"][tone="{tone}"], '
+                   f'QLabel[role="stat-solid-note"][tone="{tone}"] {{ color: @{tone}_on@; }}')
     out.append('QLabel[tone="muted"] { color: @muted_text@; }')
     return "\n".join(out)
 
@@ -4977,26 +3684,12 @@ def build_qpalette(p: Dict[str, str]) -> QPalette:
     R = QPalette.ColorRole
     G = QPalette.ColorGroup
     pairs = {
-        R.Window: p["bg"],
-        R.WindowText: p["fg"],
-        R.Base: p["input_bg"],
-        R.AlternateBase: p["alt"],
-        R.Text: p["fg"],
-        R.Button: p["surface"],
-        R.ButtonText: p["fg"],
-        R.ToolTipBase: p["surface"],
-        R.ToolTipText: p["fg"],
-        R.Highlight: p["primary"],
-        R.HighlightedText: p["primary_on"],
-        R.PlaceholderText: p["placeholder"],
-        R.Link: p["primary_text"],
-        R.LinkVisited: p["info_text"],
-        R.BrightText: "#FFFFFF",
-        R.Light: p["surface"],
-        R.Midlight: p["alt"],
-        R.Mid: p["border"],
-        R.Dark: p["border_strong"],
-        R.Shadow: "#000000",
+        R.Window: p["bg"], R.WindowText: p["fg"], R.Base: p["input_bg"], R.AlternateBase: p["alt"],
+        R.Text: p["fg"], R.Button: p["surface"], R.ButtonText: p["fg"], R.ToolTipBase: p["surface"],
+        R.ToolTipText: p["fg"], R.Highlight: p["primary"], R.HighlightedText: p["primary_on"],
+        R.PlaceholderText: p["placeholder"], R.Link: p["primary_text"], R.LinkVisited: p["info_text"],
+        R.BrightText: "#FFFFFF", R.Light: p["surface"], R.Midlight: p["alt"], R.Mid: p["border"],
+        R.Dark: p["border_strong"], R.Shadow: "#000000",
     }
     for role, color in pairs.items():
         pal.setColor(role, QColor(color))
@@ -5005,15 +3698,22 @@ def build_qpalette(p: Dict[str, str]) -> QPalette:
     return pal
 
 
-def apply_app_style(app: QApplication, theme_name: Optional[str] = None) -> None:
-    """Install the named theme application-wide (palette + stylesheet). Live: every
-    open window re-polishes instantly, no restart and no per-widget fix-ups."""
+def activate_theme(theme_name: Optional[str] = None) -> Dict[str, str]:
+    """Makes the named theme the current one for everything that is drawn by hand (theme_color() and the opening screen)
+    and returns its colours. It is cheap; apply_app_style() adds the part that restyles the standard widgets."""
     global _ACTIVE_THEME_NAME
     name = normalize_theme_name(theme_name)
     pal = resolve_palette(THEMES[name])
     _ACTIVE_THEME_NAME = name
     _ACTIVE_PALETTE.clear()
     _ACTIVE_PALETTE.update(pal)
+    return pal
+
+
+def apply_app_style(app: QApplication, theme_name: Optional[str] = None) -> None:
+    """Install the named theme application-wide (palette + stylesheet). Live: every
+    open window re-polishes instantly, no restart and no per-widget fix-ups."""
+    pal = activate_theme(theme_name)
     app.setStyle("Fusion")
     app.setPalette(build_qpalette(pal))
     app.setStyleSheet(build_qss(pal))
@@ -5068,13 +3768,8 @@ def vline() -> QFrame:
     return f
 
 
-def make_label(
-    text: str = "",
-    role: Optional[str] = None,
-    tone: Optional[str] = None,
-    wrap: bool = False,
-    align: Optional[Qt.AlignmentFlag] = None,
-) -> QLabel:
+def make_label(text: str = "", role: Optional[str] = None, tone: Optional[str] = None,
+               wrap: bool = False, align: Optional[Qt.AlignmentFlag] = None) -> QLabel:
     lbl = QLabel(text)
     if role:
         lbl.setProperty("role", role)
@@ -5087,13 +3782,8 @@ def make_label(
     return lbl
 
 
-def make_button(
-    text: str,
-    role: Optional[str] = None,
-    slot: Optional[Callable] = None,
-    tooltip: str = "",
-    min_height: int = 0,
-) -> QPushButton:
+def make_button(text: str, role: Optional[str] = None, slot: Optional[Callable] = None,
+                tooltip: str = "", min_height: int = 0) -> QPushButton:
     btn = QPushButton(text)
     if role:
         btn.setProperty("role", role)
@@ -5105,6 +3795,394 @@ def make_button(
         btn.clicked.connect(lambda _checked=False: slot())
     btn.setCursor(Qt.CursorShape.PointingHandCursor)
     return btn
+
+
+# =============================================================================
+#  11b. MOVEMENT, LINE ICONS AND POP-UP MESSAGES
+#  Everything here is drawn and animated with Qt's own tools, so it needs nothing extra to be installed, stays sharp at
+#  every screen scale and follows the colour theme.
+# =============================================================================
+_ANIMATIONS_ON: bool = True
+
+
+def animations_enabled() -> bool:
+    """True while the app may move things smoothly: the sliding menu, fading pages, the opening animation and the
+    pop-up messages. Settings has a switch for it; with it off everything simply appears at once."""
+    return _ANIMATIONS_ON
+
+
+def set_animations_enabled(on: bool) -> None:
+    global _ANIMATIONS_ON
+    _ANIMATIONS_ON = bool(on)
+
+
+def system_allows_animations() -> bool:
+    """False when animation effects are switched off in Windows itself (Settings > Accessibility > Visual effects), so the
+    app follows that choice; true everywhere else."""
+    if sys.platform != "win32":
+        return True
+    try:
+        import ctypes
+        flag = ctypes.c_int(1)
+        if ctypes.windll.user32.SystemParametersInfoW(0x1042, 0, ctypes.byref(flag), 0):     # SPI_GETCLIENTAREAANIMATION
+            return bool(flag.value)
+    except Exception:
+        logger.debug("Could not read the Windows animation setting", exc_info=True)
+    return True
+
+
+def _clamp01(value: float) -> float:
+    return 0.0 if value <= 0.0 else (1.0 if value >= 1.0 else value)
+
+
+def _ease_out_cubic(t: float) -> float:
+    t = _clamp01(t)
+    return 1.0 - (1.0 - t) ** 3
+
+
+def _ease_in_cubic(t: float) -> float:
+    t = _clamp01(t)
+    return t ** 3
+
+
+def _ease_in_out_cubic(t: float) -> float:
+    t = _clamp01(t)
+    return 4 * t ** 3 if t < 0.5 else 1 - ((-2 * t + 2) ** 3) / 2
+
+
+def _ease_out_back(t: float, overshoot: float = 1.9) -> float:
+    """Ends a little past 1 and settles back -- a stamp that lands with a small bounce."""
+    t = _clamp01(t) - 1.0
+    return 1.0 + (overshoot + 1.0) * t ** 3 + overshoot * t ** 2
+
+
+def _with_alpha(color: str, alpha: float) -> QColor:
+    out = QColor(color)
+    out.setAlphaF(_clamp01(alpha))
+    return out
+
+
+# ---- line icons ------------------------------------------------------------------------------------------------ #
+# Each icon is drawn on a 24 x 24 grid with round line ends, in whatever colour it is given.
+def _ic_plus(p: QPainter, color: QColor) -> None:
+    p.drawLine(QPointF(12, 5), QPointF(12, 19))
+    p.drawLine(QPointF(5, 12), QPointF(19, 12))
+
+
+def _ic_invoices(p: QPainter, color: QColor) -> None:
+    p.drawRoundedRect(QRectF(5, 3, 14, 18), 2.5, 2.5)
+    p.drawLine(QPointF(8.5, 8.5), QPointF(15.5, 8.5))
+    p.drawLine(QPointF(8.5, 12), QPointF(15.5, 12))
+    p.drawLine(QPointF(8.5, 15.5), QPointF(12.5, 15.5))
+
+
+def _ic_clients(p: QPainter, color: QColor) -> None:
+    p.drawEllipse(QPointF(9, 8.2), 3.2, 3.2)
+    body = QPainterPath()
+    body.moveTo(3.2, 19.5)
+    body.cubicTo(3.2, 13.6, 14.8, 13.6, 14.8, 19.5)
+    p.drawPath(body)
+    p.drawEllipse(QPointF(16.6, 9.2), 2.5, 2.5)
+    friend = QPainterPath()
+    friend.moveTo(16.8, 13.9)
+    friend.cubicTo(19.6, 13.9, 21.0, 16.2, 21.0, 19.5)
+    p.drawPath(friend)
+
+
+def _ic_items(p: QPainter, color: QColor) -> None:
+    p.drawRoundedRect(QRectF(3.5, 4.5, 17, 4.5), 1.4, 1.4)
+    box = QPainterPath()
+    box.moveTo(5, 9)
+    box.lineTo(5, 17.5)
+    box.cubicTo(5, 19.0, 6.0, 20.0, 7.5, 20.0)
+    box.lineTo(16.5, 20.0)
+    box.cubicTo(18.0, 20.0, 19.0, 19.0, 19.0, 17.5)
+    box.lineTo(19, 9)
+    p.drawPath(box)
+    p.drawLine(QPointF(10, 13), QPointF(14, 13))
+
+
+def _ic_settings(p: QPainter, color: QColor) -> None:
+    for y, knob in ((7.0, 9.0), (12.0, 15.5), (17.0, 8.0)):
+        p.drawLine(QPointF(4, y), QPointF(knob - 2.8, y))
+        p.drawLine(QPointF(knob + 2.8, y), QPointF(20, y))
+        p.drawEllipse(QPointF(knob, y), 2.2, 2.2)
+
+
+def _dot(p: QPainter, color: QColor, x: float, y: float, r: float) -> None:
+    p.save()
+    p.setPen(Qt.PenStyle.NoPen)
+    p.setBrush(color)
+    p.drawEllipse(QPointF(x, y), r, r)
+    p.restore()
+
+
+def _ic_help(p: QPainter, color: QColor) -> None:
+    p.drawEllipse(QPointF(12, 12), 9, 9)
+    mark = QPainterPath()
+    mark.moveTo(9.4, 9.8)
+    mark.cubicTo(9.4, 7.2, 14.6, 7.2, 14.6, 10.0)
+    mark.cubicTo(14.6, 11.8, 12.0, 11.9, 12.0, 13.8)
+    p.drawPath(mark)
+    _dot(p, color, 12, 17.1, 1.05)
+
+
+def _ic_info(p: QPainter, color: QColor) -> None:
+    p.drawEllipse(QPointF(12, 12), 9, 9)
+    p.drawLine(QPointF(12, 11), QPointF(12, 16.4))
+    _dot(p, color, 12, 7.9, 1.05)
+
+
+def _ic_chevrons_left(p: QPainter, color: QColor) -> None:
+    p.drawPolyline([QPointF(13, 7), QPointF(8, 12), QPointF(13, 17)])
+    p.drawPolyline([QPointF(18.5, 7), QPointF(13.5, 12), QPointF(18.5, 17)])
+
+
+def _ic_chevrons_right(p: QPainter, color: QColor) -> None:
+    p.drawPolyline([QPointF(11, 7), QPointF(16, 12), QPointF(11, 17)])
+    p.drawPolyline([QPointF(5.5, 7), QPointF(10.5, 12), QPointF(5.5, 17)])
+
+
+def _ic_check(p: QPainter, color: QColor) -> None:
+    p.drawPolyline([QPointF(5.5, 12.5), QPointF(10, 17), QPointF(18.5, 7.5)])
+
+
+def _ic_alert(p: QPainter, color: QColor) -> None:
+    p.drawLine(QPointF(12, 6), QPointF(12, 14))
+    _dot(p, color, 12, 18, 1.2)
+
+
+def _ic_cross(p: QPainter, color: QColor) -> None:
+    p.drawLine(QPointF(7, 7), QPointF(17, 17))
+    p.drawLine(QPointF(17, 7), QPointF(7, 17))
+
+
+def _ic_book(p: QPainter, color: QColor) -> None:
+    page = QPainterPath()
+    page.moveTo(12, 6.5)
+    page.cubicTo(10.0, 5.0, 6.5, 4.8, 3.5, 5.6)
+    page.lineTo(3.5, 18.6)
+    page.cubicTo(6.5, 17.8, 10.0, 18.0, 12.0, 19.5)
+    page.cubicTo(14.0, 18.0, 17.5, 17.8, 20.5, 18.6)
+    page.lineTo(20.5, 5.6)
+    page.cubicTo(17.5, 4.8, 14.0, 5.0, 12.0, 6.5)
+    p.drawPath(page)
+    p.drawLine(QPointF(12, 6.5), QPointF(12, 19.5))
+
+
+_ICON_SHAPES: Dict[str, Callable[[QPainter, QColor], None]] = {
+    "plus": _ic_plus, "invoices": _ic_invoices, "clients": _ic_clients, "items": _ic_items, "settings": _ic_settings,
+    "help": _ic_help, "info": _ic_info, "chevrons-left": _ic_chevrons_left, "chevrons-right": _ic_chevrons_right,
+    "check": _ic_check, "alert": _ic_alert, "cross": _ic_cross, "book": _ic_book,
+}
+
+
+def draw_icon(painter: QPainter, name: str, rect: QRectF, color: QColor, stroke: float = 1.8) -> None:
+    """Draws the line icon `name` into `rect` in `color`. Unknown names draw nothing."""
+    shape = _ICON_SHAPES.get(name)
+    if shape is None:
+        return
+    painter.save()
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+    painter.translate(rect.topLeft())
+    scale = min(rect.width(), rect.height()) / 24.0
+    painter.scale(scale, scale)
+    painter.setPen(QPen(color, stroke, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+    painter.setBrush(Qt.BrushStyle.NoBrush)
+    shape(painter, color)
+    painter.restore()
+
+
+# ---- pop-up messages ------------------------------------------------------------------------------------------- #
+class Toast(QFrame):
+    """A small message that slides up from the bottom of the window, stays a few seconds and goes away by itself. It is
+    for good news that needs no answer ("Invoice saved", "Copied"), so nobody has to click OK after every save. Only one
+    is shown at a time: a new one replaces the old. Clicking it closes it."""
+    SHOW_MS = 3200
+    FADE_MS = 200
+    MAX_WIDTH = 560
+    BOTTOM_GAP = 76                         # kept clear of the buttons along the bottom of a page
+    TONES = {"success": ("success", "check"), "info": ("info", "info"), "warning": ("warning", "alert"),
+             "error": ("danger", "cross")}
+    history: List[str] = []                 # what was shown in this session, newest last (the tests read it)
+    _current: Optional["Toast"] = None
+
+    def __init__(self, window: QWidget, text: str, kind: str = "success", ms: Optional[int] = None):
+        super().__init__(window)
+        self._window = window
+        self._text = " ".join(str(text).split())
+        self._kind = kind if kind in self.TONES else "info"
+        self._alpha = 1.0
+        self._lift = 0.0
+        self._closing = False
+        self.setObjectName("toast")
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.setAccessibleName(self._text)
+        self.setToolTip("")
+        font = QFont(self.font())
+        font.setPixelSize(13)
+        font.setWeight(QFont.Weight.DemiBold)
+        self.setFont(font)
+        metrics = QFontMetrics(font)
+        limit = max(220, min(self.MAX_WIDTH, window.width() - 64))
+        self._shown_text = metrics.elidedText(self._text, Qt.TextElideMode.ElideRight, limit - 72)
+        self.setFixedSize(min(limit, metrics.horizontalAdvance(self._shown_text) + 72), 46)
+        self._anim = QVariantAnimation(self)
+        self._anim.setDuration(self.FADE_MS)
+        self._anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self._anim.valueChanged.connect(self._on_step)
+        self._timer = QTimer(self)
+        self._timer.setSingleShot(True)
+        self._timer.timeout.connect(self.dismiss)
+        window.installEventFilter(self)
+        self._place()
+        self.show()
+        self.raise_()
+        if animations_enabled():
+            self._alpha, self._lift = 0.0, 14.0
+            self._anim.setStartValue(0.0)
+            self._anim.setEndValue(1.0)
+            self._anim.start()
+        self._timer.start(ms if ms is not None else self.SHOW_MS)
+
+    # ---- showing --------------------------------------------------------------------------------------------- #
+    @classmethod
+    def show_message(cls, window: Optional[QWidget], text: str, kind: str = "success",
+                     ms: Optional[int] = None) -> Optional["Toast"]:
+        """Shows `text` over `window`. Without a window (nothing on screen to show it on) it is only recorded."""
+        cls.history.append(str(text))
+        del cls.history[:-40]
+        previous, cls._current = cls._current, None
+        if previous is not None:
+            try:
+                previous._remove()
+            except RuntimeError:
+                pass                    # the window it was on has been closed, and Qt removed the message with it
+        if window is None:
+            return None
+        toast = cls(window, text, kind, ms)
+        cls._current = toast
+        return toast
+
+    def _place(self) -> None:
+        window = self._window
+        x = (window.width() - self.width()) // 2
+        y = window.height() - self.height() - self.BOTTOM_GAP
+        self.move(x, int(y + self._lift))
+
+    def eventFilter(self, obj, event):
+        if obj is self._window and event.type() == QEvent.Type.Resize and not self._closing:
+            self._place()
+        return super().eventFilter(obj, event)
+
+    # ---- going away ------------------------------------------------------------------------------------------ #
+    def dismiss(self) -> None:
+        """Fades the message out and removes it."""
+        if self._closing:
+            return
+        self._closing = True
+        self._timer.stop()
+        if not animations_enabled():
+            self._remove()
+            return
+        self._anim.stop()
+        self._anim.setStartValue(self._alpha)
+        self._anim.setEndValue(0.0)
+        self._anim.finished.connect(self._remove)
+        self._anim.start()
+
+    def _remove(self) -> None:
+        self._closing = True
+        self._timer.stop()
+        self._anim.stop()
+        try:
+            self._window.removeEventFilter(self)
+        except RuntimeError:
+            pass
+        if Toast._current is self:
+            Toast._current = None
+        self.hide()
+        self.deleteLater()
+
+    def _on_step(self, value) -> None:
+        self._alpha = float(value)
+        if not self._closing:
+            self._lift = 14.0 * (1.0 - self._alpha)
+            self._place()
+        self.update()
+
+    def mousePressEvent(self, event):
+        self.dismiss()
+        event.accept()
+
+    # ---- painting -------------------------------------------------------------------------------------------- #
+    def paintEvent(self, _event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setOpacity(self._alpha)
+        dark_theme = theme_is_dark()
+        back = "#F3F4F6" if dark_theme else "#1F2937"
+        text = "#111827" if dark_theme else "#F9FAFB"
+        rect = QRectF(self.rect()).adjusted(1, 1, -1, -1)
+        for grow, alpha in ((3.0, 0.05), (2.0, 0.07), (1.0, 0.09)):         # a soft shadow under the card
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(_with_alpha("#000000", alpha))
+            painter.drawRoundedRect(rect.adjusted(-grow, -grow + 2, grow, grow + 2), 14 + grow, 14 + grow)
+        painter.setBrush(QColor(back))
+        painter.drawRoundedRect(rect, 14, 14)
+        tone, icon = self.TONES[self._kind]
+        painter.setBrush(QColor(theme_color(tone)))
+        painter.drawEllipse(QRectF(14, (self.height() - 22) / 2, 22, 22))
+        draw_icon(painter, icon, QRectF(16.5, (self.height() - 17) / 2, 17, 17), QColor("#FFFFFF"), 2.3)
+        painter.setPen(QColor(text))
+        painter.setFont(self.font())
+        painter.drawText(QRectF(46, 0, self.width() - 58, self.height()),
+                         int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft), self._shown_text)
+
+
+def notify(widget: Optional[QWidget], text: str, kind: str = "success") -> None:
+    """Tells the person something good (or neutral) happened, without a box to close. Shown over the main window; when
+    there is no window to show it on, an ordinary message box is used so the message is never lost."""
+    try:
+        window = widget.window() if widget is not None else None
+        if isinstance(window, (QMainWindow, QDialog)):
+            Toast.show_message(window, text, kind)
+        else:
+            Toast.show_message(None, text, kind)
+            Messagebox.show_info(APP_NAME, text, parent=widget)
+    except Exception:                       # a pop-up message is a courtesy: whatever went wrong, the work itself is done
+        logger.warning("Could not show the message %r", text, exc_info=True)
+
+
+# ---- page fade ------------------------------------------------------------------------------------------------- #
+def fade_in(widget: QWidget, ms: int = 160) -> Optional[QPropertyAnimation]:
+    """Fades `widget` in over `ms` milliseconds (the page you just opened). The effect that makes it possible is removed
+    again afterwards, so the page is drawn normally once it has finished. Does nothing while animations are off or the
+    widget is not on screen."""
+    if not animations_enabled() or not widget.isVisible():
+        return None
+    old = getattr(widget, "_fade_animation", None)
+    if old is not None:
+        old.stop()                                   # its finished() removes the old effect
+    effect = QGraphicsOpacityEffect(widget)
+    effect.setOpacity(0.0)
+    widget.setGraphicsEffect(effect)
+    anim = QPropertyAnimation(effect, b"opacity", widget)
+    anim.setDuration(ms)
+    anim.setStartValue(0.0)
+    anim.setEndValue(1.0)
+    anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+
+    def done() -> None:
+        if getattr(widget, "_fade_animation", None) is anim:
+            widget._fade_animation = None
+            widget.setGraphicsEffect(None)
+
+    anim.finished.connect(done)
+    widget._fade_animation = anim
+    anim.start()
+    return anim
 
 
 # =============================================================================
@@ -5142,9 +4220,7 @@ class Messagebox:
     def okcancel(title, message, *args, parent=None, **kwargs) -> bool:
         """True only if the user actually clicked OK."""
         result = QMessageBox.question(
-            parent,
-            title,
-            message,
+            parent, title, message,
             QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
             QMessageBox.StandardButton.Cancel,
         )
@@ -5154,9 +4230,7 @@ class Messagebox:
     def yesno(title, message, *args, parent=None, **kwargs) -> bool:
         """True only if the user actually clicked Yes."""
         result = QMessageBox.question(
-            parent,
-            title,
-            message,
+            parent, title, message,
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
         )
@@ -5171,7 +4245,6 @@ class _DecimalValidator(QValidator):
     `max_decimal_places` digits after the point, live as the user types.
     Applied via QLineEdit.setValidator() -- Qt's equivalent of the Tkinter
     build's `entry.configure(validate="key", validatecommand=...)`."""
-
     def __init__(self, max_decimal_places: int = 2, parent=None):
         super().__init__(parent)
         self._pattern = re.compile(r"^\d*\.?\d*$")
@@ -5180,10 +4253,7 @@ class _DecimalValidator(QValidator):
     def validate(self, text: str, pos: int):
         if text == "":
             return QValidator.State.Acceptable, text, pos
-        if (
-            not self._pattern.match(text)
-            or len(text.partition(".")[2]) > self._max_places
-        ):
+        if not self._pattern.match(text) or len(text.partition(".")[2]) > self._max_places:
             return QValidator.State.Invalid, text, pos
         return QValidator.State.Acceptable, text, pos
 
@@ -5193,14 +4263,10 @@ def restrict_to_decimal(line_edit: QLineEdit, max_decimal_places: int = 2) -> QL
     return line_edit
 
 
-def restrict_to_digits(
-    line_edit: QLineEdit, max_length: Optional[int] = None
-) -> QLineEdit:
+def restrict_to_digits(line_edit: QLineEdit, max_length: Optional[int] = None) -> QLineEdit:
     if max_length:
         line_edit.setMaxLength(max_length)
-    line_edit.setValidator(
-        QRegularExpressionValidator(QRegularExpression(r"^\d*$"), line_edit)
-    )
+    line_edit.setValidator(QRegularExpressionValidator(QRegularExpression(r"^\d*$"), line_edit))
     return line_edit
 
 
@@ -5210,7 +4276,6 @@ class _BlurFormatFilter(QObject):
     the way a Tk Entry does, so this uses an event filter instead -- one
     small object per field, parented to the field so Qt cleans it up
     automatically when the field is destroyed."""
-
     def __init__(self, places: int, parent=None):
         super().__init__(parent)
         self.places = places
@@ -5246,18 +4311,14 @@ def load_app_logo_pixmap(max_width: int = 160) -> Optional[QPixmap]:
         if pixmap.isNull():
             return None
         if pixmap.width() > max_width:
-            pixmap = pixmap.scaledToWidth(
-                max_width, Qt.TransformationMode.SmoothTransformation
-            )
+            pixmap = pixmap.scaledToWidth(max_width, Qt.TransformationMode.SmoothTransformation)
         return pixmap
     except Exception as exc:
         logger.warning(f"Could not load app logo image: {exc}")
         return None
 
 
-def load_thumbnail_pixmap(
-    path: Optional[Path], max_size: int = 44
-) -> Optional[QPixmap]:
+def load_thumbnail_pixmap(path: Optional[Path], max_size: int = 44) -> Optional[QPixmap]:
     """Same idea as load_app_logo_pixmap(), generalised to any path and
     target size -- used for the asset-upload preview rows in Settings."""
     if not path or not path.exists():
@@ -5266,12 +4327,8 @@ def load_thumbnail_pixmap(
         pixmap = QPixmap(str(path))
         if pixmap.isNull():
             return None
-        return pixmap.scaled(
-            max_size,
-            max_size,
-            Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.SmoothTransformation,
-        )
+        return pixmap.scaled(max_size, max_size, Qt.AspectRatioMode.KeepAspectRatio,
+                              Qt.TransformationMode.SmoothTransformation)
     except Exception as exc:
         logger.warning(f"Could not load thumbnail for {path}: {exc}")
         return None
@@ -5283,7 +4340,6 @@ class ToolTip:
     popup Toplevel to build and manage here -- this class exists only so
     every `ToolTip(widget, "explanation")` call site elsewhere in the file
     keeps working unchanged."""
-
     def __init__(self, widget: QWidget, text: str, delay: int = 500):
         widget.setToolTip(text)
 
@@ -5293,7 +4349,6 @@ class Debouncer(QObject):
     `delay` ms. Same contract as the Tkinter build: construct once, then
     call the instance itself on every keystroke; `.cancel()` stops a
     pending call. Backed by QTimer instead of Tk's `.after()`."""
-
     def __init__(self, parent: QObject, delay: int, func: Callable):
         super().__init__(parent)
         self._timer = QTimer(self)
@@ -5316,7 +4371,6 @@ class PlaceholderEntry(QLineEdit):
     for real input. get()/insert()/delete()/focus_set() aliases are kept
     so the rest of this file's Tkinter-flavoured call sites need minimal
     changes; new code can just use the native Qt methods directly."""
-
     def __init__(self, parent=None, placeholder: str = "", **kw):
         super().__init__(parent)
         if placeholder:
@@ -5344,20 +4398,14 @@ class PlaceholderEntry(QLineEdit):
 class PlaceholderText(QPlainTextEdit):
     """Multi-line hint-text box. Qt's native placeholder text replaces the hand-rolled mechanism the Tkinter build
     needed. It is a QPlainTextEdit rather than a QTextEdit on purpose: only QPlainTextEdit wraps a long hint over
-    several lines (QTextEdit draws it on one clipped line), and this box only ever holds plain text anyway.
-    """
-
-    def __init__(
-        self, parent=None, placeholder: str = "", height: Optional[int] = None, **kw
-    ):
+    several lines (QTextEdit draws it on one clipped line), and this box only ever holds plain text anyway."""
+    def __init__(self, parent=None, placeholder: str = "", height: Optional[int] = None, **kw):
         super().__init__(parent)
         if placeholder:
             self.setPlaceholderText(placeholder)
         if height:
             fm = self.fontMetrics()
-            self.setFixedHeight(
-                fm.lineSpacing() * int(height) + 22
-            )  # + padding, border and document margin
+            self.setFixedHeight(fm.lineSpacing() * int(height) + 22)    # + padding, border and document margin
 
     def setAcceptRichText(self, accept: bool) -> None:
         """No-op: a plain-text box never takes rich text. Kept so code written against QTextEdit still works."""
@@ -5386,8 +4434,7 @@ class _WheelGuard(QObject):
     not have keyboard focus, so scrolling a long form with the wheel never silently changes
     a dropdown's value as the cursor drifts across it. Instead of relying on Qt's implicit
     event propagation, the wheel is handed straight to the enclosing scroll area's vertical
-    scroll bar, so the form keeps scrolling smoothly while the cursor is over the field.
-    """
+    scroll bar, so the form keeps scrolling smoothly while the cursor is over the field."""
 
     def eventFilter(self, obj, event):
         if event.type() == QEvent.Type.Wheel and not obj.hasFocus():
@@ -5408,7 +4455,7 @@ def guard_wheel(widget: QWidget) -> QWidget:
     return widget
 
 
-QT_DISPLAY_DATE_FORMAT: str = "dd MMM yyyy"  # == DISPLAY_DATE_FORMAT "%d %b %Y"
+QT_DISPLAY_DATE_FORMAT: str = "dd MMM yyyy"          # == DISPLAY_DATE_FORMAT "%d %b %Y"
 
 
 def make_date_edit(value: Optional[datetime.date] = None) -> QDateEdit:
@@ -5443,12 +4490,8 @@ def date_edit_db(edit: QDateEdit) -> str:
 def set_date_edit_from_db(edit: QDateEdit, db_date: Optional[str]) -> None:
     """Load a stored 'YYYY-MM-DD' (or empty/invalid -> today) into the field."""
     try:
-        d = (
-            datetime.datetime.strptime(db_date, DB_DATE_FORMAT).date()
-            if db_date
-            else datetime.date.today()
-        )
-    except TypeError, ValueError:
+        d = datetime.datetime.strptime(db_date, DB_DATE_FORMAT).date() if db_date else datetime.date.today()
+    except (TypeError, ValueError):
         d = datetime.date.today()
     edit.setDate(QDate(d.year, d.month, d.day))
 
@@ -5456,10 +4499,31 @@ def set_date_edit_from_db(edit: QDateEdit, db_date: Optional[str]) -> None:
 def documents_dir() -> Path:
     """The user's Documents folder (falls back to the home folder): where file dialogs start when there is no
     better idea of where the user wants to save to."""
-    docs = QStandardPaths.writableLocation(
-        QStandardPaths.StandardLocation.DocumentsLocation
-    )
+    docs = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.DocumentsLocation)
     return Path(docs) if docs else Path.home()
+
+
+#: How much memory Qt may use to remember small pictures (menu icons, drawn badges) so they are not drawn again and again.
+#: A fixed ceiling: the cache is emptied by `free_memory()` and can never grow past this.
+PIXMAP_CACHE_LIMIT_KB: int = 20 * 1024
+
+
+def tune_caches() -> None:
+    """Sets the one ceiling on the picture cache. Called once when the program starts."""
+    try:
+        QPixmapCache.setCacheLimit(PIXMAP_CACHE_LIMIT_KB)
+    except Exception:
+        logger.debug("tune_caches failed", exc_info=True)
+
+
+def free_memory() -> None:
+    """Gives back what closed windows and pages held: Qt's cache of small pictures is emptied and Python collects objects
+    that are no longer used. Called after a page is thrown away, a viewer closes or a long job ends -- never in a loop."""
+    try:
+        QPixmapCache.clear()
+        gc.collect()
+    except Exception:                       # cleaning up must never be the thing that breaks the program
+        logger.debug("free_memory failed", exc_info=True)
 
 
 def run_dialog(dialog: QDialog) -> int:
@@ -5484,21 +4548,15 @@ def run_dialog(dialog: QDialog) -> int:
 def screen_area(widget: Optional[QWidget] = None) -> Optional[QRect]:
     """The usable part (the screen minus the taskbar) of the screen `widget` is on -- the one place every window-size
     decision asks, so they all agree. None when there is no screen."""
-    screen = (
-        widget.screen() if widget is not None else None
-    ) or QGuiApplication.primaryScreen()
+    screen = (widget.screen() if widget is not None else None) or QGuiApplication.primaryScreen()
     return screen.availableGeometry() if screen is not None else None
 
 
-def _fit_to_screen(
-    dialog: QDialog, width: int, height: int, min_width: int, min_height: int
-) -> None:
+def _fit_to_screen(dialog: QDialog, width: int, height: int, min_width: int, min_height: int) -> None:
     """Sizes a dialog as the Tk build did, but never larger than the screen it opens on (many laptops are 768 px tall)."""
     area = screen_area(dialog)
     if area is not None:
-        width, height = min(width, max(320, area.width() - 40)), min(
-            height, max(320, area.height() - 60)
-        )
+        width, height = min(width, max(320, area.width() - 40)), min(height, max(320, area.height() - 60))
     dialog.setMinimumSize(min(min_width, width), min(min_height, height))
     dialog.resize(width, height)
 
@@ -5509,19 +4567,120 @@ def _no_default_button(*buttons: QPushButton) -> None:
         btn.setDefault(False)
 
 
+class ElidedLabel(QLabel):
+    """A one-line label that never forces its row wider: when there is too little room the text ends in "…" and the whole
+    text becomes the tooltip. `text()` always gives the whole text."""
+
+    def __init__(self, text: str = "", parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        self._full = ""
+        self._tip = ""
+        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        self.setText(text)
+
+    def text(self) -> str:
+        return self._full
+
+    def setText(self, text: str) -> None:
+        self._full = str(text)
+        self._elide()
+        self.updateGeometry()
+
+    def setToolTip(self, tip: str) -> None:
+        self._tip = str(tip)
+        self._elide()
+
+    def sizeHint(self) -> QSize:
+        metrics = self.fontMetrics()
+        return QSize(metrics.horizontalAdvance(self._full) + 2 * self.margin() + 2, max(metrics.height(), 16) + 2 * self.margin())
+
+    def minimumSizeHint(self) -> QSize:
+        return QSize(24, self.sizeHint().height())
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._elide()
+
+    def changeEvent(self, event) -> None:
+        super().changeEvent(event)
+        if event.type() in (QEvent.Type.FontChange, QEvent.Type.StyleChange):
+            self._elide()
+
+    def _elide(self) -> None:
+        room = self.contentsRect().width()
+        shown = self.fontMetrics().elidedText(self._full, Qt.TextElideMode.ElideRight, room) if room > 24 else self._full
+        if shown != QLabel.text(self):
+            QLabel.setText(self, shown)
+        QLabel.setToolTip(self, self._tip or (self._full if shown != self._full else ""))
+
+
+def make_elided_label(text: str = "", role: Optional[str] = None, tone: Optional[str] = None) -> ElidedLabel:
+    """Like make_label(), for a line that must give way (end in "…") instead of making its row wider."""
+    lbl = ElidedLabel(text)
+    if role:
+        lbl.setProperty("role", role)
+    if tone:
+        lbl.setProperty("tone", tone)
+    return lbl
+
+
+class EmptyState(QLabel):
+    """A friendly message laid over the middle of an empty list: what the list is for and what to do next. It sits in the
+    table's own viewport, lets mouse clicks pass through to the table and follows the table's size."""
+    MAX_WIDTH = 480
+
+    def __init__(self, table: QAbstractItemView):
+        self._area = table.viewport()
+        super().__init__(self._area)
+        self.setWordWrap(True)
+        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.setAccessibleName("Nothing to show yet")
+        set_role(self, "muted")
+        font = QFont(self.font())
+        font.setPixelSize(14)
+        self.setFont(font)
+        self._area.installEventFilter(self)
+        self.hide()
+
+    @property
+    def message(self) -> str:
+        """The text being shown ("" while the list has something in it)."""
+        return self.text() if self.isVisible() else ""
+
+    def show_message(self, text: str) -> None:
+        """Shows `text` (a short explanation), or hides the message when `text` is empty."""
+        if not text:
+            self.hide()
+            return
+        self.setText(text)
+        self._place()
+        self.show()
+        self.raise_()
+
+    def _place(self) -> None:
+        width = max(160, min(self.MAX_WIDTH, self._area.width() - 48))
+        self.setFixedWidth(width)
+        height = max(self.sizeHint().height(), self.heightForWidth(width))
+        self.setFixedHeight(height)
+        self.move((self._area.width() - width) // 2, max(12, (self._area.height() - height) // 2 - 16))
+
+    def eventFilter(self, obj, event):
+        if obj is self._area and event.type() == QEvent.Type.Resize and self.isVisible():
+            self._place()
+        return super().eventFilter(obj, event)
+
+
 class KeyTable(QTableWidget):
     """QTableWidget that turns Delete and Enter/Return into `delete_pressed` / `enter_pressed` signals
     (and swallows those two keys, so a table with no handler connected does nothing, exactly like the
     Tk Treeview). Used by the Dashboard, Clients and Catalog lists."""
-
     delete_pressed = Signal()
     enter_pressed = Signal()
 
     def __init__(self, *args):
         super().__init__(*args)
-        self._width_floors: Dict[int, int] = (
-            {}
-        )  # column -> the widest width its content has ever needed (fit_columns)
+        self._width_floors: Dict[int, int] = {}    # column -> the widest width its content has ever needed (fit_columns)
 
     def keyPressEvent(self, event):
         if event.key() == Qt.Key.Key_Delete:
@@ -5532,9 +4691,7 @@ class KeyTable(QTableWidget):
             return
         super().keyPressEvent(event)
 
-    def fit_columns(
-        self, samples: Dict[int, List[str]], padding: int = 24, cap: int = 260
-    ) -> None:
+    def fit_columns(self, samples: Dict[int, List[str]], padding: int = 24, cap: int = 260) -> None:
         """Widen -- never narrow -- the listed columns so the widest of their sample texts, the header text and
         whatever the column currently shows fit in this table's own font. The designed column widths suit Segoe UI;
         another font, a longer currency symbol or a bigger amount would otherwise end in "…" (a cut-off amount
@@ -5542,7 +4699,7 @@ class KeyTable(QTableWidget):
         dragged narrower stays where they put it until something wider than ever before has to be shown. The
         stretch column absorbs the difference."""
         header = self.horizontalHeader()
-        self.ensurePolished()  # the stylesheet's font (not the application default) is what is drawn
+        self.ensurePolished()                      # the stylesheet's font (not the application default) is what is drawn
         header.ensurePolished()
         body_fm = self.fontMetrics()
         head_font = QFont(header.font())
@@ -5552,24 +4709,11 @@ class KeyTable(QTableWidget):
         for col, texts in samples.items():
             if header.sectionResizeMode(col) == QHeaderView.ResizeMode.Stretch:
                 continue
-            shown = [
-                self.item(r, col).text()
-                for r in range(self.rowCount())
-                if self.item(r, col) is not None
-            ]
-            need = (
-                max((body_fm.horizontalAdvance(t) for t in [*texts, *shown]), default=0)
-                + padding
-            )
+            shown = [self.item(r, col).text() for r in range(self.rowCount()) if self.item(r, col) is not None]
+            need = max((body_fm.horizontalAdvance(t) for t in [*texts, *shown]), default=0) + padding
             head = self.horizontalHeaderItem(col)
-            if (
-                head is not None
-            ):  # room for the sort arrow too (any column can become the sorted one)
-                need = max(
-                    need,
-                    head_fm.horizontalAdvance(head.text().rstrip(" ▲▼") + "  ▼")
-                    + padding,
-                )
+            if head is not None:                   # room for the sort arrow too (any column can become the sorted one)
+                need = max(need, head_fm.horizontalAdvance(head.text().rstrip(" ▲▼") + "  ▼") + padding)
             need = min(need, cap)
             if need > floors.get(col, 0):
                 floors[col] = need
@@ -5583,25 +4727,17 @@ class KeyTable(QTableWidget):
         index = self.model().index(row, 0)
         sm = self.selectionModel()
         sm.setCurrentIndex(index, QItemSelectionModel.SelectionFlag.NoUpdate)
-        sm.select(
-            index,
-            QItemSelectionModel.SelectionFlag.ClearAndSelect
-            | QItemSelectionModel.SelectionFlag.Rows,
-        )
+        sm.select(index, QItemSelectionModel.SelectionFlag.ClearAndSelect | QItemSelectionModel.SelectionFlag.Rows)
 
 
 # =============================================================================
 #  13. PDF VIEWER, PRINTING & SHARING
 # =============================================================================
-PDF_FIT_FILL: float = 0.97  # Tk: the fitted page fills 97% of the canvas
+PDF_FIT_FILL: float = 0.97                # Tk: the fitted page fills 97% of the canvas
 PDF_ZOOM_STEP: float = 0.15
 PDF_PRINT_MAX_DPI: int = 300
-PDF_MAX_RENDER_PIXELS: int = (
-    64_000_000  # safety net for the biggest zoom on a 4K / HiDPI screen
-)
-_VIEWER_STATE: Dict[str, Any] = {
-    "save_dir": None
-}  # folder of the last "Save a copy" (this session)
+PDF_MAX_RENDER_PIXELS: int = 64_000_000   # safety net for the biggest zoom on a 4K / HiDPI screen
+_VIEWER_STATE: Dict[str, Any] = {"save_dir": None}      # folder of the last "Save a copy" (this session)
 
 
 def _is_windows() -> bool:
@@ -5612,8 +4748,7 @@ def _is_windows() -> bool:
 def _load_qtpdf():
     """The QPdfDocument class, or None when PySide6's QtPdf module is not installed (it ships in the
     PySide6-Addons wheel, which a plain `pip install PySide6` includes). Imported on first use so the
-    application still starts without it -- the invoice is then simply opened in the default PDF program.
-    """
+    application still starts without it -- the invoice is then simply opened in the default PDF program."""
     try:
         from PySide6.QtPdf import QPdfDocument
     except ImportError:
@@ -5643,15 +4778,14 @@ def _pdf_error_text(QPdfDocument, error) -> str:
         E.FileNotFound: "The file was not found.",
         E.InvalidFileFormat: "This is not a valid PDF document.",
         E.IncorrectPassword: "This PDF is password-protected.",
-        E.UnsupportedSecurityScheme: "This PDF uses an unsupported security scheme.",
-    }.get(error, "The PDF could not be loaded.")
+        E.UnsupportedSecurityScheme: "This PDF is protected in a way that Vyaprix cannot open.",
+    }.get(error, "The file could not be opened.")
 
 
 def _render_on_white(doc, page: int, size: QSize) -> QImage:
     """One PDF page as an opaque image on white paper. PDFium renders onto a *transparent* bitmap, so everything
     the PDF leaves unpainted (most of an invoice's paper) would show whatever is behind the image -- the page's
-    shadow in the viewer, or an undefined background on a print-to-PDF printer. Composite it on white instead.
-    """
+    shadow in the viewer, or an undefined background on a print-to-PDF printer. Composite it on white instead."""
     rendered = doc.render(page, size)
     paper = QImage(rendered.size(), QImage.Format.Format_RGB32)
     paper.fill(QColor("#FFFFFF"))
@@ -5671,16 +4805,14 @@ def _default_save_dir() -> Path:
 class _PageCanvas(QWidget):
     """The viewer's drawing surface: a neutral backdrop, the page's drop shadow and 1 px edge, and the rendered
     page, centred. It lives in a QScrollArea, so a page zoomed beyond the window can be scrolled. The backdrop,
-    shadow and edge colours come from the active theme (the Tk canvas used one fixed grey).
-    """
-
-    zoom_wheel = Signal(int)  # +1 / -1: Ctrl + mouse wheel
+    shadow and edge colours come from the active theme (the Tk canvas used one fixed grey)."""
+    zoom_wheel = Signal(int)            # +1 / -1: Ctrl + mouse wheel
     SHADOW = 4
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self._image: Optional[QImage] = None
-        self._page_px = QSize(0, 0)  # the page's size in logical pixels
+        self._page_px = QSize(0, 0)        # the page's size in logical pixels
         self.setMinimumSize(1, 1)
 
     @property
@@ -5694,15 +4826,10 @@ class _PageCanvas(QWidget):
             self.setMinimumSize(1, 1)
         else:
             dpr = image.devicePixelRatio() or 1.0
-            self._page_px = QSize(
-                round(image.width() / dpr), round(image.height() / dpr)
-            )
+            self._page_px = QSize(round(image.width() / dpr), round(image.height() / dpr))
             # Never smaller than the page (plus its shadow and edge), so a page zoomed beyond the window gets scroll
             # bars. At "fit" the page is at most 97% of the viewport, so this never forces scroll bars there.
-            self.setMinimumSize(
-                self._page_px.width() + self.SHADOW + 1,
-                self._page_px.height() + self.SHADOW + 1,
-            )
+            self.setMinimumSize(self._page_px.width() + self.SHADOW + 1, self._page_px.height() + self.SHADOW + 1)
         self.update()
 
     def paintEvent(self, event):
@@ -5715,13 +4842,9 @@ class _PageCanvas(QWidget):
         y = max((self.height() - h) // 2, 0)
         shadow = QColor(theme_color("shadow"))
         shadow.setAlpha(110)
-        p.fillRect(
-            x, y, w + self.SHADOW, h + self.SHADOW, shadow
-        )  # soft drop shadow, offset to the bottom right
+        p.fillRect(x, y, w + self.SHADOW, h + self.SHADOW, shadow)       # soft drop shadow, offset to the bottom right
         p.setPen(QPen(QColor(theme_color("border_strong")), 1))
-        p.drawRect(
-            x - 1, y - 1, w + 1, h + 1
-        )  # crisp 1 px edge exactly around the page
+        p.drawRect(x - 1, y - 1, w + 1, h + 1)                            # crisp 1 px edge exactly around the page
         p.drawImage(QPoint(x, y), self._image)
 
     def wheelEvent(self, event):
@@ -5740,11 +4863,7 @@ class _PageCanvas(QWidget):
             event.ignore()
             return
         delta = event.angleDelta()
-        bar = (
-            area.verticalScrollBar()
-            if (delta.y() or not delta.x())
-            else area.horizontalScrollBar()
-        )
+        bar = area.verticalScrollBar() if (delta.y() or not delta.x()) else area.horizontalScrollBar()
         QApplication.sendEvent(bar, event)
         event.accept()
 
@@ -5754,7 +4873,7 @@ class _PrinterDialog(QDialog):
 
     def __init__(self, parent, printers: List[str], default_printer: str = ""):
         super().__init__(parent)
-        self.setWindowTitle("Select Printer")
+        self.setWindowTitle("Choose a Printer")
         self.setModal(True)
         self.choice: Optional[Tuple[str, Optional[str]]] = None
         self._printers = list(printers)
@@ -5762,30 +4881,24 @@ class _PrinterDialog(QDialog):
         lay = QVBoxLayout(self)
         lay.setContentsMargins(20, 15, 20, 15)
         lay.setSpacing(8)
-        lay.setSizeConstraint(
-            QLayout.SizeConstraint.SetFixedSize
-        )  # Tk: resizable(False, False)
+        lay.setSizeConstraint(QLayout.SizeConstraint.SetFixedSize)           # Tk: resizable(False, False)
 
-        lay.addWidget(make_label("🖨️ Choose a printer destination:", "h3"))
+        lay.addWidget(make_label("🖨️ Choose a printer:", "h3"))
 
         self.combo = QComboBox()
-        self.combo.setMinimumWidth(360)  # => a 400 px wide dialog, as in Tk
+        self.combo.setMinimumWidth(360)                                       # => a 400 px wide dialog, as in Tk
         if self._printers:
             self.combo.addItems(self._printers)
-            self.combo.setCurrentText(
-                default_printer
-                if default_printer in self._printers
-                else self._printers[0]
-            )
+            self.combo.setCurrentText(default_printer if default_printer in self._printers else self._printers[0])
         else:
-            self.combo.addItem("No printers detected")
+            self.combo.addItem("No printers found")
             self.combo.setEnabled(False)
         lay.addWidget(self.combo)
 
         row = QHBoxLayout()
         row.setContentsMargins(0, 2, 0, 2)
         row.addStretch(1)
-        self.print_btn = make_button("Print Document", "success", self._on_print)
+        self.print_btn = make_button("Print", "success", self._on_print)
         self.cancel_btn = make_button("Cancel", "secondary-outline", self.reject)
         row.addWidget(self.print_btn)
         row.addSpacing(10)
@@ -5794,21 +4907,15 @@ class _PrinterDialog(QDialog):
         self.print_btn.setEnabled(bool(self._printers))
 
         lay.addWidget(hline())
-        self.system_btn = make_button(
-            "⚙️ Use System Print Dialog", "info-outline", self._on_system_dialog
-        )
-        self.manual_btn = make_button(
-            "🌐 Open PDF Manually (Browser/Viewer)",
-            "primary-outline",
-            self._on_manual_open,
-        )
+        self.system_btn = make_button("⚙️ More Print Options…", "info-outline", self._on_system_dialog)
+        self.manual_btn = make_button("🌐 Open the Invoice in Another Program", "primary-outline", self._on_manual_open)
         lay.addWidget(self.system_btn)
         lay.addWidget(self.manual_btn)
 
         for btn in (self.print_btn, self.cancel_btn, self.system_btn, self.manual_btn):
             btn.setAutoDefault(False)
         if self._printers:
-            self.print_btn.setDefault(True)  # Enter prints to the selected printer
+            self.print_btn.setDefault(True)                                   # Enter prints to the selected printer
 
     def _on_print(self):
         if not self._printers:
@@ -5837,15 +4944,13 @@ class PDFViewer(QDialog):
         self.page_idx = 0
         self.total = 0
         self.zoom = 1.0
-        self._failed = False  # the PDF could not be opened: show()/exec() become no-ops
+        self._failed = False        # the PDF could not be opened: show()/exec() become no-ops
         self._released = False
         self._placed = False
 
         self.setWindowTitle(f"Preview  —  {self.pdf_path.name}")
-        self.setModal(True)  # Tk: transient + grab_set() (non-blocking show())
-        self.setAttribute(
-            Qt.WidgetAttribute.WA_DeleteOnClose
-        )  # nobody keeps a reference: free it when it closes
+        self.setModal(True)                                       # Tk: transient + grab_set() (non-blocking show())
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)    # nobody keeps a reference: free it when it closes
         self.setWindowFlag(Qt.WindowType.WindowMaximizeButtonHint, True)
 
         # --- Size (Tk: 900x720, also the minimum -- smaller only on a screen that cannot hold it; centred on first show) ---
@@ -5854,9 +4959,7 @@ class PDFViewer(QDialog):
         if not self._open_document():
             return
 
-        self._resize_timer = QTimer(
-            self
-        )  # Tk: after(130, _render) debounce on <Configure>
+        self._resize_timer = QTimer(self)                         # Tk: after(130, _render) debounce on <Configure>
         self._resize_timer.setSingleShot(True)
         self._resize_timer.timeout.connect(self._render)
 
@@ -5870,22 +4973,16 @@ class PDFViewer(QDialog):
         QPdfDocument = _load_qtpdf()
         if QPdfDocument is None:
             return self._give_up(
-                "The built-in preview needs PySide6's QtPdf module (it is part of `pip install PySide6`).\n"
-                "The invoice will open in your default PDF viewer instead.",
-                external=True,
-            )
+                "The built-in preview is not available on this computer.\n"
+                "The invoice will open in your usual PDF program instead.", external=True)
         doc = QPdfDocument(self)
         error = doc.load(str(self.pdf_path))
         if error != QPdfDocument.Error.None_:
             doc.close()
-            return self._give_up(
-                f"Cannot open file:\n{self.pdf_path}\n\n{_pdf_error_text(QPdfDocument, error)}"
-            )
+            return self._give_up(f"This invoice could not be opened:\n{self.pdf_path}\n\n{_pdf_error_text(QPdfDocument, error)}")
         if doc.pageCount() < 1:
             doc.close()
-            return self._give_up(
-                f"Cannot open file:\n{self.pdf_path}\n\nThe PDF has no pages."
-            )
+            return self._give_up(f"This invoice could not be opened:\n{self.pdf_path}\n\nThe file has no pages.")
         self.doc = doc
         self.total = doc.pageCount()
         return True
@@ -5901,7 +4998,7 @@ class PDFViewer(QDialog):
 
     def setVisible(self, visible: bool):
         if visible and self._failed:
-            return  # the Tk window was destroyed in __init__
+            return                                                 # the Tk window was destroyed in __init__
         super().setVisible(visible)
 
     def exec(self):
@@ -5922,12 +5019,8 @@ class PDFViewer(QDialog):
         tb.setContentsMargins(10, 7, 10, 7)
         tb.setSpacing(4)
 
-        self.prev_btn = make_button(
-            "◀  Prev", "primary", self._prev, "Previous page (← or Page Up)"
-        )
-        self.next_btn = make_button(
-            "Next  ▶", "primary", self._next, "Next page (→ or Page Down)"
-        )
+        self.prev_btn = make_button("◀  Prev", "primary", self._prev, "Previous page (← or Page Up)")
+        self.next_btn = make_button("Next  ▶", "primary", self._next, "Next page (→ or Page Down)")
         for b in (self.prev_btn, self.next_btn):
             b.setMinimumWidth(88)
         tb.addWidget(self.prev_btn)
@@ -5938,39 +5031,19 @@ class PDFViewer(QDialog):
         tb.addStretch(1)
 
         # Right-hand group, left to right: Fit  ⊖  ⊕  100%  |  Print  Save  Share  Close   (Tk packed it right to left)
-        self.fit_btn = make_button(
-            "Fit",
-            "secondary-outline",
-            self._reset_zoom,
-            "Fit the page to the window (Ctrl+0)",
-        )
-        self.zoom_out_btn = make_button(
-            "⊖", "secondary-outline", self._zoom_out, "Zoom out (Ctrl + −)"
-        )
-        self.zoom_in_btn = make_button(
-            "⊕", "secondary-outline", self._zoom_in, "Zoom in (Ctrl + +)"
-        )
+        self.fit_btn = make_button("Fit", "secondary-outline", self._reset_zoom, "Fit the page to the window (Ctrl+0)")
+        self.zoom_out_btn = make_button("⊖", "secondary-outline", self._zoom_out, "Zoom out (Ctrl + −)")
+        self.zoom_in_btn = make_button("⊕", "secondary-outline", self._zoom_in, "Zoom in (Ctrl + +)")
         self.fit_btn.setMinimumWidth(48)
         for b in (self.zoom_out_btn, self.zoom_in_btn):
             b.setMinimumWidth(40)
         self.zoom_lbl = QLabel("100%")
         self.zoom_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.zoom_lbl.setMinimumWidth(52)
-        self.print_btn = make_button(
-            "🖨  Print", "success", self._print, "Print this PDF (Ctrl+P)"
-        )
-        self.save_btn = make_button(
-            "💾  Save", "secondary", self._save_copy, "Save a copy of this PDF (Ctrl+E)"
-        )
-        self.share_btn = make_button(
-            "📤 Share",
-            "info",
-            self._open_share,
-            "Share this invoice by WhatsApp or e-mail",
-        )
-        self.close_btn = make_button(
-            "✕  Close", "danger", self._close, "Close this viewer (Esc)"
-        )
+        self.print_btn = make_button("🖨  Print", "success", self._print, "Print this PDF (Ctrl+P)")
+        self.save_btn = make_button("💾  Save", "secondary", self._save_copy, "Save a copy of this PDF (Ctrl+E)")
+        self.share_btn = make_button("📤 Share", "info", self._open_share, "Share this invoice by WhatsApp or e-mail")
+        self.close_btn = make_button("✕  Close", "danger", self._close, "Close this viewer (Esc)")
         for b in (self.print_btn, self.save_btn, self.share_btn, self.close_btn):
             b.setMinimumWidth(88)
 
@@ -5982,7 +5055,7 @@ class PDFViewer(QDialog):
         for w in (self.print_btn, self.save_btn, self.share_btn, self.close_btn):
             tb.addWidget(w)
         for b in bar.findChildren(QPushButton):
-            b.setAutoDefault(False)  # Enter must not "click" a random toolbar button
+            b.setAutoDefault(False)                                  # Enter must not "click" a random toolbar button
 
         root.addWidget(bar)
         root.addWidget(hline())
@@ -5996,12 +5069,8 @@ class PDFViewer(QDialog):
         self.scroll.setWidget(self.canvas)
         root.addWidget(self.scroll, 1)
 
-        hint = make_label(
-            "← → or Page Up/Down to navigate  •  Ctrl + / − zoom  •  Ctrl+0 fit  •  "
-            "Ctrl+P print  •  Ctrl+E save  •  Esc close",
-            "small",
-            align=Qt.AlignmentFlag.AlignCenter,
-        )
+        hint = make_label("← → or Page Up/Down to navigate  •  Ctrl + / − zoom  •  Ctrl+0 fit  •  "
+                          "Ctrl+P print  •  Ctrl+E save  •  Esc close", "small", align=Qt.AlignmentFlag.AlignCenter)
         hint.setContentsMargins(0, 3, 0, 3)
         root.addWidget(hint)
 
@@ -6033,24 +5102,21 @@ class PDFViewer(QDialog):
         if not self._placed:
             self._placed = True
             area = screen_area(self.parentWidget())
-            if area is not None:  # Tk: centred on the screen
+            if area is not None:                                       # Tk: centred on the screen
                 self.move(area.center() - QPoint(self.width() // 2, self.height() // 2))
         self.scroll.setFocus()
-        self._schedule_render(30)  # first picture as soon as the window has its size
+        self._schedule_render(30)                                      # first picture as soon as the window has its size
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
         if not self._failed:
-            self._schedule_render(130)  # re-render once the user stops resizing
+            self._schedule_render(130)                                 # re-render once the user stops resizing
 
     def event(self, event):
         # Dragged to a monitor with another pixel density (100 % -> 150 %): draw the page again at that screen's
         # resolution, otherwise it stays as soft as the old monitor's bitmap.
-        if (
-            event.type() == QEvent.Type.DevicePixelRatioChange
-            and not getattr(self, "_failed", True)
-            and not getattr(self, "_released", True)
-        ):
+        if event.type() == QEvent.Type.DevicePixelRatioChange and not getattr(self, "_failed", True) \
+                and not getattr(self, "_released", True):
             self._schedule_render(30)
         return super().event(event)
 
@@ -6067,6 +5133,7 @@ class PDFViewer(QDialog):
         self._resize_timer.stop()
         if self.doc is not None:
             self.doc.close()
+        QTimer.singleShot(400, free_memory)       # the rendered pages are big: give the memory back once the window is gone
 
     def done(self, result):
         self._release_document()
@@ -6085,9 +5152,7 @@ class PDFViewer(QDialog):
     def _render(self, reset_scroll: bool = False):
         if self._released or self.doc is None:
             return
-        viewport = (
-            self.scroll.maximumViewportSize()
-        )  # the viewport as if there were no scroll bars: stable fit
+        viewport = self.scroll.maximumViewportSize()      # the viewport as if there were no scroll bars: stable fit
         cw, ch = viewport.width(), viewport.height()
         if cw <= 1 or ch <= 1:
             return
@@ -6101,15 +5166,11 @@ class PDFViewer(QDialog):
 
         dpr = self.devicePixelRatioF() or 1.0
         pw, ph = max(round(w * dpr), 1), max(round(h * dpr), 1)
-        if (
-            pw * ph > PDF_MAX_RENDER_PIXELS
-        ):  # never ask PDFium for an absurdly large bitmap
+        if pw * ph > PDF_MAX_RENDER_PIXELS:                 # never ask PDFium for an absurdly large bitmap
             shrink = (PDF_MAX_RENDER_PIXELS / (pw * ph)) ** 0.5
             pw, ph = max(int(pw * shrink), 1), max(int(ph * shrink), 1)
         image = _render_on_white(self.doc, self.page_idx, QSize(pw, ph))
-        image.setDevicePixelRatio(
-            pw / w
-        )  # logical size stays w x h whatever the bitmap size
+        image.setDevicePixelRatio(pw / w)                    # logical size stays w x h whatever the bitmap size
 
         # Keep the point at the middle of the window where it is while zooming / resizing.
         hbar, vbar = self.scroll.horizontalScrollBar(), self.scroll.verticalScrollBar()
@@ -6119,9 +5180,7 @@ class PDFViewer(QDialog):
         cy = (vbar.value() + view.height() / 2) / max(old.height(), 1)
 
         self.canvas.set_image(image)
-        self.canvas.resize(
-            viewport.expandedTo(self.canvas.minimumSize())
-        )  # adopt the new size now (updates the bars)
+        self.canvas.resize(viewport.expandedTo(self.canvas.minimumSize()))   # adopt the new size now (updates the bars)
         QApplication.sendPostedEvents(None, int(QEvent.Type.LayoutRequest))
         new = self.canvas.size()
         view = self.scroll.viewport().size()
@@ -6133,9 +5192,7 @@ class PDFViewer(QDialog):
             vbar.setValue(round(cy * new.height() - view.height() / 2))
 
         self.page_lbl.setText(f"Page {self.page_idx + 1} / {self.total}")
-        self.zoom_lbl.setText(
-            f"{round(self.zoom * 100)}%"
-        )  # Tk: int() -> 1.3 showed as "129%"
+        self.zoom_lbl.setText(f"{round(self.zoom * 100)}%")     # Tk: int() -> 1.3 showed as "129%"
         self._update_nav_state()
 
     def _update_nav_state(self):
@@ -6180,12 +5237,12 @@ class PDFViewer(QDialog):
             try:
                 subprocess.run(["lp", str(self.pdf_path)], check=True)
             except Exception as exc:
-                Messagebox.show_error("Print Error", str(exc), parent=self)
+                Messagebox.show_error("Print Error", f"The invoice could not be printed:\n{exc}", parent=self)
             return
 
         support = _load_print_support()
         if support is None:
-            self._print_via_shell()  # Tk: the "PyQt5 is missing" fallback
+            self._print_via_shell()      # Tk: the "PyQt5 is missing" fallback
             return
         QPrinterInfo = support[2]
         printers = list(QPrinterInfo.availablePrinterNames())
@@ -6210,24 +5267,16 @@ class PDFViewer(QDialog):
             os.startfile(self.pdf_path, "print")
         except OSError:
             Messagebox.show_warning(
-                "Manual Print Required",
-                "A PDF reader is not set as default.\n"
-                "The file will open — press Ctrl+P to print.",
-                parent=self,
-            )
+                "Print It Yourself",
+                "No program is set up on this computer to print PDF files.\n"
+                "The invoice will open instead -- press Ctrl+P there to print it.", parent=self)
             self._open_manually()
 
     def _open_manually(self):
         if not open_in_system_viewer(self.pdf_path):
-            Messagebox.show_error(
-                "Open Error",
-                f"Windows could not open the PDF:\n{self.pdf_path}",
-                parent=self,
-            )
+            Messagebox.show_error("Open Error", f"The invoice could not be opened:\n{self.pdf_path}", parent=self)
 
-    def _print_with_qt(
-        self, printer_name: Optional[str] = None, show_dialog: bool = False
-    ):
+    def _print_with_qt(self, printer_name: Optional[str] = None, show_dialog: bool = False):
         """Both ways of printing: straight to a named printer, or through the system print dialog."""
         support = _load_print_support()
         if support is None:
@@ -6251,42 +5300,29 @@ class PDFViewer(QDialog):
             busy = True
             painter = QPainter()
             if not painter.begin(printer):
-                raise RuntimeError(
-                    "The print job could not be started.\n"
-                    "Check that the printer is switched on and not in use by another program."
-                )
+                raise RuntimeError("The print job could not be started.\n"
+                                   "Check that the printer is switched on and not in use by another program.")
             dpi = min(printer.resolution() or PDF_PRINT_MAX_DPI, PDF_PRINT_MAX_DPI)
             scale = dpi / 72.0
             for page_index in range(self.total):
                 if page_index > 0:
                     printer.newPage()
                 size_pt = self.doc.pagePointSize(page_index)
-                image = _render_on_white(
-                    self.doc,
-                    page_index,
-                    QSize(
-                        max(round(size_pt.width() * scale), 1),
-                        max(round(size_pt.height() * scale), 1),
-                    ),
-                )
+                image = _render_on_white(self.doc, page_index, QSize(max(round(size_pt.width() * scale), 1),
+                                                                     max(round(size_pt.height() * scale), 1)))
                 # Fit the page into the printable area, centred. (Tk moved the painter's viewport cumulatively, so
                 # every page after the first was drawn at the wrong offset.)
                 area = painter.viewport()
-                fitted = image.size().scaled(
-                    area.size(), Qt.AspectRatioMode.KeepAspectRatio
-                )
-                target = QRect(
-                    area.x() + (area.width() - fitted.width()) // 2,
-                    area.y() + (area.height() - fitted.height()) // 2,
-                    fitted.width(),
-                    fitted.height(),
-                )
+                fitted = image.size().scaled(area.size(), Qt.AspectRatioMode.KeepAspectRatio)
+                target = QRect(area.x() + (area.width() - fitted.width()) // 2,
+                               area.y() + (area.height() - fitted.height()) // 2,
+                               fitted.width(), fitted.height())
                 painter.drawImage(target, image)
         except Exception as exc:
             if busy:
                 QApplication.restoreOverrideCursor()
                 busy = False
-            Messagebox.show_error("Print Error", str(exc), parent=self)
+            Messagebox.show_error("Print Error", f"The invoice could not be printed:\n{exc}", parent=self)
             return
         finally:
             # Tk BUG FIX kept: cleanup is on every path (a failure part-way used to leave the painter attached to
@@ -6296,28 +5332,25 @@ class PDFViewer(QDialog):
             if busy:
                 QApplication.restoreOverrideCursor()
         if not show_dialog:
-            Messagebox.show_info(
-                "Success", f"Document sent to {printer_name}!", parent=self
-            )
+            notify(self, f"Sent to the printer: {printer_name}.")
 
     # ------------------------------------------------------------------ #
     #  Save a copy / share
     # ------------------------------------------------------------------ #
     def _save_copy(self):
         start = str(_default_save_dir() / self.pdf_path.name)
-        path, _ = QFileDialog.getSaveFileName(
-            self, "Save As", start, "PDF Documents (*.pdf)"
-        )
+        path, _ = QFileDialog.getSaveFileName(self, "Save a Copy", start, "PDF files (*.pdf)")
         if not path:
             return
-        if not Path(path).suffix:  # Tk: defaultextension=".pdf"
+        if not Path(path).suffix:                    # Tk: defaultextension=".pdf"
             path += ".pdf"
         try:
             shutil.copy(self.pdf_path, path)
-            _VIEWER_STATE["save_dir"] = str(Path(path).parent)
-            Messagebox.show_info("Saved", f"Invoice saved to:\n{path}", parent=self)
         except Exception as exc:
-            Messagebox.show_error("Save Error", str(exc), parent=self)
+            Messagebox.show_error("Save Error", f"The invoice could not be saved:\n{exc}", parent=self)
+            return
+        _VIEWER_STATE["save_dir"] = str(Path(path).parent)
+        notify(self, f"PDF saved: {Path(path).name}")
 
     def _open_share(self):
         run_dialog(ShareDialog(self, self.pdf_path, self.invoice_data))
@@ -6341,23 +5374,21 @@ class ShareDialog(QDialog):
         lay = QVBoxLayout(self)
         lay.setContentsMargins(20, 20, 20, 20)
         lay.setSpacing(0)
-        lay.setSizeConstraint(
-            QLayout.SizeConstraint.SetFixedSize
-        )  # Tk: 420x340, not resizable
+        lay.setSizeConstraint(QLayout.SizeConstraint.SetFixedSize)         # Tk: 420x340, not resizable
 
         lay.addWidget(make_label("📤 Share Invoice", "h2"))
         lay.addSpacing(15)
 
-        lay.addWidget(make_label("WhatsApp Number (with Country Code):", "caption"))
+        lay.addWidget(make_label("WhatsApp number (with country code):", "caption"))
         lay.addSpacing(2)
         self.phone_entry = QLineEdit()
-        self.phone_entry.setMinimumWidth(380)  # => a 420 px wide dialog, as in Tk
+        self.phone_entry.setMinimumWidth(380)                                # => a 420 px wide dialog, as in Tk
         self.phone_entry.setPlaceholderText("e.g. +91 98765 43210")
         self.phone_entry.returnPressed.connect(self._send_whatsapp)
         lay.addWidget(self.phone_entry)
         lay.addSpacing(10)
 
-        lay.addWidget(make_label("Client Email Address:", "caption"))
+        lay.addWidget(make_label("Client's email address:", "caption"))
         lay.addSpacing(2)
         self.email_entry = QLineEdit()
         self.email_entry.setPlaceholderText("e.g. accounts@client.com")
@@ -6367,23 +5398,16 @@ class ShareDialog(QDialog):
 
         row = QHBoxLayout()
         row.setSpacing(10)
-        self.whatsapp_btn = make_button(
-            "💬 WhatsApp", "success", self._send_whatsapp, min_height=32
-        )
-        self.email_btn = make_button(
-            "✉️ Email", "primary", self._send_email, min_height=32
-        )
+        self.whatsapp_btn = make_button("💬 WhatsApp", "success", self._send_whatsapp, min_height=32)
+        self.email_btn = make_button("✉️ Email", "primary", self._send_email, min_height=32)
         row.addWidget(self.whatsapp_btn, 1)
         row.addWidget(self.email_btn, 1)
         lay.addLayout(row)
         lay.addSpacing(15)
 
-        note = make_label(
-            "Note: The PDF file path will be copied to your clipboard.\n"
-            "Simply paste (Ctrl+V) when attaching the file.",
-            "small",
-            align=Qt.AlignmentFlag.AlignCenter,
-        )
+        note = make_label("Tip: the invoice file's location is copied for you.\n"
+                          "When you attach the file, just paste it (Ctrl+V) into the file name box.", "small",
+                          align=Qt.AlignmentFlag.AlignCenter)
         lay.addWidget(note)
         for btn in (self.whatsapp_btn, self.email_btn):
             btn.setAutoDefault(False)
@@ -6393,30 +5417,26 @@ class ShareDialog(QDialog):
         if not contact_info:
             return
         # Basic regex to pull an e-mail address and a phone number out of the free-text contact box
-        email_match = re.search(r"[\w\.-]+@[\w\.-]+", contact_info)
+        email_match = re.search(r'[\w\.-]+@[\w\.-]+', contact_info)
         if email_match:
             self.email_entry.setText(email_match.group(0))
-        phone_match = re.search(r"\+?\d[\d\s-]{8,}\d", contact_info)
+        phone_match = re.search(r'\+?\d[\d\s-]{8,}\d', contact_info)
         if phone_match:
-            self.phone_entry.setText(
-                re.sub(r"[^\d+]", "", phone_match.group(0))
-            )  # digits and a leading + only
+            self.phone_entry.setText(re.sub(r'[^\d+]', '', phone_match.group(0)))   # digits and a leading + only
 
     def _copy_path_to_clipboard(self):
         QGuiApplication.clipboard().setText(str(self.pdf_path))
 
     def _send_whatsapp(self):
         phone = self.phone_entry.text().strip()
-        clean_phone = re.sub(r"[^\d]", "", phone)
-        if not clean_phone:  # empty, or nothing but punctuation / letters
-            Messagebox.show_warning(
-                "Missing Info", "Please enter a WhatsApp number.", parent=self
-            )
+        clean_phone = re.sub(r'[^\d]', '', phone)
+        if not clean_phone:                       # empty, or nothing but punctuation / letters
+            Messagebox.show_warning("Missing Info", "Please enter a WhatsApp number.", parent=self)
             return
 
         self._copy_path_to_clipboard()
 
-        inv_num = self.invoice_data.get("invoice_number", "Invoice")
+        inv_num = self.invoice_data.get('invoice_number', 'Invoice')
         msg = f"Hello! Please find attached {inv_num}. Thank you for your business."
         safe_msg = urllib.parse.quote(msg)
         self._open_link(f"https://wa.me/{clean_phone}?text={safe_msg}")
@@ -6424,32 +5444,23 @@ class ShareDialog(QDialog):
     def _send_email(self):
         email = self.email_entry.text().strip()
         if not email:
-            Messagebox.show_warning(
-                "Missing Info", "Please enter an email address.", parent=self
-            )
+            Messagebox.show_warning("Missing Info", "Please enter an email address.", parent=self)
             return
 
         self._copy_path_to_clipboard()
 
-        inv_num = self.invoice_data.get("invoice_number", "Invoice")
-        subject = urllib.parse.quote(
-            f"Invoice {inv_num} from {self.invoice_data.get('your_name', 'Us')}"
-        )
-        body = urllib.parse.quote(
-            f"Hello,\n\nPlease find attached {inv_num}.\n\nThank you!"
-        )
+        inv_num = self.invoice_data.get('invoice_number', 'Invoice')
+        subject = urllib.parse.quote(f"Invoice {inv_num} from {self.invoice_data.get('your_name', 'Us')}")
+        body = urllib.parse.quote(f"Hello,\n\nPlease find attached {inv_num}.\n\nThank you!")
         self._open_link(f"mailto:{email}?subject={subject}&body={body}")
 
     def _open_link(self, url: str):
         if webbrowser.open(url):
-            self.accept()  # Tk: destroy() -- the job is done
+            self.accept()                          # Tk: destroy() -- the job is done
         else:
             Messagebox.show_warning(
-                "Share",
-                "Could not open your browser / e-mail program.\n"
-                "The PDF path is on the clipboard, so you can still paste it into a message.",
-                parent=self,
-            )
+                "Share", "Vyaprix could not open WhatsApp or your email program.\n"
+                "The invoice file's location is copied, so you can still paste it into a message.", parent=self)
 
 
 # =============================================================================
@@ -6504,27 +5515,16 @@ class _EditDialog(QDialog):
 class ClientDialog(_EditDialog):
     """Add or edit a single Address Book entry."""
 
-    def __init__(
-        self,
-        parent,
-        db_manager: "DatabaseManager",
-        client: Optional[Dict],
-        on_saved: Callable,
-    ):
-        super().__init__(
-            parent,
-            "Edit Client" if client else "Add Client",
-            "Edit Client Details" if client else "New Client Details",
-        )
+    def __init__(self, parent, db_manager: "DatabaseManager", client: Optional[Dict], on_saved: Callable):
+        super().__init__(parent, "Edit Client" if client else "Add Client",
+                         "Edit Client Details" if client else "New Client Details")
         self.db_manager = db_manager
         self.client = client
         self.on_saved = on_saved
 
         self.name_entry = PlaceholderEntry(placeholder="Enter client name")
         self._add_field("Client / Company Name *", self.name_entry)
-        self.contact_text = self._multiline(
-            "+91 98765 43210\nname@email.com\nCity, State", 4
-        )
+        self.contact_text = self._multiline("+91 98765 43210\nname@email.com\nCity, State", 4)
         self._add_field("Contact Info", self.contact_text)
         self.gstin_entry = PlaceholderEntry(placeholder="e.g., 22ABCDE1234F1Z5")
         self._add_field("GSTIN (Optional)", self.gstin_entry, space_after=15)
@@ -6540,19 +5540,16 @@ class ClientDialog(_EditDialog):
     def _save(self):
         name = self.name_entry.text().strip()
         if not name:
-            return Messagebox.show_error(
-                "Validation", "Client name is required.", parent=self
-            )
+            return Messagebox.show_error("Please Check", "Please enter the client's name.", parent=self)
         contact = self.contact_text.toPlainText().strip()
         gstin = self.gstin_entry.text().strip()
         # IMPROVEMENT over the Tk build: the invoice form refuses to save an invoice whose client
         # GSTIN is malformed, so catch it here instead of at invoicing time.
         if gstin and not is_valid_gstin(gstin):
             return Messagebox.show_error(
-                "Invalid GST Number",
-                f'"{gstin}" is not a valid GSTIN.\nA GSTIN is 15 characters, for example 22ABCDE1234F1Z5.',
-                parent=self,
-            )
+                "Check the GSTIN",
+                f'"{gstin}" is not a valid GSTIN.\nA GSTIN has 15 characters, for example 22ABCDE1234F1Z5.',
+                parent=self)
         cid = self.client.get("id") if self.client else None
         ok, err = self.db_manager.upsert_client_by_id(cid, name, contact, gstin)
         if ok:
@@ -6564,27 +5561,18 @@ class ClientDialog(_EditDialog):
 
 class _UnitRateRow(QWidget):
     """One "unit | rate | x" line of the catalog dialog's "also sold per" list."""
-
     remove_requested = Signal(object)
 
-    def __init__(
-        self, unit: str = "", rate: float = 0.0, parent: Optional[QWidget] = None
-    ):
+    def __init__(self, unit: str = "", rate: float = 0.0, parent: Optional[QWidget] = None):
         super().__init__(parent)
         lay = QHBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(_ROW_GAP)
-        self.unit_combo = make_editable_combo(
-            UNIT_PRESETS, _UNIT_W + 30, "Unit", 14, advance=False
-        )
+        self.unit_combo = make_editable_combo(UNIT_PRESETS, _UNIT_W + 30, "Unit", 14, advance=False)
         self.unit_combo.setCurrentText(unit)
-        self.unit_combo.setToolTip(
-            "The other unit this item is sold in (pick one or type your own)"
-        )
+        self.unit_combo.setToolTip("The other unit this item is sold in (pick one or type your own)")
         lay.addWidget(self.unit_combo)
-        self.rate_edit = make_money_edit(
-            rate, _AMOUNT_W + 10, "The rate for one of this unit", advance=False
-        )
+        self.rate_edit = make_money_edit(rate, _AMOUNT_W + 10, "The rate for one of this unit", advance=False)
         lay.addWidget(self.rate_edit)
         lay.addStretch()
         self.remove_btn = make_button("✕", "danger-outline", tooltip="Remove this unit")
@@ -6615,12 +5603,8 @@ class _UnitRatesEditor(QWidget):
         self._rows_layout.setSpacing(6)
         lay.addLayout(self._rows_layout)
         bar = QHBoxLayout()
-        self.add_btn = make_button(
-            "＋  Add another unit",
-            "secondary-outline",
-            self._add_clicked,
-            tooltip="Sell this item in one more unit, with its own rate",
-        )
+        self.add_btn = make_button("＋  Add another unit", "secondary-outline", self._add_clicked,
+                                   tooltip="Sell this item in one more unit, with its own rate")
         bar.addWidget(self.add_btn)
         bar.addStretch()
         lay.addLayout(bar)
@@ -6655,70 +5639,43 @@ class _UnitRatesEditor(QWidget):
 
 class CatalogItemDialog(_EditDialog):
     """Add or edit a single Product & Service Catalog entry: its name, description, unit and rate, the HSN/SAC code and
-    GST rate it is invoiced with, and any other units it is sold in (each with its own rate).
-    """
+    GST rate it is invoiced with, and any other units it is sold in (each with its own rate)."""
 
-    def __init__(
-        self,
-        parent,
-        db_manager: "DatabaseManager",
-        item: Optional[Dict],
-        on_saved: Callable,
-    ):
-        super().__init__(
-            parent,
-            "Edit Catalog Item" if item else "Add Catalog Item",
-            "Edit Catalog Item" if item else "New Catalog Item",
-            width=540,
-        )
+    def __init__(self, parent, db_manager: "DatabaseManager", item: Optional[Dict], on_saved: Callable):
+        super().__init__(parent, "Edit Item" if item else "Add Item",
+                         "Edit Item" if item else "New Item", width=540)
         self.db_manager = db_manager
         self.item = item
         self.on_saved = on_saved
 
-        self.title_entry = PlaceholderEntry(placeholder="Enter item / service name")
-        self._add_field("Item / Service Title *", self.title_entry)
+        self.title_entry = PlaceholderEntry(placeholder="What you sell, e.g. Stage setup")
+        self._add_field("Item or Service Name *", self.title_entry)
         self.desc_text = self._multiline("Description (optional)", 3)
         self._add_field("Description", self.desc_text)
 
-        self.unit_combo = make_editable_combo(
-            UNIT_PRESETS, 190, "e.g. Nos, Day, Plate", 14, advance=False
-        )
-        self.unit_combo.setToolTip(
-            "The unit the default rate below is for (pick one or type your own)"
-        )
+        self.unit_combo = make_editable_combo(UNIT_PRESETS, 190, "e.g. Nos, Day, Plate", 14, advance=False)
+        self.unit_combo.setToolTip("The unit the usual rate is for, such as Nos, Day or Plate (pick one or type your own)")
         self.amount_entry = QLineEdit()
         # UX polish: strict numeric controls (same as the Tk build)
         restrict_to_decimal(self.amount_entry)
         format_as_decimal_on_blur(self.amount_entry)
-        self._add_pair(
-            ("Unit", self.unit_combo),
-            (f"Default Rate ({CURRENCY_SYMBOL}) per unit", self.amount_entry),
-        )
+        self._add_pair(("Unit", self.unit_combo), (f"Usual Rate ({CURRENCY_SYMBOL}) per unit", self.amount_entry))
 
         self.hsn_entry = QLineEdit()
         self.hsn_entry.setPlaceholderText("optional, 2 to 8 digits")
+        self.hsn_entry.setToolTip("The HSN code for goods or the SAC code for services (2 to 8 digits). "
+                                  "It is printed under the item on the invoice.")
         restrict_to_digits(self.hsn_entry, 8)
-        self.gst_combo = make_editable_combo(
-            GST_RATE_PRESETS, 190, "not set", 6, advance=False
-        )
+        self.gst_combo = make_editable_combo(GST_RATE_PRESETS, 190, "not set", 6, advance=False)
         self.gst_combo.lineEdit().setValidator(_DecimalValidator(2, self.gst_combo))
-        self.gst_combo.setToolTip(
-            "The GST rate this item is usually charged at (left empty: the invoice's own rate is used)"
-        )
-        self._add_pair(
-            ("HSN / SAC Code", self.hsn_entry), ("GST Rate (%)", self.gst_combo)
-        )
+        self.gst_combo.setToolTip("The GST rate this item is usually charged at. Leave it empty to use the invoice's "
+                                  "own rate.")
+        self._add_pair(("HSN / SAC Code", self.hsn_entry), ("GST Rate (%)", self.gst_combo))
 
-        self._root.addWidget(make_label("Also Sold Per", "h3"))
+        self._root.addWidget(make_label("Also Sold In Other Units", "h3"))
         self._root.addSpacing(2)
-        self._root.addWidget(
-            make_label(
-                "The same item in another unit, with its own rate. On an invoice, choosing that "
-                "unit fills in its rate.",
-                "muted",
-                wrap=True,
-            )
-        )
+        self._root.addWidget(make_label("The same item in another unit, with its own rate. On an invoice, choosing that "
+                                        "unit fills in its rate.", "muted", wrap=True))
         self._root.addSpacing(6)
         self.units_editor = _UnitRatesEditor()
         self._root.addWidget(self.units_editor)
@@ -6730,13 +5687,9 @@ class CatalogItemDialog(_EditDialog):
             self.amount_entry.setText(f"{float(item.get('amount', 0) or 0):.2f}")
             self.unit_combo.setCurrentText(str(item.get("unit") or ""))
             self.hsn_entry.setText(str(item.get("hsn") or ""))
-            self.gst_combo.setCurrentText(
-                "" if item.get("tax_rate") is None else _num_text(item.get("tax_rate"))
-            )
+            self.gst_combo.setCurrentText("" if item.get("tax_rate") is None else _num_text(item.get("tax_rate")))
             units = catalog_units(item)
-            self.units_editor.set_units(
-                units[1:] if str(item.get("unit") or "").strip() else units
-            )
+            self.units_editor.set_units(units[1:] if str(item.get("unit") or "").strip() else units)
         else:
             self.amount_entry.setText("0.00")
             self.gst_combo.setCurrentText("")
@@ -6744,12 +5697,7 @@ class CatalogItemDialog(_EditDialog):
         self._add_buttons("💾 Save", self._save)
         self.title_entry.setFocus()
 
-    def _add_pair(
-        self,
-        left: Tuple[str, QWidget],
-        right: Tuple[str, QWidget],
-        space_after: int = 12,
-    ) -> None:
+    def _add_pair(self, left: Tuple[str, QWidget], right: Tuple[str, QWidget], space_after: int = 12) -> None:
         """Two labelled fields side by side."""
         row = QHBoxLayout()
         row.setSpacing(14)
@@ -6765,55 +5713,33 @@ class CatalogItemDialog(_EditDialog):
     def _save(self):
         title = self.title_entry.text().strip()
         if not title:
-            return Messagebox.show_error(
-                "Validation", "Item title is required.", parent=self
-            )
+            return Messagebox.show_error("Please Check", "Please enter a name for the item.", parent=self)
         try:
             amount = float(self.amount_entry.text() or 0)
         except ValueError:
-            return Messagebox.show_error(
-                "Validation", "Amount must be a valid number.", parent=self
-            )
+            return Messagebox.show_error("Please Check", "Please enter the rate as a number, for example 250 or 99.50.",
+                                         parent=self)
         desc = self.desc_text.toPlainText().strip()
         unit = self.unit_combo.currentText().strip()
         hsn = self.hsn_entry.text().strip()
         if hsn and not 2 <= len(hsn) <= 8:
-            return Messagebox.show_error(
-                "Validation", "The HSN / SAC code must be 2 to 8 digits.", parent=self
-            )
+            return Messagebox.show_error("Please Check", "The HSN / SAC code should be 2 to 8 digits.", parent=self)
         gst_text = self.gst_combo.currentText().strip()
         tax_rate = safe_float(gst_text) if gst_text else None
         if tax_rate is not None and not 0 <= tax_rate <= 100:
-            return Messagebox.show_error(
-                "Validation", "The GST rate must be between 0 and 100.", parent=self
-            )
+            return Messagebox.show_error("Please Check", "The GST rate should be between 0 and 100.", parent=self)
         others = self.units_editor.units()
         if others and not unit:
-            return Messagebox.show_error(
-                "Validation",
-                "Set the item's main unit first: the other units are alternatives to it.",
-                parent=self,
-            )
+            return Messagebox.show_error("Please Check", "Please set the item's main unit first: the other units are "
+                                                         "alternatives to it.", parent=self)
         seen = {unit.casefold()} if unit else set()
         for name, _rate in others:
             if name.casefold() in seen:
-                return Messagebox.show_error(
-                    "Validation",
-                    f'The unit "{name}" is listed more than once.',
-                    parent=self,
-                )
+                return Messagebox.show_error("Please Check", f'The unit "{name}" is listed more than once.', parent=self)
             seen.add(name.casefold())
         iid = self.item.get("id") if self.item else None
-        ok, err = self.db_manager.upsert_catalog_item_by_id(
-            iid,
-            title,
-            desc,
-            amount,
-            unit=unit,
-            hsn=hsn,
-            tax_rate=tax_rate,
-            other_units=others,
-        )
+        ok, err = self.db_manager.upsert_catalog_item_by_id(iid, title, desc, amount, unit=unit, hsn=hsn,
+                                                            tax_rate=tax_rate, other_units=others)
         if ok:
             self.on_saved()
             self.accept()
@@ -6825,27 +5751,17 @@ class NoteDialog(_EditDialog):
     """Quick popup to add/edit an invoice's internal note straight from the
     invoice list, without opening the full invoice form."""
 
-    def __init__(
-        self,
-        parent,
-        db_manager: "DatabaseManager",
-        invoice_number: str,
-        current_note: str,
-        on_saved: Callable,
-    ):
-        super().__init__(
-            parent, f"Note  —  Invoice #{invoice_number}", f"Invoice #{invoice_number}"
-        )
+    def __init__(self, parent, db_manager: "DatabaseManager", invoice_number: str,
+                 current_note: str, on_saved: Callable):
+        super().__init__(parent, f"Note  —  Invoice #{invoice_number}", f"Invoice #{invoice_number}")
         self.db_manager = db_manager
         self.invoice_number = invoice_number
         self.on_saved = on_saved
         self.setMinimumHeight(320)
 
         # The header above is followed by a muted explanation, exactly as in the Tk build.
-        self._root.insertWidget(
-            1, make_label("Internal note (not printed on the customer's PDF)", "muted")
-        )
-        self.text = PlaceholderText(placeholder="Add an internal note...")
+        self._root.insertWidget(1, make_label("A private note for you. It is never printed on the invoice.", "muted"))
+        self.text = PlaceholderText(placeholder="Write a private note about this invoice…")
         self.text.setTabChangesFocus(True)
         self.text.setAcceptRichText(False)
         self.text.setPlainText(current_note or "")
@@ -6853,9 +5769,7 @@ class NoteDialog(_EditDialog):
         self._root.addSpacing(15)
 
         self._add_buttons("💾 Save Note", self._save)
-        self.save_btn.setDefault(
-            False
-        )  # Enter inserts a new line in the note, it does not save
+        self.save_btn.setDefault(False)       # Enter inserts a new line in the note, it does not save
         self.save_btn.setAutoDefault(False)
         self.text.setFocus()
 
@@ -6864,6 +5778,103 @@ class NoteDialog(_EditDialog):
         self.db_manager.update_notes(self.invoice_number, note)
         self.on_saved()
         self.accept()
+
+
+class RecordPaymentDialog(_EditDialog):
+    """A small window to write down a payment received for one invoice, straight from the Invoices page: when it came,
+    how much, how it was paid, its reference (the 12-digit UTR of a UPI payment, a cheque number ...) and a note."""
+
+    def __init__(self, parent, db_manager: "DatabaseManager", invoice: Dict[str, Any],
+                 on_saved: Callable[[Dict[str, Any]], None]):
+        number = invoice["invoice_number"]
+        super().__init__(parent, f"Record a Payment  —  Invoice #{number}", f"Record a payment for Invoice #{number}", width=470)
+        self.db_manager = db_manager
+        self.invoice_number = number
+        self.on_saved = on_saved
+        self.balance = max(0.0, safe_float(invoice.get("balance_due")))
+
+        who = str(invoice.get("bill_to") or "").strip()
+        self._root.insertWidget(1, make_label(f"{who}  •  Still to pay: {fmt_money(self.balance)}" if who
+                                              else f"Still to pay: {fmt_money(self.balance)}", "muted", wrap=True))
+
+        self.date_edit = make_date_edit()
+        advance_on_enter(self.date_edit)
+        self._add_field("Date received", self.date_edit)
+
+        self.amount_edit = make_money_edit(self.balance, 180, "How much money you received")
+        self._add_field("Amount received", self.amount_edit)
+
+        self.mode_combo = QComboBox()
+        self.mode_combo.addItems(PAYMENT_MODES)
+        self.mode_combo.setCurrentText("Cash")
+        guard_wheel(self.mode_combo)
+        self._add_field("Paid by", self.mode_combo)
+
+        self.reference_label = make_label("Reference", "h3")
+        self.reference_edit = QLineEdit()
+        advance_on_enter(self.reference_edit)
+        self._digits_only = QRegularExpressionValidator(QRegularExpression(r"^\d*$"), self.reference_edit)
+        self._root.addWidget(self.reference_label)
+        self._root.addSpacing(4)
+        self._root.addWidget(self.reference_edit)
+        self._root.addSpacing(12)
+
+        self.note_edit = QLineEdit()
+        self.note_edit.setPlaceholderText("For example: paid through Google Pay")
+        self._add_field("Note (optional)", self.note_edit, space_after=15)
+
+        self.mode_combo.currentTextChanged.connect(self._on_mode_changed)
+        self._on_mode_changed(self.mode_combo.currentText())
+        self._add_buttons("💾 Save Payment", self._save)
+        self.amount_edit.setFocus()
+        self.amount_edit.selectAll()
+
+    def _on_mode_changed(self, mode: str) -> None:
+        """The reference box asks for what the chosen payment method has: a UTR, a cheque number, a reference ..."""
+        spec = PAYMENT_REFERENCE_FIELDS.get(mode)
+        self.reference_label.setVisible(spec is not None)
+        self.reference_edit.setVisible(spec is not None)
+        if spec is None:
+            return
+        caption, hint, digits_only, longest = spec
+        self.reference_label.setText(caption)
+        self.reference_edit.setPlaceholderText(hint)
+        self.reference_edit.setValidator(self._digits_only if digits_only else None)
+        self.reference_edit.setMaxLength(longest)
+        text = self.reference_edit.text()
+        if digits_only and text and not text.isdigit():
+            self.reference_edit.clear()
+        elif len(text) > longest:
+            self.reference_edit.setText(text[:longest])
+        if self.isVisible():
+            self.adjustSize()
+
+    def _save(self):
+        amount = safe_float(self.amount_edit.text())
+        if amount <= 0:
+            Messagebox.show_error("Check the amount", "Please enter how much money was received (more than zero).", parent=self)
+            self.amount_edit.setFocus()
+            return
+        mode = self.mode_combo.currentText()
+        reference = self.reference_edit.text().strip() if mode in PAYMENT_REFERENCE_FIELDS else ""
+        if problem := payment_reference_problem(mode, reference):
+            Messagebox.show_error("Check the reference", problem, parent=self)
+            self.reference_edit.setFocus()
+            return
+        if amount - self.balance > 0.005 and not Messagebox.yesno(
+                "More than is owed",
+                f"{fmt_money(amount)} is more than the {fmt_money(self.balance)} still to pay on this invoice.\n"
+                "The extra will be shown as an advance (credit).\n\nRecord it anyway?", parent=self):
+            self.amount_edit.setFocus()
+            return
+        payment = {"amount": amount, "payment_date": date_edit_db(self.date_edit), "mode": mode,
+                   "reference": reference, "note": self.note_edit.text().strip()}
+        ok, why = self.db_manager.add_payment(self.invoice_number, payment)
+        if not ok:
+            Messagebox.show_error("The payment could not be saved", why or "Something went wrong.", parent=self)
+            return
+        self.accept()
+        self.on_saved(payment)
 
 
 class BulkProgressDialog(QDialog):
@@ -6878,14 +5889,8 @@ class BulkProgressDialog(QDialog):
     Window X / Esc while running == Cancel (the job stops after the current item); once the
     job has finished they simply close the window, as in the Tkinter build."""
 
-    def __init__(
-        self,
-        parent,
-        title: str,
-        items: list,
-        work_fn: Callable,
-        on_done: Optional[Callable[[dict], None]] = None,
-    ):
+    def __init__(self, parent, title: str, items: list, work_fn: Callable,
+                 on_done: Optional[Callable[[dict], None]] = None):
         super().__init__(parent)
         self.setWindowTitle(title)
         self.setModal(True)
@@ -6901,9 +5906,7 @@ class BulkProgressDialog(QDialog):
         self._done = False
         self._success_count = 0
         self._failed_count = 0
-        self.job_result: Optional[dict] = (
-            None  # NOT `result`: that would shadow QDialog.result()
-        )
+        self.job_result: Optional[dict] = None     # NOT `result`: that would shadow QDialog.result()
 
         self._build(title)
         self._thread = threading.Thread(target=self._run_worker, daemon=True)
@@ -6928,11 +5931,7 @@ class BulkProgressDialog(QDialog):
         self.progress.setRange(0, max(1, self._total))
         self.progress.setValue(0)
         self.progress.setTextVisible(False)
-        self.pct_lbl = make_label(
-            "0%",
-            "h3",
-            align=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
-        )
+        self.pct_lbl = make_label("0%", "h3", align=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         self.pct_lbl.setFixedWidth(52)
         bar_row.addWidget(self.progress, 1)
         bar_row.addSpacing(10)
@@ -6964,19 +5963,15 @@ class BulkProgressDialog(QDialog):
         self.log_text = QPlainTextEdit()
         self.log_text.setReadOnly(True)
         self.log_text.setLineWrapMode(QPlainTextEdit.LineWrapMode.WidgetWidth)
-        self.log_text.setFont(
-            QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont)
-        )
+        self.log_text.setFont(QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont))
         main.addWidget(self.log_text, 1)
 
         main.addSpacing(14)
         btn_row = QHBoxLayout()
         btn_row.addStretch()
-        self.abort_btn = make_button(
-            "✕  Cancel", "danger-outline", self._on_abort_click
-        )
+        self.abort_btn = make_button("✕  Cancel", "danger-outline", self._on_abort_click)
         self.close_btn = make_button("Close", "secondary", lambda: QDialog.accept(self))
-        self.close_btn.hide()  # only shown once the operation finishes -- see _on_finished()
+        self.close_btn.hide()                 # only shown once the operation finishes -- see _on_finished()
         btn_row.addWidget(self.abort_btn)
         btn_row.addWidget(self.close_btn)
         main.addLayout(btn_row)
@@ -6987,10 +5982,10 @@ class BulkProgressDialog(QDialog):
         bar.setValue(bar.maximum())
 
     # ---- window-close semantics -------------------------------------------- #
-    def reject(self):  # Esc
+    def reject(self):                         # Esc
         self._on_abort_click()
 
-    def closeEvent(self, event):  # window X
+    def closeEvent(self, event):              # window X
         if self._done:
             event.accept()
         else:
@@ -7010,32 +6005,16 @@ class BulkProgressDialog(QDialog):
     #  Worker thread side -- touches only self._q, never a widget
     # ------------------------------------------------------------------ #
     def _run_worker(self):
-        def report(
-            current, total, status_text, log_line=None, success_delta=0, failed_delta=0
-        ):
-            self._q.put(
-                {
-                    "type": "progress",
-                    "current": current,
-                    "total": total,
-                    "status_text": status_text,
-                    "log_line": log_line,
-                    "success_delta": success_delta,
-                    "failed_delta": failed_delta,
-                }
-            )
-
+        def report(current, total, status_text, log_line=None, success_delta=0, failed_delta=0):
+            self._q.put({"type": "progress", "current": current, "total": total,
+                         "status_text": status_text, "log_line": log_line,
+                         "success_delta": success_delta, "failed_delta": failed_delta})
         try:
             result = self._work_fn(self._items, report, self._abort_event.is_set)
         except Exception as exc:
             logger.error(f"Bulk operation failed: {exc}", exc_info=True)
-            result = {
-                "success": self._success_count,
-                "failed": max(0, self._total - self._success_count),
-                "aborted": False,
-                "result": None,
-                "error": str(exc),
-            }
+            result = {"success": self._success_count, "failed": max(0, self._total - self._success_count),
+                      "aborted": False, "result": None, "error": str(exc)}
         self._q.put({"type": "done", "result": result})
 
     # ------------------------------------------------------------------ #
@@ -7102,12 +6081,10 @@ class BulkProgressDialog(QDialog):
         error = result.get("error")
 
         if error:
-            self.status_lbl.setText(f"Stopped due to an error: {error}")
+            self.status_lbl.setText(f"Stopped because something went wrong: {error}")
             self._log(f"ERROR: {error}")
         elif aborted:
-            self.status_lbl.setText(
-                f"Cancelled -- {success} completed, {failed} failed before stopping."
-            )
+            self.status_lbl.setText(f"Cancelled -- {success} completed, {failed} failed before stopping.")
         else:
             self.status_lbl.setText(f"Done -- {success} succeeded, {failed} failed.")
             self.progress.setValue(self.progress.maximum())
@@ -7122,13 +6099,11 @@ class BulkProgressDialog(QDialog):
             try:
                 self._on_done(result)
             except Exception as exc:
-                logger.error(
-                    f"Bulk operation on_done callback failed: {exc}", exc_info=True
-                )
+                logger.error(f"Bulk operation on_done callback failed: {exc}", exc_info=True)
 
 
 class ChangelogDialog(QDialog):
-    """ "What's new": every release since the file this project started from, with all of its changes."""
+    """"What's new": every release since the file this project started from, with all of its changes."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -7138,15 +6113,8 @@ class ChangelogDialog(QDialog):
         root = QVBoxLayout(self)
         root.setContentsMargins(20, 20, 20, 20)
         root.setSpacing(12)
-        root.addWidget(
-            make_label(
-                f"{CHANGE_COUNT} changes since {BASE_VERSION} (build {BASE_BUILD_VERSION})",
-                "h2",
-            )
-        )
-        self.summary_lbl = make_label(
-            f"You are running {APP_VERSION}, build {APP_BUILD_VERSION}.", "muted"
-        )
+        root.addWidget(make_label(f"{CHANGE_COUNT} improvements since {BASE_VERSION}", "h2"))
+        self.summary_lbl = make_label(f"You are using version {APP_VERSION.lstrip('v')} (build {APP_BUILD_VERSION}).", "muted")
         root.addWidget(self.summary_lbl)
         area = QScrollArea()
         area.setWidgetResizable(True)
@@ -7163,11 +6131,8 @@ class ChangelogDialog(QDialog):
             self.release_labels.append(head)
             col.addSpacing(8)
             col.addWidget(head)
-            col.addWidget(
-                make_label(
-                    f"{release.date}  ·  {len(release.changes)} changes", "muted"
-                )
-            )
+            running = "  ·  ● the version you are using" if release.version == APP_VERSION else ""
+            col.addWidget(make_label(f"{release.date}  ·  {len(release.changes)} improvements{running}", "muted"))
             col.addSpacing(4)
             for change in release.changes:
                 lbl = make_label(f"•  {change}", wrap=True)
@@ -7207,41 +6172,22 @@ class AboutDialog(QDialog):
         hero_col = QVBoxLayout(hero)
         hero_col.setContentsMargins(15, 15, 15, 15)
         hero_col.setSpacing(4)
-        hero_col.addWidget(
-            make_label(APP_NAME, "hero-title", align=Qt.AlignmentFlag.AlignCenter)
-        )
-        hero_col.addWidget(
-            make_label(APP_TAGLINE, "hero-sub", align=Qt.AlignmentFlag.AlignCenter)
-        )
+        hero_col.addWidget(make_label(APP_NAME, "hero-title", align=Qt.AlignmentFlag.AlignCenter))
+        hero_col.addWidget(make_label(APP_TAGLINE, "hero-sub", align=Qt.AlignmentFlag.AlignCenter))
         root.addWidget(hero)
 
         root.addSpacing(20)
-        self.version_label = make_label(
-            APP_VERSION, "display", "info", align=Qt.AlignmentFlag.AlignCenter
-        )
+        self.version_label = make_label(APP_VERSION, "display", "info", align=Qt.AlignmentFlag.AlignCenter)
         root.addWidget(self.version_label)
         root.addSpacing(5)
-        self.build_label = make_label(
-            f"Build {APP_BUILD_VERSION}", "muted", align=Qt.AlignmentFlag.AlignCenter
-        )
+        self.build_label = make_label(f"Build {APP_BUILD_VERSION}", "muted", align=Qt.AlignmentFlag.AlignCenter)
         root.addWidget(self.build_label)
-        root.addWidget(
-            make_label(
-                f"Released on {APP_RELEASE_DATE}",
-                "muted",
-                align=Qt.AlignmentFlag.AlignCenter,
-            )
-        )
+        root.addWidget(make_label(f"Released on {APP_RELEASE_DATE}", "muted", align=Qt.AlignmentFlag.AlignCenter))
         root.addSpacing(6)
-        self.headline_label = make_label(
-            CHANGELOG[0].title, "small", align=Qt.AlignmentFlag.AlignCenter, wrap=True
-        )
+        self.headline_label = make_label(CHANGELOG[0].title, "small", align=Qt.AlignmentFlag.AlignCenter, wrap=True)
         root.addWidget(self.headline_label)
-        self.changes_label = make_label(
-            f"{CHANGE_COUNT} changes since {BASE_VERSION} (build {BASE_BUILD_VERSION})",
-            "small",
-            align=Qt.AlignmentFlag.AlignCenter,
-        )
+        self.changes_label = make_label(f"{CHANGE_COUNT} improvements since {BASE_VERSION}",
+                                        "small", align=Qt.AlignmentFlag.AlignCenter)
         root.addWidget(self.changes_label)
         root.addSpacing(15)
         root.addWidget(hline())
@@ -7251,17 +6197,13 @@ class AboutDialog(QDialog):
         root.addWidget(make_label(lines[0], "h3", align=Qt.AlignmentFlag.AlignCenter))
         for line in lines[1:]:
             root.addSpacing(2)
-            root.addWidget(
-                make_label(line, "muted", align=Qt.AlignmentFlag.AlignCenter)
-            )
+            root.addWidget(make_label(line, "muted", align=Qt.AlignmentFlag.AlignCenter))
 
         root.addStretch(1)
         root.addSpacing(20)
         row = QHBoxLayout()
         row.addStretch(1)
-        self.whats_new_btn = make_button(
-            "What's New", "secondary-outline", self._show_changelog
-        )
+        self.whats_new_btn = make_button("What's New", "secondary-outline", self._show_changelog)
         self.whats_new_btn.setFixedWidth(130)
         row.addWidget(self.whats_new_btn)
         row.addSpacing(8)
@@ -7273,13 +6215,11 @@ class AboutDialog(QDialog):
         root.addLayout(row)
 
     def _show_changelog(self):
-        ChangelogDialog(self).exec()
+        run_dialog(ChangelogDialog(self))
 
 
 class ShortcutsDialog(QDialog):
-    def __init__(
-        self, parent, groups: Optional[Dict[str, List[Tuple[str, str]]]] = None
-    ):
+    def __init__(self, parent, groups: Optional[Dict[str, List[Tuple[str, str]]]] = None):
         super().__init__(parent)
         self.setWindowTitle("Keyboard Shortcuts")
         self.setModal(True)
@@ -7298,20 +6238,9 @@ class ShortcutsDialog(QDialog):
         hero_col = QVBoxLayout(hero)
         hero_col.setContentsMargins(20, 20, 20, 20)
         hero_col.setSpacing(5)
-        hero_col.addWidget(
-            make_label(
-                "⌨  Keyboard Shortcuts",
-                "hero-title",
-                align=Qt.AlignmentFlag.AlignCenter,
-            )
-        )
-        hero_col.addWidget(
-            make_label(
-                "Master Vyaprix without touching your mouse.",
-                "hero-sub",
-                align=Qt.AlignmentFlag.AlignCenter,
-            )
-        )
+        hero_col.addWidget(make_label("⌨  Keyboard Shortcuts", "hero-title", align=Qt.AlignmentFlag.AlignCenter))
+        hero_col.addWidget(make_label("Master Vyaprix without touching your mouse.", "hero-sub",
+                                      align=Qt.AlignmentFlag.AlignCenter))
         root.addWidget(hero)
         root.addSpacing(10)
 
@@ -7341,12 +6270,7 @@ class ShortcutsDialog(QDialog):
             for row, (keys, desc) in enumerate(items):
                 key_lbl = make_label(keys, "key")
                 self.key_labels.append(key_lbl)
-                grid.addWidget(
-                    key_lbl,
-                    row,
-                    0,
-                    Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
-                )
+                grid.addWidget(key_lbl, row, 0, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
                 desc_lbl = make_label(desc, wrap=True)
                 grid.addWidget(desc_lbl, row, 1, Qt.AlignmentFlag.AlignVCenter)
             col.addLayout(grid)
@@ -7365,10 +6289,124 @@ class ShortcutsDialog(QDialog):
         root.addLayout(row)
 
 
+class HelpDialog(QDialog):
+    """Help: short, friendly answers to the things people ask most. Each answer that has a place to go has a button that
+    goes straight there."""
+    # (heading, answer, button text, what the button does)
+    TOPICS: List[Tuple[str, str, str, str]] = [
+        ("Make your first invoice",
+         "Press New Invoice at the top of the menu. Choose a client (or type a new one), add what you sold, then press "
+         "Save. Your invoice is kept straight away and shows up in your Invoices list.",
+         "Start an invoice", "invoice"),
+        ("Add your business details",
+         "Open Settings to add your business name, address, GSTIN, bank details and logo. They are printed on every "
+         "invoice, so you only type them once.",
+         "Open Settings", "settings"),
+        ("Save time with Clients and Items",
+         "The Clients page remembers the people you bill and the Items page remembers what you sell and its price. When "
+         "you make an invoice, pick them from the list instead of typing them again.",
+         "", ""),
+        ("Write down a payment",
+         "Select the invoice in your Invoices list and press Record Payment. Fill in the date, the amount and how you "
+         "were paid. For UPI, a bank transfer, a card or a cheque you can also add the reference (such as the UPI "
+         "transaction ID or the cheque number) so the payment is easy to find later. The invoice changes to Paid or "
+         "Partly Paid by itself.",
+         "", ""),
+        ("Print, save or send an invoice",
+         "Select an invoice in the list and press View Invoice. From there you can print it, save a copy, or send it by "
+         "WhatsApp or email. In the invoice form you can also choose whether the terms, the notes, both or neither are "
+         "printed on it.",
+         "", ""),
+        ("Keep your work safe",
+         "Save a backup copy now and then, on a USB drive or in a folder that is copied to the cloud. If something ever "
+         "goes wrong you can bring everything back from it in Settings.",
+         "Save a backup now", "backup"),
+        ("Get around faster",
+         "Press Ctrl+\\ to hide or show the menu, Ctrl+N to start something new and Ctrl+F to search. There are many "
+         "more.",
+         "See all shortcuts", "shortcuts"),
+    ]
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(f"Help — {APP_NAME}")
+        self.setModal(True)
+        _fit_to_screen(self, 580, 660, 440, 460)
+        self.topic_buttons: Dict[str, QPushButton] = {}
+        self._build()
+
+    def _build(self) -> None:
+        root = QVBoxLayout(self)
+        root.setContentsMargins(20, 20, 20, 20)
+        root.setSpacing(0)
+        hero = QFrame()
+        hero.setProperty("role", "hero")
+        hero_col = QVBoxLayout(hero)
+        hero_col.setContentsMargins(20, 18, 20, 18)
+        hero_col.setSpacing(4)
+        hero_col.addWidget(make_label("How can we help?", "hero-title", align=Qt.AlignmentFlag.AlignCenter))
+        hero_col.addWidget(make_label("Quick answers to the things people ask most.", "hero-sub",
+                                      align=Qt.AlignmentFlag.AlignCenter))
+        root.addWidget(hero)
+        root.addSpacing(10)
+
+        self.scroll = QScrollArea()
+        self.scroll.setWidgetResizable(True)
+        self.scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        body = QWidget()
+        col = QVBoxLayout(body)
+        col.setContentsMargins(0, 4, 10, 4)
+        col.setSpacing(12)
+        for number, (heading, answer, button_text, action) in enumerate(self.TOPICS, 1):
+            card = QFrame()
+            card.setProperty("role", "card")
+            inner = QVBoxLayout(card)
+            inner.setContentsMargins(16, 14, 16, 14)
+            inner.setSpacing(6)
+            inner.addWidget(make_label(f"{number}.  {heading}", "h3"))
+            inner.addWidget(make_label(answer, "muted", wrap=True))
+            if button_text:
+                row = QHBoxLayout()
+                row.addStretch(1)
+                btn = make_button(button_text, "primary-outline", lambda a=action: self._go(a))
+                self.topic_buttons[action] = btn
+                row.addWidget(btn)
+                inner.addLayout(row)
+            col.addWidget(card)
+        col.addStretch(1)
+        self.scroll.setWidget(body)
+        root.addWidget(self.scroll, 1)
+        root.addSpacing(14)
+        row = QHBoxLayout()
+        row.addStretch(1)
+        self.close_btn = make_button("Close", "primary", self.accept)
+        self.close_btn.setFixedWidth(130)
+        self.close_btn.setDefault(True)
+        row.addWidget(self.close_btn)
+        row.addStretch(1)
+        root.addLayout(row)
+
+    def _go(self, action: str) -> None:
+        """Closes Help and then does what the button says (so the next window is not stacked on top of this one)."""
+        app = self.parent()
+        self.accept()
+        if app is None:
+            return
+        actions = {
+            "invoice": lambda: app.show_frame_by_name("InvoiceFormFrame"),
+            "settings": app.open_settings,
+            "backup": lambda: prompt_and_backup_database(app),
+            "shortcuts": app.open_shortcuts,
+        }
+        handler = actions.get(action)
+        if handler is not None:
+            QTimer.singleShot(0, handler)
+
+
 def _logo_pixmap_for(widget: QWidget, max_width: int) -> Optional[QPixmap]:
     """The bundled logo, at most `max_width` logical pixels wide, rendered at the screen's native resolution so it stays
-    crisp on 125% / 150% / 200% displays. A logo that is already smaller than that is shown 1:1, never enlarged.
-    """
+    crisp on 125% / 150% / 200% displays. A logo that is already smaller than that is shown 1:1, never enlarged."""
     dpr = widget.devicePixelRatioF() or 1.0
     wanted = int(round(max_width * dpr))
     pixmap = load_app_logo_pixmap(wanted)
@@ -7379,11 +6417,8 @@ def _logo_pixmap_for(widget: QWidget, max_width: int) -> Optional[QPixmap]:
 
 def pixel_ratio(widget: Optional[QWidget] = None) -> int:
     """The scale to paint a pixmap at for the screen `widget` is on: its device pixel ratio rounded UP, and never below
-    2 -- so an image stays sharp at 125 %, 150 %, 200 % or 300 % (Qt scales it down by the exact fraction).
-    """
-    screen = (
-        widget.screen() if widget is not None else None
-    ) or QGuiApplication.primaryScreen()
+    2 -- so an image stays sharp at 125 %, 150 %, 200 % or 300 % (Qt scales it down by the exact fraction)."""
+    screen = (widget.screen() if widget is not None else None) or QGuiApplication.primaryScreen()
     ratio = screen.devicePixelRatio() if screen is not None else 1.0
     whole = int(ratio)
     return max(2, whole + (1 if ratio - whole > 1e-6 else 0))
@@ -7400,19 +6435,12 @@ class _ReflowGrid(QWidget):
 
     HYSTERESIS = 24
 
-    def __init__(
-        self,
-        max_columns: int = 2,
-        min_column_width: int = 260,
-        align_top: bool = True,
-        parent: Optional[QWidget] = None,
-    ):
+    def __init__(self, max_columns: int = 2, min_column_width: int = 260, align_top: bool = True,
+                 parent: Optional[QWidget] = None):
         super().__init__(parent)
         self.max_columns = max(1, max_columns)
         self.min_column_width = min_column_width
-        self.align_top = (
-            align_top  # False: the children of a row are stretched to one height
-        )
+        self.align_top = align_top                      # False: the children of a row are stretched to one height
         self._items: List[Tuple[QWidget, bool]] = []
         self._columns = 0
         self._grid = QGridLayout(self)
@@ -7433,15 +6461,9 @@ class _ReflowGrid(QWidget):
         gap = self._grid.horizontalSpacing()
         width = self.width()
         wanted = max(1, self._columns)
-        while (
-            wanted > 1 and width < wanted * self.min_column_width + (wanted - 1) * gap
-        ):
+        while wanted > 1 and width < wanted * self.min_column_width + (wanted - 1) * gap:
             wanted -= 1
-        while (
-            wanted < self.max_columns
-            and width
-            >= (wanted + 1) * self.min_column_width + wanted * gap + self.HYSTERESIS
-        ):
+        while wanted < self.max_columns and width >= (wanted + 1) * self.min_column_width + wanted * gap + self.HYSTERESIS:
             wanted += 1
         return wanted
 
@@ -7452,7 +6474,7 @@ class _ReflowGrid(QWidget):
         self._columns = columns
         grid = self._grid
         while grid.count():
-            grid.takeAt(0)  # (only the layout's hold on a child: the child stays)
+            grid.takeAt(0)                                      # (only the layout's hold on a child: the child stays)
         for column in range(self.max_columns):
             grid.setColumnStretch(column, 1 if column < columns else 0)
         top = Qt.AlignmentFlag.AlignTop
@@ -7468,9 +6490,7 @@ class _ReflowGrid(QWidget):
                 row += 1
             else:
                 if self.align_top:
-                    grid.addWidget(
-                        widget, row, column, top
-                    )  # (a field with an error message must not stretch its neighbour)
+                    grid.addWidget(widget, row, column, top)    # (a field with an error message must not stretch its neighbour)
                 else:
                     grid.addWidget(widget, row, column)
                 column += 1
@@ -7487,17 +6507,10 @@ class _Field(QWidget):
     in red right under the input, which also gets a red border. `validator` is a function returning "" for a good value
     or the message to show; the dialog runs it when the field loses focus and then with every keystroke until the
     value is right."""
-
     error_changed = Signal()
 
-    def __init__(
-        self,
-        caption: str,
-        widget: QWidget,
-        hint: str = "",
-        optional: bool = False,
-        parent: Optional[QWidget] = None,
-    ):
+    def __init__(self, caption: str, widget: QWidget, hint: str = "", optional: bool = False,
+                 parent: Optional[QWidget] = None):
         super().__init__(parent)
         self.widget = widget
         self.validator: Optional[Callable[[], str]] = None
@@ -7515,11 +6528,11 @@ class _Field(QWidget):
         col.addLayout(head)
         col.addWidget(widget)
         self.hint = make_label(hint, "small", wrap=True)
-        self.hint.setVisible(bool(hint))
         col.addWidget(self.hint)
-        self.error = make_label("", "small", tone="danger", wrap=True)
-        self.error.setVisible(False)
+        self.hint.setVisible(bool(hint))                # (only once it is inside the field: a label shown before it has
+        self.error = make_label("", "small", tone="danger", wrap=True)        # a parent would flash up as a window of its own)
         col.addWidget(self.error)
+        self.error.setVisible(False)
         widget.setAccessibleName(caption)
 
     @property
@@ -7545,9 +6558,7 @@ class _Field(QWidget):
 class _SettingsCard(QFrame):
     """A titled group of settings: a card with a heading, a line saying what the group is for, and the fields."""
 
-    def __init__(
-        self, title: str, description: str = "", parent: Optional[QWidget] = None
-    ):
+    def __init__(self, title: str, description: str = "", parent: Optional[QWidget] = None):
         super().__init__(parent)
         set_role(self, "card")
         outer = QVBoxLayout(self)
@@ -7556,9 +6567,9 @@ class _SettingsCard(QFrame):
         self.title_label = make_label(title, "h2")
         outer.addWidget(self.title_label)
         self.description = make_label(description, "muted", wrap=True)
-        self.description.setVisible(bool(description))
         outer.addSpacing(3)
         outer.addWidget(self.description)
+        self.description.setVisible(bool(description))  # (only once it is inside the card -- see _Field)
         outer.addSpacing(14)
         self.body = QVBoxLayout()
         self.body.setContentsMargins(0, 0, 0, 0)
@@ -7571,9 +6582,8 @@ class _SettingsCard(QFrame):
 
 
 class _SettingsPage(QScrollArea):
-    """One page of the Settings dialog: a heading, a line about the page, then its cards. It scrolls on its own, and
-    its column never grows wider than `MAX_WIDTH` (it is centred when the window is wider than that).
-    """
+    """One page of the Settings screen: a heading, a line about the page, then its cards. It scrolls on its own, and
+    its column never grows wider than `MAX_WIDTH` (it is centred when the window is wider than that)."""
 
     MAX_WIDTH = 860
 
@@ -7614,8 +6624,7 @@ class _AssetRow(QWidget):
     """One picture row (Company Logo / Authorized Signature / UPI QR Code): a preview, a line saying whether a picture
     is set, and Browse / Clear buttons -- or drop a PNG / JPG file onto the row. The chosen file is copied into
     Vyaprix's own data folder straight away, so the app keeps working even if the original is moved or deleted (the
-    file name is deliberately not shown). Cancelling Settings puts back the picture a row replaced.
-    """
+    file name is deliberately not shown). Cancelling Settings puts back the picture a row replaced."""
 
     THUMB = 64
     IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg")
@@ -7626,9 +6635,7 @@ class _AssetRow(QWidget):
         self.config_key = config_key
         self.dest_filename = dest_filename
         self.rel_path = ""
-        self._undo: Optional[Tuple[Path, Optional[bytes]]] = (
-            None  # (the file this row overwrote, what it held)
-        )
+        self._undo: Optional[Tuple[Path, Optional[bytes]]] = None     # (the file this row overwrote, what it held)
         self.setAcceptDrops(True)
 
         row = QHBoxLayout(self)
@@ -7651,12 +6658,8 @@ class _AssetRow(QWidget):
         info.addStretch(1)
         row.addLayout(info, 1)
 
-        self.browse_btn = make_button(
-            "Browse…",
-            "secondary-outline",
-            self.browse,
-            tooltip="Choose a PNG or JPG picture (or drop one onto this row)",
-        )
+        self.browse_btn = make_button("Browse…", "secondary-outline", self.browse,
+                                      tooltip="Choose a PNG or JPG picture (or drop one onto this row)")
         self.clear_btn = make_button("✕ Clear", "danger-outline", self.clear)
         _no_default_button(self.browse_btn, self.clear_btn)
         row.addWidget(self.browse_btn, 0, Qt.AlignmentFlag.AlignVCenter)
@@ -7670,9 +6673,7 @@ class _AssetRow(QWidget):
         dpr = self.devicePixelRatioF() or 1.0
         pixmap = None
         if self.rel_path:
-            pixmap = load_thumbnail_pixmap(
-                DATA_DIR / self.rel_path, max_size=int(round(44 * dpr))
-            )
+            pixmap = load_thumbnail_pixmap(DATA_DIR / self.rel_path, max_size=int(round(44 * dpr)))
         if pixmap is not None:
             pixmap.setDevicePixelRatio(dpr)
             self.thumb.setPixmap(pixmap)
@@ -7685,12 +6686,8 @@ class _AssetRow(QWidget):
 
     # ---- choosing a picture ------------------------------------------------------------------------------------ #
     def browse(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(
-            self.window(),
-            "Choose an Image",
-            str(_start_dir("asset_dir")),
-            "Image Files (*.png *.jpg *.jpeg)",
-        )
+        path, _ = QFileDialog.getOpenFileName(self.window(), "Choose an Image", str(_start_dir("asset_dir")),
+                                              "Image Files (*.png *.jpg *.jpeg)")
         if path:
             _remember_dir("asset_dir", path)
             self.use_file(path)
@@ -7699,11 +6696,8 @@ class _AssetRow(QWidget):
         """Takes `path` as this row's picture (copied into the data folder). False, with a message, if it can't be used."""
         source = Path(path)
         if not QImageReader(str(source)).canRead():
-            Messagebox.show_error(
-                "Not a Picture",
-                "That file can't be read as a picture.\nChoose a PNG or JPG image.",
-                parent=self.window(),
-            )
+            Messagebox.show_error("Not a Picture", "That file can't be read as a picture.\nChoose a PNG or JPG image.",
+                                  parent=self.window())
             return False
         try:
             dest = ASSETS_DIR / self.dest_filename
@@ -7711,9 +6705,7 @@ class _AssetRow(QWidget):
                 self._keep_original(dest)
                 shutil.copy(source, dest)
         except Exception as exc:
-            Messagebox.show_error(
-                "Error", f"Could not save file: {exc}", parent=self.window()
-            )
+            Messagebox.show_error("Error", f"Could not save file: {exc}", parent=self.window())
             return False
         self.set_path(f"assets/{self.dest_filename}")
         self.changed.emit()
@@ -7760,9 +6752,7 @@ class _AssetRow(QWidget):
     def _dropped_picture(self, mime) -> str:
         if mime is not None and mime.hasUrls():
             for url in mime.urls():
-                if url.isLocalFile() and url.toLocalFile().lower().endswith(
-                    self.IMAGE_SUFFIXES
-                ):
+                if url.isLocalFile() and url.toLocalFile().lower().endswith(self.IMAGE_SUFFIXES):
                     return url.toLocalFile()
         return ""
 
@@ -7791,9 +6781,7 @@ class _AssetRow(QWidget):
             event.ignore()
 
 
-def template_thumbnail(
-    tpl: PDFTemplate, width: int = 84, ratio: Optional[int] = None
-) -> QPixmap:
+def template_thumbnail(tpl: PDFTemplate, width: int = 84, ratio: Optional[int] = None) -> QPixmap:
     """A miniature of an invoice in `tpl`, painted from the same colours the PDF is printed in -- so a brand colour
     shows in it at once. The page is drawn in millimetres (210 x 297), at `ratio` pixels per logical pixel (the
     screen's, by default)."""
@@ -7810,14 +6798,10 @@ def template_thumbnail(
         if color:
             p.fillRect(QRectF(x, y, w, h), QColor(color))
 
-    def rule(
-        x1: float, y1: float, x2: float, y2: float, color: str, points: float = 1.0
-    ):
+    def rule(x1: float, y1: float, x2: float, y2: float, color: str, points: float = 1.0):
         if color:
             pen = QPen(QColor(color))
-            pen.setWidthF(
-                max(points * 0.353, 1.1)
-            )  # never thinner than a hair at this size
+            pen.setWidthF(max(points * 0.353, 1.1))          # never thinner than a hair at this size
             p.setPen(pen)
             p.drawLine(QPointF(x1, y1), QPointF(x2, y2))
 
@@ -7885,10 +6869,7 @@ def template_thumbnail(
         for x in (24, 98, 118, 138, 168):
             p.drawLine(QPointF(x, y), QPointF(x, bottom))
         for r in range(1, rows):
-            p.drawLine(
-                QPointF(15, y + head_h + r * row_h),
-                QPointF(195, y + head_h + r * row_h),
-            )
+            p.drawLine(QPointF(15, y + head_h + r * row_h), QPointF(195, y + head_h + r * row_h))
     # summary: the amount in words and the GST summary on the left, the totals on the right
     y = bottom + 7
     block(15, y, 62, 2.4, soft)
@@ -7926,16 +6907,8 @@ def template_thumbnail(
 
 # The brand colours offered in Settings (any other colour can be picked with "Custom colour...").
 BRAND_COLORS: List[Tuple[str, str]] = [
-    ("#2563EB", "Blue"),
-    ("#4F46E5", "Indigo"),
-    ("#7C3AED", "Purple"),
-    ("#DB2777", "Pink"),
-    ("#DC2626", "Red"),
-    ("#EA580C", "Orange"),
-    ("#16A34A", "Green"),
-    ("#0D9488", "Teal"),
-    ("#1E3A5F", "Navy"),
-    ("#111827", "Black"),
+    ("#2563EB", "Blue"), ("#4F46E5", "Indigo"), ("#7C3AED", "Purple"), ("#DB2777", "Pink"), ("#DC2626", "Red"),
+    ("#EA580C", "Orange"), ("#16A34A", "Green"), ("#0D9488", "Teal"), ("#1E3A5F", "Navy"), ("#111827", "Black"),
 ]
 
 
@@ -7964,7 +6937,6 @@ def _swatch_icon(color: str, selected: bool, ratio: Optional[int] = None) -> QIc
 
 class _Swatch(QToolButton):
     """A colour chip in the brand-colour row; clicking it announces its colour."""
-
     picked = Signal(str)
 
     def __init__(self, color: str, name: str, parent=None):
@@ -7990,7 +6962,6 @@ class _Swatch(QToolButton):
 class _TemplateCard(QFrame):
     """One template in Settings: a miniature of the invoice, its name (a radio button) and a line about it. Clicking
     anywhere on the card picks it."""
-
     picked = Signal(str)
 
     def __init__(self, tpl: PDFTemplate, group: QButtonGroup, parent=None):
@@ -8003,9 +6974,7 @@ class _TemplateCard(QFrame):
         lay.setContentsMargins(10, 10, 10, 10)
         lay.setSpacing(12)
         self.thumb = QLabel()
-        self.thumb.setAlignment(
-            Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignHCenter
-        )
+        self.thumb.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignHCenter)
         self.thumb.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         lay.addWidget(self.thumb, 0, Qt.AlignmentFlag.AlignTop)
         text = QVBoxLayout()
@@ -8016,9 +6985,7 @@ class _TemplateCard(QFrame):
         self.radio.toggled.connect(self._on_toggled)
         text.addWidget(self.radio)
         self.blurb = make_label(tpl.blurb, "muted", wrap=True)
-        self.blurb.setMinimumWidth(
-            90
-        )  # a wrapped label otherwise asks for far more room than it needs
+        self.blurb.setMinimumWidth(90)                  # a wrapped label otherwise asks for far more room than it needs
         text.addWidget(self.blurb)
         text.addStretch(1)
         lay.addLayout(text, 1)
@@ -8041,130 +7008,104 @@ class _TemplateCard(QFrame):
         super().mousePressEvent(event)
 
 
-class SettingsDialog(QDialog):
-    """Settings: a menu of pages on the left (General, Your Details, Payment, Invoice PDF, Logo & Signature, Data &
-    Backup) and the chosen page on the right, made of titled cards. Nothing is applied until "Save Changes"; the footer
-    says whether there is anything unsaved, a mistake in a field is explained right under the field, and closing the
-    dialog with unsaved changes asks first. The menu shrinks to icons when the window is narrow.
-    """
+class SettingsFrame(QWidget):
+    """Settings, as a page inside the main window (not a window of its own): a menu of pages on the left (General, Your
+    Details, Payment, Invoice Design, Logo & Signature, Backup & Restore) and the chosen page on the right, made of titled
+    cards. Nothing is applied until "Save Changes"; the footer says whether there is anything unsaved, a mistake in a
+    field is explained right under the field, and leaving with unsaved changes asks first. The menu shrinks to icons when
+    the window is narrow. The page is built when Settings is opened and released again when it is left, so its pictures
+    and previews do not stay in memory."""
 
     CURRENCY_OPTIONS: List[Tuple[str, str, str]] = [
-        ("₹", "INR", "Indian Rupee"),
-        ("$", "USD", "US Dollar"),
-        ("€", "EUR", "Euro"),
-        ("£", "GBP", "British Pound"),
-        ("¥", "JPY", "Japanese Yen"),
-        ("A$", "AUD", "Australian Dollar"),
-        ("C$", "CAD", "Canadian Dollar"),
-        ("S$", "SGD", "Singapore Dollar"),
+        ("₹",   "INR", "Indian Rupee"),
+        ("$",   "USD", "US Dollar"),
+        ("€",   "EUR", "Euro"),
+        ("£",   "GBP", "British Pound"),
+        ("¥",   "JPY", "Japanese Yen"),
+        ("A$",  "AUD", "Australian Dollar"),
+        ("C$",  "CAD", "Canadian Dollar"),
+        ("S$",  "SGD", "Singapore Dollar"),
         ("CN¥", "CNY", "Chinese Yuan"),
-        ("Fr", "CHF", "Swiss Franc"),
+        ("Fr",  "CHF", "Swiss Franc"),
         ("د.إ", "AED", "UAE Dirham"),
-        ("R$", "BRL", "Brazilian Real"),
-        ("₽", "RUB", "Russian Ruble"),
-        ("₩", "KRW", "South Korean Won"),
-        ("฿", "THB", "Thai Baht"),
-        ("R", "ZAR", "South African Rand"),
-        ("₺", "TRY", "Turkish Lira"),
-        ("kr", "SEK", "Swedish Krona"),
-        ("zł", "PLN", "Polish Złoty"),
-        ("₫", "VND", "Vietnamese Dong"),
+        ("R$",  "BRL", "Brazilian Real"),
+        ("₽",   "RUB", "Russian Ruble"),
+        ("₩",   "KRW", "South Korean Won"),
+        ("฿",   "THB", "Thai Baht"),
+        ("R",   "ZAR", "South African Rand"),
+        ("₺",   "TRY", "Turkish Lira"),
+        ("kr",  "SEK", "Swedish Krona"),
+        ("zł",  "PLN", "Polish Złoty"),
+        ("₫",   "VND", "Vietnamese Dong"),
     ]
     CUSTOM_CURRENCY = "Custom Symbol…"
-    PAGE_GENERAL, PAGE_DETAILS, PAGE_PAYMENT, PAGE_PDF, PAGE_IMAGES, PAGE_DATA = range(
-        6
-    )
+    PAGE_GENERAL, PAGE_DETAILS, PAGE_PAYMENT, PAGE_PDF, PAGE_IMAGES, PAGE_DATA = range(6)
     # (icon, name, what the page is about)
     PAGES: List[Tuple[str, str, str]] = [
-        (
-            "⚙️",
-            "General",
-            "How the app looks, and the business name printed on every invoice.",
-        ),
-        (
-            "👤",
-            "Your Details",
-            "Your own contact details, printed under the business name on new invoices.",
-        ),
+        ("⚙️", "General", "How Vyaprix looks and feels, and the business name printed on every invoice."),
+        ("👤", "Your Details", "Your own contact details, printed under the business name on new invoices."),
         ("💳", "Payment", "The currency, and how your customers can pay you."),
-        (
-            "📄",
-            "Invoice PDF",
-            "How your printed invoices look: template, colour, status watermark, footer and terms.",
-        ),
+        ("📄", "Invoice Design", "How your printed invoices look: template, colour, status watermark, footer and terms."),
         ("🖼️", "Logo & Signature", "The pictures printed on your invoices."),
-        (
-            "💾",
-            "Data & Backup",
-            "Where your data is kept, and how to back it up or bring it back.",
-        ),
+        ("💾", "Backup & Restore", "Where your data is kept, and how to save a copy of it or bring a copy back."),
     ]
-    NAV_WIDE, NAV_COMPACT = 212, 62  # width of the menu: with names / icons only
-    COMPACT_BELOW = 780  # the menu shows icons only in a dialog narrower than this
+    NAV_WIDE, NAV_COMPACT = 212, 62          # width of the menu: with names / icons only
+    COMPACT_BELOW = 780                      # the menu shows icons only in a dialog narrower than this
 
-    def __init__(self, parent, callback: Callable[[Optional[str]], None]):
+    def __init__(self, parent, controller):
         super().__init__(parent)
-        self.callback = callback
-        self.setWindowTitle(f"{APP_NAME} Settings")
-        self.setModal(True)
-        _fit_to_screen(self, 940, 720, 640, 540)
+        self.controller = controller
+        self.callback = controller._on_settings_saved
         self._cfg = load_config()
         self._asset_rows: Dict[str, _AssetRow] = {}
-        self._checked_fields: List[_Field] = (
-            []
-        )  # the fields that explain a mistake in place
-        self._template_key = (
-            PDF_TEMPLATE_CLASSIC.key
-        )  # the invoice look and brand colour chosen in this dialog
+        self._checked_fields: List[_Field] = []              # the fields that explain a mistake in place
+        self._template_key = PDF_TEMPLATE_CLASSIC.key       # the invoice look and brand colour chosen in this dialog
         self._accent = ""
-        self._preview_dirs: List[Path] = (
-            []
-        )  # folders holding sample PDFs (removed when the dialog closes)
-        self._baseline: Optional[str] = (
-            None  # the screen as loaded: what "unsaved" is measured against
-        )
+        self._preview_dirs: List[Path] = []                  # folders holding sample PDFs (removed when the page is released)
+        self._baseline: Optional[str] = None                 # the screen as loaded: what "unsaved" is measured against
         self._compact: Optional[bool] = None
         self._bad_pages: Set[int] = set()
-        self._closing_now = False  # closed by the program (not the user): never ask
+        self._released = False
         self._build()
         self._load()
-        QShortcut(
-            QKeySequence.StandardKey.Save,
-            self,
-            activated=self._save,
-            context=Qt.ShortcutContext.WidgetWithChildrenShortcut,
-        )
+        # (Ctrl+S and Esc are registered for this page by the main window's shortcut manager: a second shortcut of
+        # the same keys here would make both "ambiguous", and neither would work.)
 
     # ------------------------------------------------------------------ #
-    #  Closing
+    #  Coming and going
     # ------------------------------------------------------------------ #
-    def done(self, result: int):
+    def on_show(self, page: Optional[int] = None) -> None:
+        """Called each time the page is shown; `page` goes straight to one of the Settings pages."""
+        if page is not None:
+            self.show_page(int(page))
+        self.nav.setFocus()
+
+    def confirm_navigate_away(self) -> bool:
+        """Asked before the page is left (Back, another entry of the menu, closing the window). With unsaved changes the
+        user is asked; leaving anyway puts back any logo or signature picture that was already copied in."""
+        if self._is_dirty() and not Messagebox.yesno(
+                "Leave without saving?", "You have changes that are not saved.\n\nLeave Settings and discard them?",
+                parent=self.controller):
+            return False
+        for row in self._asset_rows.values():
+            row.undo_copy()
+        return True
+
+    def release(self) -> None:
+        """The page is being thrown away: remove the temporary sample invoices made for the previews."""
+        if self._released:
+            return
+        self._released = True
         for folder in self._preview_dirs:
             shutil.rmtree(folder, ignore_errors=True)
         self._preview_dirs.clear()
-        super().done(result)
 
-    def reject(self):  # Cancel, Esc and the window's X all come here
-        if (
-            not self._closing_now
-            and self._is_dirty()
-            and not Messagebox.yesno(
-                "Discard changes?",
-                "You have changes that are not saved.\n\nClose Settings and discard them?",
-                parent=self,
-            )
-        ):
-            return
-        for row in self._asset_rows.values():
-            row.undo_copy()
-        super().reject()
+    def _go_back(self) -> None:
+        self.controller.close_settings()
 
-    def closeEvent(self, event):
-        if (
-            not event.spontaneous()
-        ):  # the program is closing it (the app is shutting down): no question asked
-            self._closing_now = True
-        super().closeEvent(event)
+    def save(self) -> None:
+        """Ctrl+S: save the changes, exactly like the Save Changes button."""
+        self._save()
 
     @classmethod
     def _currency_option_label(cls, opt: Tuple[str, str, str]) -> str:
@@ -8188,9 +7129,7 @@ class SettingsDialog(QDialog):
     @staticmethod
     def _combo() -> QComboBox:
         combo = QComboBox()
-        combo.setSizeAdjustPolicy(
-            QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
-        )
+        combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
         combo.setMinimumContentsLength(12)
         return guard_wheel(combo)
 
@@ -8207,14 +7146,8 @@ class SettingsDialog(QDialog):
         col.addWidget(note)
         return box
 
-    def _field(
-        self,
-        caption: str,
-        widget: QWidget,
-        hint: str = "",
-        optional: bool = False,
-        check: Optional[Callable[[str], str]] = None,
-    ) -> _Field:
+    def _field(self, caption: str, widget: QWidget, hint: str = "", optional: bool = False,
+               check: Optional[Callable[[str], str]] = None) -> _Field:
         """A captioned input; `check(text)` (-> "" or a message) makes it explain a wrong value in place."""
         field = _Field(caption, widget, hint, optional)
         self._track(widget)
@@ -8228,9 +7161,7 @@ class SettingsDialog(QDialog):
         field.validator = lambda: check(edit.text())
         field.error_changed.connect(self._on_field_error_changed)
         edit.editingFinished.connect(field.validate)
-        edit.textChanged.connect(
-            lambda _text: field.validate() if field.has_error else None
-        )
+        edit.textChanged.connect(lambda _text: field.validate() if field.has_error else None)
         self._checked_fields.append(field)
 
     def _track(self, *widgets: QWidget) -> None:
@@ -8285,14 +7216,8 @@ class SettingsDialog(QDialog):
         # ---- the pages ------------------------------------------------------------------------------------------ #
         self.stack = QStackedWidget()
         body.addWidget(self.stack, 1)
-        builders = (
-            self._build_general_page,
-            self._build_details_page,
-            self._build_payment_page,
-            self._build_pdf_page,
-            self._build_images_page,
-            self._build_data_page,
-        )
+        builders = (self._build_general_page, self._build_details_page, self._build_payment_page,
+                    self._build_pdf_page, self._build_images_page, self._build_data_page)
         self.pages: List[_SettingsPage] = []
         for (icon, name, about), build in zip(self.PAGES, builders):
             page = _SettingsPage(name, about)
@@ -8314,18 +7239,10 @@ class SettingsDialog(QDialog):
         foot.setSpacing(10)
         self.status_label = make_label("", "small", tone="muted")
         foot.addWidget(self.status_label, 1)
-        self.cancel_btn = make_button(
-            "Cancel",
-            "secondary",
-            self.reject,
-            tooltip="Close Settings without saving (Esc)",
-        )
-        self.save_btn = make_button(
-            "💾  Save Changes  (Ctrl+S)",
-            "success",
-            self._save,
-            tooltip="Save every change and close Settings (Ctrl+S)",
-        )
+        self.cancel_btn = make_button("←  Back", "secondary-outline", self._go_back,
+                                      tooltip="Go back to where you were (Esc). If you have unsaved changes you are asked first.")
+        self.save_btn = make_button("💾  Save Changes", "success", self._save,
+                                    tooltip="Save your changes (Ctrl+S). Settings stays open so you can carry on.")
         _no_default_button(self.cancel_btn, self.save_btn)
         foot.addWidget(self.cancel_btn)
         foot.addWidget(self.save_btn)
@@ -8366,13 +7283,8 @@ class SettingsDialog(QDialog):
                 item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             else:
                 item.setText(f"{icon}   {name}{marker}")
-                item.setTextAlignment(
-                    Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
-                )
-            item.setData(
-                Qt.ItemDataRole.ForegroundRole,
-                QColor(theme_color("danger_text")) if bad else None,
-            )
+                item.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+            item.setData(Qt.ItemDataRole.ForegroundRole, QColor(theme_color("danger_text")) if bad else None)
             item.setToolTip(f"{name} — a field here needs attention" if bad else name)
 
     def resizeEvent(self, event):
@@ -8386,36 +7298,39 @@ class SettingsDialog(QDialog):
 
     # ---- General ---------------------------------------------------------------------------------------------------- #
     def _build_general_page(self, page: _SettingsPage):
-        card = _SettingsCard(
-            "Appearance", "The colour theme of the whole app. It changes when you save."
-        )
+        card = _SettingsCard("Colours", "Pick the colours Vyaprix uses. They change when you save.")
         self.theme_combo = self._combo()
         for name in THEME_NAMES:
-            self.theme_combo.addItem(name.title(), name)
-        card.add(self._field("Theme", self.theme_combo))
+            self.theme_combo.addItem(THEME_LABELS.get(name, name.title()), name)
+        card.add(self._field("Colour theme", self.theme_combo))
         page.add(card)
 
-        card = _SettingsCard(
-            "Company",
-            "Your one business identity: the letterhead at the top of every invoice, and the "
-            "name and GSTIN in the FROM block under it. There is only one place to set them, "
-            "so they can never disagree with each other.",
-        )
-        self.co_name = self._entry("Your company or firm name")
+        card = _SettingsCard("Speed and smoothness", "Choose how lively Vyaprix feels. Both are fine to turn off if you "
+                                                     "like things plain and instant, or if your computer is slow. "
+                                                     "They change when you save.")
+        self.animations_check = ToggleSwitch("Smooth movement")
+        self.splash_check = ToggleSwitch("Show the welcome screen when Vyaprix starts")
+        self._track(self.animations_check, self.splash_check)
+        card.add(self._toggle_row(
+            self.animations_check,
+            "The menu slides in and out, pages fade in and small messages glide up. Turn this off to make "
+            "everything change at once."))
+        card.add(self._toggle_row(
+            self.splash_check,
+            "A short opening screen while Vyaprix gets ready. Turn this off and the main window simply opens."))
+        page.add(card)
+
+        card = _SettingsCard("Your business", "The name printed at the top of every invoice, with your tagline and "
+                                              "GSTIN. You only need to set them here, once.")
+        self.co_name = self._entry("Your business or firm name")
         self.co_desc = self._entry("A short tagline, e.g. Business Made Smarter.")
         self.co_gst = self._entry("22ABCDE1234F1Z5")
         grid = _ReflowGrid(2, 260)
-        grid.add(self._field("Company name", self.co_name))
+        grid.add(self._field("Business name", self.co_name))
         grid.add(self._field("Tagline", self.co_desc, optional=True))
-        grid.add(
-            self._field(
-                "GSTIN",
-                self.co_gst,
-                "15 characters, for example 22ABCDE1234F1Z5.",
-                optional=True,
-                check=self._check_gstin,
-            )
-        )
+        grid.add(self._field("GSTIN", self.co_gst, "Your 15-character GST number, for example 22ABCDE1234F1Z5. "
+                                                   "Leave it empty if you do not have one.", optional=True,
+                             check=self._check_gstin))
         self.co_gst.editingFinished.connect(self._uppercase_gstin)
         card.add(grid)
         page.add(card)
@@ -8442,12 +7357,9 @@ class SettingsDialog(QDialog):
         self.ud_pin = self._entry("e.g. 226001")
         restrict_to_digits(self.ud_pin, max_length=6)
 
-        card = _SettingsCard(
-            "Contact",
-            "Printed under the business name in the FROM block of every new invoice. "
-            "Changing it never alters an invoice you have already made. The business name "
-            "and GSTIN are on the General page.",
-        )
+        card = _SettingsCard("Contact", "Printed under your business name in the \"From\" part of every new invoice. "
+                                        "Changing it never alters invoices you have already made. (Your business name "
+                                        "and GSTIN are on the General page.)")
         grid = _ReflowGrid(2, 260)
         grid.add(self._field("Your name", self.ud_name))
         grid.add(self._field("Phone number", self.ud_phone, check=self._check_phone))
@@ -8456,12 +7368,9 @@ class SettingsDialog(QDialog):
         card.add(grid)
         page.add(card)
 
-        card = _SettingsCard(
-            "Address",
-            "Your state decides CGST + SGST (same state) or IGST (another state) when you "
-            "pick the place of supply on an invoice. If a GSTIN is set on the General page, "
-            "its first two digits give the state instead.",
-        )
+        card = _SettingsCard("Address", "Your state decides the tax type on an invoice: CGST + SGST for a customer in "
+                                        "your own state, IGST for another state. If you have added a GSTIN on the "
+                                        "General page, its first two digits are used to find your state instead.")
         grid = _ReflowGrid(2, 260)
         grid.add(self._field("Address", self.ud_address), full_row=True)
         grid.add(self._field("City", self.ud_city))
@@ -8479,24 +7388,16 @@ class SettingsDialog(QDialog):
         for opt in self.CURRENCY_OPTIONS:
             self.currency_combo.addItem(self._currency_option_label(opt), opt[0])
         self.currency_combo.addItem(self.CUSTOM_CURRENCY, None)
-        self.currency_combo.currentIndexChanged.connect(
-            lambda _i: self._on_currency_selected(user=True)
-        )
+        self.currency_combo.currentIndexChanged.connect(lambda _i: self._on_currency_selected(user=True))
         self.custom_currency_entry = self._entry("e.g. Rs., kr, ₪")
         card.add(self._field("Currency", self.currency_combo))
-        self._custom_currency_field = self._field(
-            "Custom symbol",
-            self.custom_currency_entry,
-            "Printed before every amount, e.g. Rs.",
-        )
+        self._custom_currency_field = self._field("Custom symbol", self.custom_currency_entry,
+                                                  "Printed before every amount, e.g. Rs.")
         card.add(self._custom_currency_field)
         page.add(card)
 
-        card = _SettingsCard(
-            "Bank account",
-            "Printed in the payment block of an invoice while there is still something "
-            "to pay.",
-        )
+        card = _SettingsCard("Bank account", "Printed in the payment block of an invoice while there is still something "
+                                             "to pay.")
         self.bank_name = self._entry("e.g. State Bank of India")
         self.acc_holder = self._entry("e.g. Priya Sharma")
         self.acc_number = self._entry("e.g. 000123456789")
@@ -8509,19 +7410,11 @@ class SettingsDialog(QDialog):
         card.add(grid)
         page.add(card)
 
-        card = _SettingsCard(
-            "UPI",
-            "Customers can pay from any UPI app: the UPI ID is printed on the invoice, and so "
-            "is the QR code when you add one.",
-        )
+        card = _SettingsCard("UPI", "Customers can pay from any UPI app: the UPI ID is printed on the invoice, and so "
+                                    "is the QR code when you add one.")
         self.upi_id = self._entry("company@upi")
         card.add(self._field("UPI ID", self.upi_id))
-        qr_row = _AssetRow(
-            "upi_qr_code",
-            "UPI QR code",
-            "upi_qr.png",
-            "The code a customer scans to pay you.",
-        )
+        qr_row = _AssetRow("upi_qr_code", "UPI QR code", "upi_qr.png", "The code a customer scans to pay you.")
         self._add_asset_row(qr_row)
         card.add(qr_row)
         page.add(card)
@@ -8530,32 +7423,20 @@ class SettingsDialog(QDialog):
         self.pay_terms = self._entry("Due on Receipt")
         self.payment_notes_text = self._multiline(
             "Anything else to show on the invoice -- cheque instructions, a late-fee policy, "
-            "alternate payment methods, etc.",
-            3,
-        )
-        card.add(
-            self._field(
-                "Default payment terms",
-                self.pay_terms,
-                "Each new invoice starts with this; you can change it on the invoice.",
-            )
-        )
+            "alternate payment methods, etc.", 3)
+        card.add(self._field("Default payment terms", self.pay_terms,
+                             "Each new invoice starts with this; you can change it on the invoice."))
         card.add(self._field("Payment notes", self.payment_notes_text, optional=True))
         page.add(card)
 
         card = _SettingsCard("When payment details are printed")
-        self.always_show_qr_check = ToggleSwitch(
-            "Always show payment details, even on fully paid invoices"
-        )
+        self.always_show_qr_check = ToggleSwitch("Always show payment details, even on fully paid invoices")
         self._track(self.always_show_qr_check)
-        card.add(
-            self._toggle_row(
-                self.always_show_qr_check,
-                "Off by default: the QR code and the bank / UPI details are only printed on unpaid and partly paid "
-                "invoices, because there is nothing left to pay once an invoice is settled. Turn this on to print them "
-                "whatever the status.",
-            )
-        )
+        card.add(self._toggle_row(
+            self.always_show_qr_check,
+            "Off by default: the QR code and the bank / UPI details are only printed on unpaid and partly paid "
+            "invoices, because there is nothing left to pay once an invoice is settled. Turn this on to print them "
+            "whatever the status."))
         page.add(card)
         self._on_currency_selected()
 
@@ -8565,56 +7446,36 @@ class SettingsDialog(QDialog):
         if custom and user:
             self.custom_currency_entry.setFocus()
 
-    # ---- Invoice PDF ------------------------------------------------------------------------------------------------ #
+    # ---- Invoice Design --------------------------------------------------------------------------------------------- #
     def _build_pdf_page(self, page: _SettingsPage):
-        card = _SettingsCard(
-            "Template",
-            "The look of every invoice you print. A single invoice can still be printed "
-            "in another template from its own form.",
-        )
+        card = _SettingsCard("Template", "The look of every invoice you print. A single invoice can still be printed "
+                                         "in another template from its own form.")
         card.add(self._build_template_picker())
         page.add(card)
 
-        card = _SettingsCard("On the page")
+        card = _SettingsCard("What is printed")
         self.watermark_check = ToggleSwitch("Show the status watermark")
         self._track(self.watermark_check)
-        card.add(
-            self._toggle_row(
-                self.watermark_check,
-                "A faint slanted stamp across the page that says where the invoice stands: PAID, BALANCE DUE, PARTIAL "
-                "PAYMENT, ADVANCE / CREDIT or COMPLIMENTARY. You can also turn it on or off for a single invoice, on its "
-                "own form.",
-            )
-        )
+        card.add(self._toggle_row(
+            self.watermark_check,
+            "A faint slanted stamp across the page that shows where the invoice stands: PAID, BALANCE DUE, PARTIAL "
+            "PAYMENT, ADVANCE / CREDIT or COMPLIMENTARY. You can also turn it on or off for a single invoice, on its "
+            "own form."))
         self.amount_words_check = ToggleSwitch("Print the invoice total in words")
         self._track(self.amount_words_check)
-        card.add(
-            self._toggle_row(
-                self.amount_words_check,
-                '"Rupees ... Only" under the totals, for rupee invoices. It is also shown while you fill in an invoice.',
-            )
-        )
+        card.add(self._toggle_row(
+            self.amount_words_check,
+            "\"Rupees ... Only\" under the totals, for rupee invoices. It is also shown while you fill in an invoice."))
         page.add(card)
 
         card = _SettingsCard("Footer and terms")
         self.footer_text = self._multiline("Thank you for your business!", 3)
         self.default_terms_text = self._multiline(
             "Every new invoice starts with this text in its Terms field -- e.g. payment within 15 days, "
-            "late-fee policy, cancellation terms. Leave empty to print no terms.",
-            4,
-        )
-        card.add(
-            self._field(
-                "Footer note",
-                self.footer_text,
-                "Printed at the bottom of every page, under a thin line (two lines at most).",
-            )
-        )
-        card.add(
-            self._field(
-                "Default terms and conditions", self.default_terms_text, optional=True
-            )
-        )
+            "late-fee policy, cancellation terms. Leave empty to print no terms.", 4)
+        card.add(self._field("Footer note", self.footer_text,
+                             "Printed at the bottom of every page, under a thin line (two lines at most)."))
+        card.add(self._field("Default terms and conditions", self.default_terms_text, optional=True))
         page.add(card)
 
     # ---- Invoice template ------------------------------------------------------------------------------------------ #
@@ -8624,9 +7485,7 @@ class SettingsDialog(QDialog):
         col = QVBoxLayout(box)
         col.setContentsMargins(0, 0, 0, 0)
         col.setSpacing(12)
-        self.template_grid = _ReflowGrid(
-            2, 250, align_top=False
-        )  # the cards of a row are one height
+        self.template_grid = _ReflowGrid(2, 250, align_top=False)      # the cards of a row are one height
         self.template_group = QButtonGroup(self)
         self.template_cards: Dict[str, _TemplateCard] = {}
         for tpl in PDF_TEMPLATES.values():
@@ -8653,19 +7512,11 @@ class SettingsDialog(QDialog):
         row.addStretch(1)
         accent_col.addLayout(row)
         row = QHBoxLayout()
-        self.accent_custom_btn = make_button(
-            "Custom colour…",
-            "secondary-outline",
-            self._pick_custom_accent,
-            tooltip="Choose any other colour",
-        )
+        self.accent_custom_btn = make_button("Custom colour…", "secondary-outline", self._pick_custom_accent,
+                                             tooltip="Choose any other colour")
         row.addWidget(self.accent_custom_btn)
-        self.accent_reset_btn = make_button(
-            "Use the template's colour",
-            "link",
-            self._reset_accent,
-            tooltip="Go back to the colour the template comes with",
-        )
+        self.accent_reset_btn = make_button("Use the template's colour", "link", self._reset_accent,
+                                            tooltip="Go back to the colour the template comes with")
         row.addWidget(self.accent_reset_btn)
         row.addStretch(1)
         accent_col.addLayout(row)
@@ -8675,11 +7526,8 @@ class SettingsDialog(QDialog):
 
         line = QHBoxLayout()
         self.preview_template_btn = make_button(
-            "Preview sample invoice",
-            "info-outline",
-            self._preview_template,
-            tooltip="Open a made-up invoice with the template, colour and print options shown on this screen",
-        )
+            "Preview sample invoice", "info-outline", self._preview_template,
+            tooltip="Open a made-up invoice with the template, colour and print options shown on this screen")
         _no_default_button(self.preview_template_btn)
         line.addWidget(self.preview_template_btn)
         line.addStretch(1)
@@ -8699,9 +7547,7 @@ class SettingsDialog(QDialog):
         self._sync_template_picker()
 
     def _pick_custom_accent(self):
-        start = QColor(
-            self._accent or PDF_TEMPLATES[self._template_key].accent or "#2563EB"
-        )
+        start = QColor(self._accent or PDF_TEMPLATES[self._template_key].accent or "#2563EB")
         chosen = QColorDialog.getColor(start, self, "Brand Colour")
         if chosen.isValid():
             self._accent = normalize_hex_color(chosen.name())
@@ -8711,34 +7557,22 @@ class SettingsDialog(QDialog):
         """Shows the chosen template, brand colour and miniatures (the colour only recolours the templates that take one)."""
         card = self.template_cards.get(self._template_key)
         if card is not None and not card.radio.isChecked():
-            card.radio.setChecked(
-                True
-            )  # (picks it again: harmless, the state is already set)
+            card.radio.setChecked(True)                      # (picks it again: harmless, the state is already set)
         for key, c in self.template_cards.items():
             c.refresh(PDF_TEMPLATES[key].with_accent(self._accent))
         for color, swatch in self.accent_swatches.items():
             swatch.set_selected(color == self._accent)
         brandable = PDF_TEMPLATES[self._template_key].brandable
-        for w in (
-            *self.accent_swatches.values(),
-            self.accent_custom_btn,
-            self.accent_reset_btn,
-        ):
+        for w in (*self.accent_swatches.values(), self.accent_custom_btn, self.accent_reset_btn):
             w.setEnabled(brandable)
         if not brandable:
-            self.accent_note.setText(
-                "The Classic look is black and grey: it has no brand colour. Pick Modern, Minimal "
-                "or Corporate to colour your invoices."
-            )
+            self.accent_note.setText("The Classic look is black and grey: it has no brand colour. Pick Modern, Minimal "
+                                     "or Corporate to colour your invoices.")
         elif self._accent:
-            self.accent_note.setText(
-                f"Your colour {self._accent} is used by Modern, Minimal and Corporate."
-            )
+            self.accent_note.setText(f"Your colour {self._accent} is used by Modern, Minimal and Corporate.")
         else:
-            self.accent_note.setText(
-                "Each template uses its own colour until you pick one. Your colour is shared by "
-                "Modern, Minimal and Corporate."
-            )
+            self.accent_note.setText("Each template uses its own colour until you pick one. Your colour is shared by "
+                                     "Modern, Minimal and Corporate.")
         self._on_edited()
 
     def _preview_template(self):
@@ -8752,21 +7586,14 @@ class SettingsDialog(QDialog):
             path = PDFGenerator(data, cfg, payments=payments, out_dir=folder).generate()
         except Exception as exc:
             logger.exception("Could not make the sample invoice")
-            return Messagebox.show_error(
-                "Preview Failed",
-                f"The sample invoice could not be made:\n{exc}",
-                parent=self,
-            )
+            return Messagebox.show_error("Preview Failed", f"The sample invoice could not be made:\n{exc}", parent=self)
         PDFViewer(self, path).show()
 
     def event(self, event):
         # Dragged to a monitor with another pixel density: paint the miniatures, colour chips and picture previews again
         # at that screen's resolution (a picture keeps the resolution it was made at, so it would stay soft).
-        if (
-            event.type() == QEvent.Type.DevicePixelRatioChange
-            and hasattr(self, "_template_key")
-            and hasattr(self, "_asset_rows")
-        ):
+        if (event.type() == QEvent.Type.DevicePixelRatioChange and hasattr(self, "_template_key")
+                and hasattr(self, "_asset_rows")):
             self._sync_template_picker()
             for row in self._asset_rows.values():
                 row.refresh()
@@ -8779,61 +7606,33 @@ class SettingsDialog(QDialog):
         return row
 
     def _build_images_page(self, page: _SettingsPage):
-        card = _SettingsCard(
-            "Logo and signature",
-            "Choose a PNG or JPG file for each, or drop one onto its row. Vyaprix keeps its own copy "
-            "of the file straight away, so the picture still prints if you later move or delete the "
-            "original. (The UPI QR code is on the Payment page.)",
-        )
-        logo = self._add_asset_row(
-            _AssetRow(
-                "logo",
-                "Company logo",
-                "logo.png",
-                "Printed in the letterhead at the top of every invoice.",
-            )
-        )
-        signature = self._add_asset_row(
-            _AssetRow(
-                "signature",
-                "Authorized signature",
-                "sign.png",
-                "Printed above the signature line at the end of an invoice.",
-            )
-        )
+        card = _SettingsCard("Logo and signature",
+                             "Choose a picture for each (PNG or JPG), or drop one onto its row. Vyaprix keeps its own "
+                             "copy straight away, so the picture still prints if you later move or delete the original. "
+                             "(The UPI QR code is on the Payment page.)")
+        logo = self._add_asset_row(_AssetRow("logo", "Company logo", "logo.png",
+                                             "Printed in the letterhead at the top of every invoice."))
+        signature = self._add_asset_row(_AssetRow("signature", "Authorized signature", "sign.png",
+                                                  "Printed above the signature line at the end of an invoice."))
         card.add(logo)
         card.add(hline())
         card.add(signature)
         page.add(card)
 
-    # ---- Data & Backup ---------------------------------------------------------------------------------------------- #
+    # ---- Backup & Restore ------------------------------------------------------------------------------------------- #
     def _build_data_page(self, page: _SettingsPage):
-        card = _SettingsCard(
-            "Where your data is kept",
-            "Invoices, clients and your catalogue all live in one database file on this computer.",
-        )
+        card = _SettingsCard("Where your data is kept",
+                             "Your invoices, clients and items are all saved in one file on this computer.")
         self.db_path_label = make_label(str(DB_NAME), "muted")
         self.db_path_label.setWordWrap(True)
-        self.db_path_label.setTextInteractionFlags(
-            Qt.TextInteractionFlag.TextSelectableByMouse
-        )
-        self.db_path_label.setSizePolicy(
-            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
-        )
+        self.db_path_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.db_path_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         card.add(self.db_path_label)
         row = QHBoxLayout()
-        self.copy_path_btn = make_button(
-            "Copy path",
-            "secondary-outline",
-            self._copy_db_path,
-            tooltip="Copy the location of the database file",
-        )
-        self.open_folder_btn = make_button(
-            "Show in folder",
-            "secondary-outline",
-            self._open_db_folder,
-            tooltip="Open the folder that holds the database file",
-        )
+        self.copy_path_btn = make_button("Copy path", "secondary-outline", self._copy_db_path,
+                                         tooltip="Copy the location of this file")
+        self.open_folder_btn = make_button("Show in folder", "secondary-outline", self._open_db_folder,
+                                           tooltip="Open the folder that holds this file")
         _no_default_button(self.copy_path_btn, self.open_folder_btn)
         row.addWidget(self.copy_path_btn)
         row.addWidget(self.open_folder_btn)
@@ -8841,17 +7640,12 @@ class SettingsDialog(QDialog):
         card.body.addLayout(row)
         page.add(card)
 
-        card = _SettingsCard(
-            "Back up",
-            "Save a copy of the database somewhere safe -- a USB drive, or a folder that syncs to the "
-            "cloud.",
-        )
-        self.backup_btn = make_button(
-            "💾  Save a Backup Copy…  (Ctrl+B)",
-            "secondary-outline",
-            self._backup_db,
-            tooltip="Back up the database now (Ctrl+B works from anywhere in the app)",
-        )
+        card = _SettingsCard("Save a backup",
+                             "Make a safe copy of everything -- on a USB drive, or in a folder that syncs to the cloud. "
+                             "Do it now and then, so your work can never be lost.")
+        self.backup_btn = make_button("💾  Save a Backup Copy…  (Ctrl+B)", "secondary-outline", self._backup_db,
+                                      tooltip="Save a copy of all your invoices, clients and items "
+                                              "(Ctrl+B works from anywhere in the app)")
         _no_default_button(self.backup_btn)
         row = QHBoxLayout()
         row.addWidget(self.backup_btn)
@@ -8859,15 +7653,10 @@ class SettingsDialog(QDialog):
         card.body.addLayout(row)
         page.add(card)
 
-        card = _SettingsCard(
-            "Restore from a backup",
-            "Replaces all invoices, clients and catalogue items with the contents of the file you "
-            "choose. Your current database is backed up automatically first, and the app refreshes by "
-            "itself once the import has finished.",
-        )
-        self.import_btn = make_button(
-            "📥  Import Database…", "warning-outline", self._import_db
-        )
+        card = _SettingsCard("Restore from a backup",
+                             "Replaces all your invoices, clients and items with the ones in a backup you choose. "
+                             "Vyaprix saves a copy of your current data first, so you can always go back.")
+        self.import_btn = make_button("📥  Restore from a Backup…", "warning-outline", self._import_db)
         _no_default_button(self.import_btn)
         row = QHBoxLayout()
         row.addWidget(self.import_btn)
@@ -8883,7 +7672,7 @@ class SettingsDialog(QDialog):
     def _reset_copy_text(self):
         try:
             self.copy_path_btn.setText("Copy path")
-        except RuntimeError:  # the dialog has gone in the meantime
+        except RuntimeError:                                  # the dialog has gone in the meantime
             pass
 
     def _open_db_folder(self):
@@ -8896,12 +7685,8 @@ class SettingsDialog(QDialog):
         prompt_and_backup_database(self)
 
     def _import_db(self):
-        path, _ = QFileDialog.getOpenFileName(
-            self,
-            "Import Database",
-            str(_start_dir("import_dir")),
-            "SQLite Database (*.db);;All Files (*)",
-        )
+        path, _ = QFileDialog.getOpenFileName(self, "Choose a Backup to Restore", str(_start_dir("import_dir")),
+                                              "Vyaprix backup (*.db);;All Files (*)")
         if not path:
             return
         _remember_dir("import_dir", path)
@@ -8909,23 +7694,17 @@ class SettingsDialog(QDialog):
 
         problem = validate_import_database(source)
         if problem:
-            return Messagebox.show_error(
-                "Invalid Database",
-                f"This doesn't look like a valid database file:\n{problem}",
-                parent=self,
-            )
+            return Messagebox.show_error("Not a Vyaprix Backup", f"That file can't be restored.\n{problem}", parent=self)
         if Path(DB_NAME).exists() and _same_file(source, Path(DB_NAME)):
             return Messagebox.show_info(
-                "Import Database",
-                "That file is the database Vyaprix is already using, so there is nothing to import.",
-                parent=self,
-            )
+                "Restore from a Backup", "That is the file Vyaprix is already using, so there is nothing to restore.",
+                parent=self)
 
         if not Messagebox.okcancel(
-            "Import Database",
-            "This replaces all invoices, clients, and catalog items in Vyaprix with the "
-            "contents of the selected file.\n\nYour current database will be backed up "
-            "automatically first, so you can go back if anything looks wrong.\n\nContinue?",
+            "Restore from a Backup",
+            "This replaces all your invoices, clients and items with the ones in the file you chose.\n\n"
+            "Vyaprix will save a copy of your current data first, so you can go back if anything looks wrong.\n\n"
+            "Continue?",
             parent=self,
         ):
             return
@@ -8933,44 +7712,37 @@ class SettingsDialog(QDialog):
         try:
             backup_path = import_database_from(source)
         except DatabaseImportError as exc:
+            logger.error("Restoring a backup failed (%s): %s", exc.stage, exc)
             if exc.stage == "backup":
                 Messagebox.show_error(
-                    "Import Failed",
-                    f"Could not create a safety backup, so nothing was changed:\n{exc}",
-                    parent=self,
-                )
+                    "Restore Failed", "A safety copy of your current data could not be made, so nothing was "
+                                      f"changed:\n{exc}", parent=self)
             elif exc.restored:
                 Messagebox.show_error(
-                    "Import Failed",
-                    f"The selected file couldn't be used as a Vyaprix database:\n{exc}\n\n"
-                    "Your previous database has been restored.",
-                    parent=self,
-                )
+                    "Restore Failed",
+                    "That file could not be used, so nothing was changed.\n\nYour previous data has been put back.",
+                    parent=self)
             else:
                 Messagebox.show_error(
-                    "Import Failed",
-                    f"The selected file couldn't be used as a Vyaprix database:\n{exc}\n\n"
-                    "Your previous database could not be put back automatically. A copy of it was saved as "
-                    f"{exc.backup_path.name if exc.backup_path else 'a Vyaprix-pre-import-backup file'} in the "
-                    "Vyaprix data folder.",
-                    parent=self,
-                )
+                    "Restore Failed",
+                    "That file could not be used.\n\nYour previous data could not be put back automatically. A copy "
+                    f"of it was saved as {exc.backup_path.name if exc.backup_path else 'a Vyaprix pre-restore backup'} "
+                    "in the Vyaprix data folder.", parent=self)
             return
 
         Messagebox.show_info(
-            "Import Complete",
-            f"Database imported successfully.\n\nYour previous database was backed up to:\n{backup_path.name}",
-            parent=self,
-        )
-        self.callback(None)  # reloads CONFIG and refreshes every screen's list
+            "Restore Complete",
+            f"Your backup was restored.\n\nYour previous data was saved as:\n{backup_path.name}",
+            parent=self)
+        self.callback(None)     # reloads CONFIG and refreshes every screen's list
+        self._cfg = load_config()
+        self._load()            # ... and this page shows what the restored backup contains
 
     # ------------------------------------------------------------------ #
     #  Load / what changed / save
     # ------------------------------------------------------------------ #
     def _load(self):
-        self._baseline = (
-            None  # (the fields fill in one by one: nothing is "changed" yet)
-        )
+        self._baseline = None                       # (the fields fill in one by one: nothing is "changed" yet)
         c = self._cfg
         theme = normalize_theme_name(c.get("theme"))
         self.theme_combo.setCurrentIndex(max(0, self.theme_combo.findData(theme)))
@@ -8978,6 +7750,8 @@ class SettingsDialog(QDialog):
         self.co_name.setText(company.get("name", ""))
         self.co_desc.setText(company.get("description", ""))
         self.co_gst.setText(company.get("gstin", ""))
+        self.animations_check.setChecked(bool(c.get("animations", True)))
+        self.splash_check.setChecked(bool(c.get("show_splash", True)))
 
         ud = c.get("user_details", {})
         self.ud_name.setText(ud.get("name", ""))
@@ -9010,17 +7784,11 @@ class SettingsDialog(QDialog):
 
         pdf = c.get("pdf_settings", {})
         self.footer_text.setPlainText(pdf.get("footer_message", ""))
-        self.always_show_qr_check.setChecked(
-            bool(pdf.get("always_show_qr_code", False))
-        )
+        self.always_show_qr_check.setChecked(bool(pdf.get("always_show_qr_code", False)))
         self.amount_words_check.setChecked(bool(pdf.get("amount_in_words", False)))
         self.watermark_check.setChecked(bool(pdf.get("status_watermark", True)))
         self.default_terms_text.setPlainText(pdf.get("default_terms", ""))
-        self._template_key = (
-            pdf.get("template")
-            if pdf.get("template") in PDF_TEMPLATES
-            else PDF_TEMPLATE_CLASSIC.key
-        )
+        self._template_key = pdf.get("template") if pdf.get("template") in PDF_TEMPLATES else PDF_TEMPLATE_CLASSIC.key
         self._accent = normalize_hex_color(pdf.get("accent_color"))
         self._sync_template_picker()
 
@@ -9056,9 +7824,7 @@ class SettingsDialog(QDialog):
                 "pin_code": self.ud_pin.text().strip(),
                 # Preserved but no longer editable here directly -- see compose_your_contact()'s
                 # upgrade-path fallback.
-                "contact_info": self._cfg.get("user_details", {}).get(
-                    "contact_info", ""
-                ),
+                "contact_info": self._cfg.get("user_details", {}).get("contact_info", ""),
             },
             "payment_details": {
                 "upi_id": self.upi_id.text().strip(),
@@ -9080,6 +7846,8 @@ class SettingsDialog(QDialog):
             },
             "asset_paths": {key: row.rel_path for key, row in self._asset_rows.items()},
             "currency_symbol": self._currency_symbol(),
+            "animations": self.animations_check.isChecked(),
+            "show_splash": self.splash_check.isChecked(),
         }
 
     def _snapshot(self) -> str:
@@ -9118,23 +7886,15 @@ class SettingsDialog(QDialog):
             self._refresh_status()
 
     def _on_field_error_changed(self) -> None:
-        self._bad_pages = {
-            self.stack.indexOf(page)
-            for field in self._checked_fields
-            if field.has_error
-            for page in (self._page_of(field),)
-            if page is not None
-        }
+        self._bad_pages = {self.stack.indexOf(page) for field in self._checked_fields if field.has_error
+                           for page in (self._page_of(field),) if page is not None}
         self._apply_nav_text()
         self._refresh_status()
 
     def _refresh_status(self) -> None:
         wrong = sum(1 for field in self._checked_fields if field.has_error)
         if wrong:
-            self._set_status(
-                f"● {wrong} field{'s' if wrong != 1 else ''} to correct before you can save",
-                "danger",
-            )
+            self._set_status(f"● {wrong} field{'s' if wrong != 1 else ''} to correct before you can save", "danger")
         elif self._is_dirty():
             self._set_status("● Unsaved changes", "warning")
         else:
@@ -9152,9 +7912,7 @@ class SettingsDialog(QDialog):
         self.show_page(self.stack.indexOf(page))
         widget.setFocus()
         page.ensureWidgetVisible(widget, 40, 80)
-        QTimer.singleShot(
-            0, page, lambda: page.ensureWidgetVisible(widget, 40, 80)
-        )  # (once the page has laid itself out)
+        QTimer.singleShot(0, page, lambda: page.ensureWidgetVisible(widget, 40, 80))   # (once the page has laid itself out)
 
     def _save(self):
         wrong = [field for field in self._checked_fields if not field.validate()]
@@ -9162,29 +7920,27 @@ class SettingsDialog(QDialog):
             self._refresh_status()
             return self._show_field(wrong[0].widget)
 
-        config = self._collect_config()
+        config = {**load_config(), **self._collect_config()}      # (settings this screen does not show are kept as they are)
         config["company_details"]["gstin"] = config["company_details"]["gstin"].upper()
         try:
             save_config(config)
         except OSError as exc:
-            return Messagebox.show_error(
-                "Save Failed", f"Your settings could not be saved:\n{exc}", parent=self
-            )
+            return Messagebox.show_error("Save Failed", f"Your settings could not be saved:\n{exc}", parent=self)
         for row in self._asset_rows.values():
             row.commit()
 
         try:
-            self.callback(
-                config["theme"]
-            )  # the new theme goes to the app, which applies it and refreshes every screen
+            self.callback(config["theme"])      # the new theme goes to the app, which applies it and refreshes every screen
         finally:
-            self.accept()
+            self._cfg = load_config()
+            self._load()                        # what is shown is now exactly what was saved: nothing is "unsaved"
+            self._refresh_status()
+        notify(self.controller, "Your settings were saved.")
 
 
 # =============================================================================
 #  15. SCREENS
 # =============================================================================
-
 
 # -----------------------------------------------------------------------------
 #  Clients and Catalog
@@ -9200,6 +7956,7 @@ class _ManagerFrame(QWidget):
     ADD_TIP = ""
     SEARCH_TIP = ""
     HINT_NONE = ""
+    EMPTY_NONE = ""                         # shown over the list while there is nothing saved yet
     #: (key, header text, width px, alignment)
     COL_DEFS: List[Tuple[str, str, int, Qt.AlignmentFlag]] = []
     STRETCH_COL = 1
@@ -9242,13 +7999,8 @@ class _ManagerFrame(QWidget):
         left.addWidget(make_label(self.SUBTITLE, "muted"))
         head.addLayout(left)
         head.addStretch()
-        self.add_btn = make_button(
-            self.ADD_TEXT,
-            "primary",
-            lambda: self._open_editor(None),
-            tooltip=self.ADD_TIP,
-            min_height=38,
-        )
+        self.add_btn = make_button(self.ADD_TEXT, "primary", lambda: self._open_editor(None),
+                                   tooltip=self.ADD_TIP, min_height=38)
         head.addWidget(self.add_btn, 0, Qt.AlignmentFlag.AlignVCenter)
         outer.addLayout(head)
         outer.addSpacing(18)
@@ -9281,20 +8033,15 @@ class _ManagerFrame(QWidget):
         header.setHighlightSections(False)
         header.setSectionsClickable(False)
         for i, (_key, _text, width, align) in enumerate(self.COL_DEFS):
-            header.setSectionResizeMode(
-                i,
-                (
-                    QHeaderView.ResizeMode.Stretch
-                    if i == self.STRETCH_COL
-                    else QHeaderView.ResizeMode.Interactive
-                ),
-            )
+            header.setSectionResizeMode(i, QHeaderView.ResizeMode.Stretch if i == self.STRETCH_COL
+                                        else QHeaderView.ResizeMode.Interactive)
             self.table.setColumnWidth(i, width)
         self.table.itemSelectionChanged.connect(self._on_select)
         self.table.itemDoubleClicked.connect(lambda _item: self._edit_selected())
         self.table.delete_pressed.connect(self._delete_selected)
         self.table.enter_pressed.connect(self._edit_selected)
         self.table.customContextMenuRequested.connect(self._show_ctx_menu)
+        self.empty_state = EmptyState(self.table)
         outer.addWidget(self.table, 1)
 
         self._ctx = QMenu(self)
@@ -9336,6 +8083,10 @@ class _ManagerFrame(QWidget):
         t.blockSignals(False)
         t.setUpdatesEnabled(True)
         self._on_select()
+        searching = self.search_entry.text().strip()
+        self.empty_state.show_message("" if records else
+                                      (f"Nothing matches “{searching}”.\nCheck the spelling, or clear the search box."
+                                       if searching else self.EMPTY_NONE))
 
     def _selected_ids(self) -> List[int]:
         rows = sorted({i.row() for i in self.table.selectedIndexes()})
@@ -9383,15 +8134,17 @@ class _ManagerFrame(QWidget):
 
 class ClientsFrame(_ManagerFrame):
     TITLE = "Clients"
-    SUBTITLE = "Your address book for fast invoice billing."
+    SUBTITLE = "The people and businesses you bill. Pick one on an invoice and their details fill in by themselves."
     ADD_TEXT = "＋  Add Client  (Ctrl+N)"
-    ADD_TIP = "Add a new client (Ctrl+N)"
-    SEARCH_TIP = "Search clients (Ctrl+F)"
-    HINT_NONE = "Select a client to edit or delete"
+    ADD_TIP = "Save a new client (Ctrl+N)"
+    SEARCH_TIP = "Search your clients by name or contact details (Ctrl+F)"
+    HINT_NONE = "Click a client to change or remove them"
+    EMPTY_NONE = ("You have not saved any clients yet.\nClick “Add Client” to save your first one. Next time you "
+                  "can pick them while making an invoice.")
     COL_DEFS = [
-        ("name", "Client / Company", 260, Qt.AlignmentFlag.AlignLeft),
-        ("contact", "Contact Info", 320, Qt.AlignmentFlag.AlignLeft),
-        ("gstin", "GSTIN", 160, Qt.AlignmentFlag.AlignLeft),
+        ("name",    "Client / Company", 260, Qt.AlignmentFlag.AlignLeft),
+        ("contact", "Contact Info",     320, Qt.AlignmentFlag.AlignLeft),
+        ("gstin",   "GSTIN",            160, Qt.AlignmentFlag.AlignLeft),
     ]
 
     def _fetch(self, search):
@@ -9405,20 +8158,15 @@ class ClientsFrame(_ManagerFrame):
         return self.db_manager.get_client_by_id(rec_id)
 
     def _open_editor(self, client: Optional[Dict]):
-        run_dialog(
-            ClientDialog(self.controller, self.db_manager, client, self._populate)
-        )
+        run_dialog(ClientDialog(self.controller, self.db_manager, client, self._populate))
 
     def _delete_ids(self, ids):
         self.db_manager.delete_clients(ids)
 
     def _delete_prompt(self, n):
-        msg = (
-            f"Delete {n} client(s) from your address book?"
-            if n > 1
-            else "Delete this client from your address book?"
-        )
-        return "Delete Client(s)", msg
+        msg = (f"Delete these {n} clients?" if n > 1 else "Delete this client?") + \
+            "\nInvoices you have already made are not affected."
+        return ("Delete Clients" if n > 1 else "Delete Client"), msg
 
     def new_client(self):
         """Ctrl+N on this page: open the Add Client dialog, exactly like the "＋ Add Client" button."""
@@ -9426,19 +8174,21 @@ class ClientsFrame(_ManagerFrame):
 
 
 class CatalogFrame(_ManagerFrame):
-    TITLE = "Catalog"
-    SUBTITLE = "Reusable products & services for faster invoice lines."
+    TITLE = "Items"
+    SUBTITLE = "The things you sell, with their usual prices. Pick one on an invoice and its price fills in by itself."
     ADD_TEXT = "＋  Add Item  (Ctrl+N)"
-    ADD_TIP = "Add a new catalog item (Ctrl+N)"
-    SEARCH_TIP = "Search catalog items (Ctrl+F)"
-    HINT_NONE = "Select an item to edit or delete"
+    ADD_TIP = "Save a new item (Ctrl+N)"
+    SEARCH_TIP = "Search your items by name or description (Ctrl+F)"
+    HINT_NONE = "Click an item to change or remove it"
+    EMPTY_NONE = ("You have not saved any items yet.\nClick “Add Item” to save the things you sell, so they are "
+                  "quick to add to an invoice.")
     COL_DEFS = [
-        ("title", "Item / Service", 230, Qt.AlignmentFlag.AlignLeft),
-        ("desc", "Description", 280, Qt.AlignmentFlag.AlignLeft),
-        ("amount", "Default Rate", 130, Qt.AlignmentFlag.AlignRight),
-        ("unit", "Unit", 120, Qt.AlignmentFlag.AlignLeft),
-        ("hsn", "HSN/SAC", 90, Qt.AlignmentFlag.AlignLeft),
-        ("gst", "GST", 64, Qt.AlignmentFlag.AlignRight),
+        ("title",  "Item / Service", 230, Qt.AlignmentFlag.AlignLeft),
+        ("desc",   "Description",    280, Qt.AlignmentFlag.AlignLeft),
+        ("amount", "Usual Rate",     130, Qt.AlignmentFlag.AlignRight),
+        ("unit",   "Unit",           120, Qt.AlignmentFlag.AlignLeft),
+        ("hsn",    "HSN/SAC",         90, Qt.AlignmentFlag.AlignLeft),
+        ("gst",    "GST",             64, Qt.AlignmentFlag.AlignRight),
     ]
 
     def _fetch(self, search):
@@ -9446,38 +8196,27 @@ class CatalogFrame(_ManagerFrame):
 
     def _cells(self, it):
         names = [u for u, _rate in catalog_units(it)]
-        unit_text = (
-            ", ".join(names)
-            if len(names) <= 2
-            else f"{names[0]}, {names[1]} +{len(names) - 2}"
-        )
+        unit_text = ", ".join(names) if len(names) <= 2 else f"{names[0]}, {names[1]} +{len(names) - 2}"
         gst = "" if it.get("tax_rate") is None else f"{safe_float(it['tax_rate']):g}%"
-        return [
-            it["title"],
-            (it.get("description") or "").replace("\n", "  ·  "),
-            fmt_money(it.get("amount")),
-            unit_text,
-            str(it.get("hsn") or ""),
-            gst,
-        ]
+        return [it["title"], (it.get("description") or "").replace("\n", "  ·  "), fmt_money(it.get("amount")),
+                unit_text, str(it.get("hsn") or ""), gst]
 
     def _get_by_id(self, rec_id):
         return self.db_manager.get_catalog_item_by_id(rec_id)
 
     def _open_editor(self, item: Optional[Dict]):
-        run_dialog(
-            CatalogItemDialog(self.controller, self.db_manager, item, self._populate)
-        )
+        run_dialog(CatalogItemDialog(self.controller, self.db_manager, item, self._populate))
 
     def _delete_ids(self, ids):
         self.db_manager.delete_catalog_items(ids)
 
     def _delete_prompt(self, n):
-        msg = f"Delete {n} catalog item(s)?" if n > 1 else "Delete this catalog item?"
-        return "Delete Item(s)", msg
+        msg = (f"Delete these {n} items?" if n > 1 else "Delete this item?") + \
+            "\nInvoices you have already made are not affected."
+        return ("Delete Items" if n > 1 else "Delete Item"), msg
 
     def new_catalog_item(self):
-        """Ctrl+N on this page: open the Add Catalog Item dialog, exactly like the "＋ Add Item" button."""
+        """Ctrl+N on this page: open the Add Item dialog, exactly like the "＋ Add Item" button."""
         self._open_editor(None)
 
 
@@ -9485,44 +8224,53 @@ class CatalogFrame(_ManagerFrame):
 #  Dashboard (invoice list)
 # -----------------------------------------------------------------------------
 class DashboardFrame(QWidget):
-    STATUS_FILTERS = ["All", "Paid", "Due", "Partial", "Overpaid", "Complimentary"]
-    SORT_ASC = " ▲"
+    STATUS_FILTERS = ["All", "Due", "Overdue", "Partial", "Paid", "Overpaid", "Complimentary"]
+    #: what each filter button shows when the mouse rests on it
+    FILTER_TIPS = {
+        "All": "Show every invoice",
+        "Due": "Invoices where nothing has been paid yet",
+        "Overdue": "Invoices that are still unpaid after their due date",
+        "Partial": "Invoices where only part of the money has been received",
+        "Paid": "Invoices that are fully paid",
+        "Overpaid": "Invoices where more than the total was paid",
+        "Complimentary": "Invoices given free of charge",
+    }
+    SORT_ASC  = " ▲"
     SORT_DESC = " ▼"
-    _L, _C, _R = (
-        Qt.AlignmentFlag.AlignLeft,
-        Qt.AlignmentFlag.AlignHCenter,
-        Qt.AlignmentFlag.AlignRight,
-    )
+    _L, _C, _R = Qt.AlignmentFlag.AlignLeft, Qt.AlignmentFlag.AlignHCenter, Qt.AlignmentFlag.AlignRight
     #: (column id, header text, width px, alignment) -- the ids are DatabaseManager._SORT_COLUMN_SQL keys
-    COL_DEFS = [
-        ("id", "Invoice #", 112, _C),
-        ("client", "Client / Company", 250, _L),
-        ("date", "Date", 100, _C),
-        ("status", "Status", 140, _C),
-        ("total", "Total", 100, _R),
-        ("paid", "Paid", 94, _R),
-        ("balance", "Balance", 94, _R),
-        ("note", "🗒", 38, _C),
+    COL_DEFS  = [
+        ("id",      "Invoice #",        104, _C),
+        ("client",  "Client / Company", 250, _L),
+        ("date",    "Date",              96, _C),
+        ("status",  "Status",           132, _C),
+        ("total",   "Total",             96, _R),
+        ("paid",    "Paid",              90, _R),
+        ("balance", "Balance",           90, _R),
+        ("due",     "Due On",            96, _C),
+        ("note",    "🗒",                 34, _C),
     ]
     STRETCH_COL = 1
+    #: In a narrow window these columns are hidden -- in this order -- so the client's name keeps room to be read; each one
+    #: comes back as soon as the window is wide enough for it again.
+    DROP_ORDER = ("paid", "due", "date")
+    MIN_CLIENT_WIDTH = 150
     PAGE_SIZE_OPTIONS = [25, 50, 100]
     DEFAULT_PAGE_SIZE = 50
 
     def __init__(self, parent, controller):
         super().__init__(parent)
-        self.controller = controller
-        self.db_manager = controller.db_manager
+        self.controller     = controller
+        self.db_manager     = controller.db_manager
         self._status_filter = "All"
-        self._sort_col = "date"
-        self._sort_rev = True
+        self._sort_col      = "date"
+        self._sort_rev      = True
         self._filter_btns: Dict[str, QPushButton] = {}
         self._row_index: Dict[str, Dict] = {}
-        self._page = 1
-        self._page_size = self.DEFAULT_PAGE_SIZE
-        self._total_pages = 1
-        self._bulk_op_running = (
-            False  # guards against overlapping bulk operations -- see _start_bulk_op()
-        )
+        self._page          = 1
+        self._page_size     = self.DEFAULT_PAGE_SIZE
+        self._total_pages   = 1
+        self._bulk_op_running = False  # guards against overlapping bulk operations -- see _start_bulk_op()
         self._scroll_top_pending = False  # set when the result set changes (search/filter/sort/page): next populate starts at the top
         self._build()
         self._debounce_search = Debouncer(self, 200, self._populate)
@@ -9545,28 +8293,17 @@ class DashboardFrame(QWidget):
         row = QHBoxLayout()
         left = QVBoxLayout()
         left.setSpacing(2)
-        left.addWidget(make_label("Dashboard", "h1"))
-        left.addWidget(make_label("Every invoice, at a glance.", "muted"))
-        row.addLayout(left)
-        row.addStretch()
+        left.addWidget(make_label("Invoices", "h1"))
+        left.addWidget(make_elided_label("All your invoices in one place. Double-click an invoice to open it.", "muted"))
+        row.addLayout(left, 1)
 
-        refresh_btn = make_button(
-            "🔄  Refresh  (Ctrl+R)",
-            "secondary-outline",
-            self._act_refresh,
-            tooltip="Reload the invoice list and stats (Ctrl+R)",
-            min_height=38,
-        )
-        self.export_csv_btn = make_button(
-            "📊  Export CSV", "info-outline", self._export_csv, min_height=38
-        )
-        new_inv_btn = make_button(
-            "＋  New Invoice  (Ctrl+N)",
-            "primary",
-            lambda: self.controller.show_frame(InvoiceFormFrame),
-            tooltip="Start a new invoice (Ctrl+N)",
-            min_height=38,
-        )
+        refresh_btn = make_button("🔄  Refresh", "secondary-outline", self._act_refresh,
+                                  tooltip="Show the latest invoices and totals (Ctrl+R)", min_height=38)
+        self.export_csv_btn = make_button("📊  Save as Spreadsheet", "info-outline", self._export_csv,
+                                          tooltip="Save all your invoices in a spreadsheet file that opens in Excel", min_height=38)
+        new_inv_btn = make_button("＋  New Invoice", "primary",
+                                  lambda: self.controller.show_frame(InvoiceFormFrame),
+                                  tooltip="Start a new invoice (Ctrl+N)", min_height=38)
         row.addWidget(refresh_btn)
         row.addSpacing(8)
         row.addWidget(self.export_csv_btn)
@@ -9578,17 +8315,23 @@ class DashboardFrame(QWidget):
     def _stat_cards(self, outer: QVBoxLayout):
         row = QHBoxLayout()
         row.setSpacing(12)
-        self.s_billed = self._card(row, "💰  Total Billed", fmt_money(0), "primary")
-        self.s_received = self._card(row, "✅  Total Received", fmt_money(0), "success")
-        self.s_due = self._card(row, "⚠️  Balance Due", fmt_money(0), "danger")
-        self.s_count = self._card(row, "📄  Total Invoices", "0", "secondary")
+        self.s_billed   = self._card(row, "💰  Total Billed",    fmt_money(0), "primary",
+                                     "Everything you have invoiced", "The total of all your invoices (free invoices are not counted)")
+        self.s_received = self._card(row, "✅  Received So Far", fmt_money(0), "success",
+                                     "Payments you have collected", "All the money you have received so far")
+        self.s_due      = self._card(row, "⚠️  Still To Collect", fmt_money(0), "danger",
+                                     "Nothing is overdue", "Money your customers still owe you")
+        self.s_count    = self._card(row, "📄  Invoices",        "0",          "secondary",
+                                     "None yet", "How many invoices you have made")
         outer.addLayout(row)
         outer.addSpacing(18)
 
     @staticmethod
-    def _card(row: QHBoxLayout, title: str, value: str, tone: str) -> QLabel:
+    def _card(row: QHBoxLayout, title: str, value: str, tone: str, note: str = "", tip: str = "") -> QLabel:
         card = QFrame()
         set_role(card, "stat-solid", tone)
+        if tip:
+            card.setToolTip(tip)
         lay = QVBoxLayout(card)
         lay.setContentsMargins(18, 14, 18, 14)
         lay.setSpacing(4)
@@ -9599,7 +8342,10 @@ class DashboardFrame(QWidget):
         lbl.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         lbl.setMinimumWidth(0)
         lay.addWidget(lbl)
-        row.addWidget(card, 1)  # equal stretch: the four cards share the row evenly
+        note_lbl = make_elided_label(note, "stat-solid-note", tone)     # one short line of explanation under the figure
+        lay.addWidget(note_lbl)
+        lbl.note_label = note_lbl            # reachable from the figure it belongs to
+        row.addWidget(card, 1)               # equal stretch: the four cards share the row evenly
         return lbl
 
     def resizeEvent(self, event):
@@ -9616,19 +8362,12 @@ class DashboardFrame(QWidget):
 
     def _filter_bar(self, outer: QVBoxLayout):
         row = QHBoxLayout()
-        row.addWidget(make_label("Filter:", "small"))
+        row.addWidget(make_label("Show:", "small"))
         row.addSpacing(6)
         for status in self.STATUS_FILTERS:
-            label = (
-                "All"
-                if status == "All"
-                else STATUS_DISPLAY_LABELS.get(status, status).title()
-            )
-            btn = make_button(
-                label,
-                "primary" if status == "All" else "secondary-outline",
-                lambda _=False, s=status: self._set_filter(s),
-            )
+            label = "All" if status == "All" else STATUS_DISPLAY_LABELS.get(status, status).title()
+            btn = make_button(label, "primary" if status == "All" else "secondary-outline",
+                              lambda _=False, s=status: self._set_filter(s), tooltip=self.FILTER_TIPS.get(status, ""))
             self._filter_btns[status] = btn
             row.addWidget(btn)
             row.addSpacing(2)
@@ -9636,12 +8375,10 @@ class DashboardFrame(QWidget):
 
         row.addWidget(QLabel("🔍"))
         self.search_entry = QLineEdit()
-        # Flexible: 130-260 px, so the bar still fits when the window is at its minimum width.
-        self.search_entry.setMinimumWidth(130)
+        # Flexible: 96-260 px, so the bar still fits when the window is at its minimum width.
+        self.search_entry.setMinimumWidth(96)
         self.search_entry.setMaximumWidth(260)
-        self.search_entry.setToolTip(
-            "Search by invoice number, client name, or note (Ctrl+F)"
-        )
+        self.search_entry.setToolTip("Find an invoice by its number, the client's name or a note (Ctrl+F)")
         self.search_entry.setPlaceholderText("Search…")
         # Ctrl+A means "Select All invoices" on this screen (see select_all() below), but inside the
         # search box a focused QLineEdit claims Ctrl+A for itself (select all *text*), which is exactly
@@ -9649,12 +8386,7 @@ class DashboardFrame(QWidget):
         self.search_entry.textChanged.connect(lambda _text: self._on_search_changed())
         row.addWidget(self.search_entry, 1)
         row.addSpacing(4)
-        clear_btn = make_button(
-            "✕",
-            "secondary-outline",
-            lambda: self.search_entry.clear(),
-            tooltip="Clear search",
-        )
+        clear_btn = make_button("✕", "secondary-outline", lambda: self.search_entry.clear(), tooltip="Clear the search")
         clear_btn.setFixedWidth(36)
         set_flag(clear_btn, "glyph", True)
         row.addWidget(clear_btn)
@@ -9689,24 +8421,16 @@ class DashboardFrame(QWidget):
         t.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         header = t.horizontalHeader()
         header.setHighlightSections(False)
-        header.setSectionsClickable(True)  # click a header to sort by it
+        header.setSectionsClickable(True)          # click a header to sort by it
         header.setMinimumSectionSize(40)
         header.setCursor(Qt.CursorShape.PointingHandCursor)
         for i, (_cid, _text, width, align) in enumerate(self.COL_DEFS):
-            header.setSectionResizeMode(
-                i,
-                (
-                    QHeaderView.ResizeMode.Stretch
-                    if i == self.STRETCH_COL
-                    else QHeaderView.ResizeMode.Interactive
-                ),
-            )
+            header.setSectionResizeMode(i, QHeaderView.ResizeMode.Stretch if i == self.STRETCH_COL
+                                        else QHeaderView.ResizeMode.Interactive)
             t.setColumnWidth(i, width)
-            t.horizontalHeaderItem(i).setTextAlignment(
-                align | Qt.AlignmentFlag.AlignVCenter
-            )
+            t.horizontalHeaderItem(i).setTextAlignment(align | Qt.AlignmentFlag.AlignVCenter)
         header.sectionClicked.connect(lambda idx: self._sort_by(self.COL_DEFS[idx][0]))
-        self._refresh_header_arrows()  # shows the initial "Date ▼" (the Tk build sorted this way without saying so)
+        self._refresh_header_arrows()              # shows the initial "Date ▼" (the Tk build sorted this way without saying so)
         self._fit_columns()
 
         t.itemSelectionChanged.connect(self._on_select)
@@ -9714,50 +8438,65 @@ class DashboardFrame(QWidget):
         t.customContextMenuRequested.connect(self._show_ctx_menu)
         t.delete_pressed.connect(self._act_delete)
         outer.addWidget(t, 1)
+        t.viewport().installEventFilter(self)        # a window that is resized shows more or fewer columns
+        self.empty_state = EmptyState(t)             # a friendly message laid over the list while it has no rows
 
         # Context menus
         self._ctx_single = QMenu(self)
-        self._ctx_single.addAction("📄  View PDF", self._act_view_pdf)
-        self._ctx_single.addAction("✏️  Edit", self._act_edit)
-        self._ctx_single.addAction("📋  Duplicate", self._act_duplicate)
-        self._ctx_single.addAction("🗒  Edit Note", self._act_edit_note)
+        self._ctx_single.addAction("📄  View Invoice",    self._act_view_pdf)
+        self._ctx_single.addAction("✏️  Edit",            self._act_edit)
+        self._ctx_single.addAction("💵  Record Payment",  self._act_record_payment)
+        self._ctx_single.addAction("📋  Make a Copy",     self._act_duplicate)
+        self._ctx_single.addAction("🗒  Add or Edit Note", self._act_edit_note)
         self._ctx_single.addSeparator()
-        self._ctx_single.addAction("🗑️  Delete", self._act_delete)
+        self._ctx_single.addAction("🗑️  Delete",          self._act_delete)
 
         self._ctx_bulk = QMenu(self)
-        self._ctx_bulk.addAction("🖨️  Bulk Print", self._act_bulk_print)
-        self._ctx_bulk.addAction("📊  Bulk Export", self._act_bulk_export)
+        self._ctx_bulk.addAction("🖨️  Print Selected",   self._act_bulk_print)
+        self._ctx_bulk.addAction("📊  Export Selected",  self._act_bulk_export)
         self._ctx_bulk.addSeparator()
-        self._ctx_bulk.addAction("🗑️  Bulk Delete", self._act_delete)
+        self._ctx_bulk.addAction("🗑️  Delete Selected",  self._act_delete)
 
     def _fit_columns(self):
         """Widen (never narrow) the fixed-width columns to what they have to show. The designed widths suit Segoe UI;
         in another font, with a longer currency symbol or with a bigger amount, a cell would end in "…" -- and a
-        cut-off amount reads as a different amount. The client column stretches, so it gives up the room.
-        """
-        dates = [
-            datetime.date(2026, month, 28).strftime(DISPLAY_DATE_FORMAT)
-            for month in range(1, 13)
-        ]
+        cut-off amount reads as a different amount. The client column stretches, so it gives up the room."""
+        dates = [datetime.date(2026, month, 28).strftime(DISPLAY_DATE_FORMAT) for month in range(1, 13)]
         money = fmt_money(999999.99)
-        self.table.fit_columns(
-            {
-                0: [],
-                2: dates,
-                3: list(STATUS_DISPLAY_LABELS.values()),
-                4: [money],
-                5: [money],
-                6: [money],
-            }
-        )
+        self.table.fit_columns({0: [], 2: dates, 3: list(STATUS_DISPLAY_LABELS.values()),
+                                4: [money], 5: [money], 6: [money], 7: dates})
+        self._fit_visible_columns()
+
+    def _fit_visible_columns(self) -> None:
+        """Keeps the client's name readable in a narrow window: the Paid, then the Due On, then the Date column are hidden
+        while there is not room for them, and shown again as soon as there is."""
+        t = self.table
+        room = t.maximumViewportSize().width() - t.verticalScrollBar().sizeHint().width()
+        if room <= 0:
+            return                                              # not laid out yet
+        ids = [c[0] for c in self.COL_DEFS]
+        natural = [max(self.COL_DEFS[i][2], t._width_floors.get(i, 0)) for i in range(len(ids))]
+        hidden: Set[int] = set()
+
+        def needed() -> int:
+            return self.MIN_CLIENT_WIDTH + sum(w for i, w in enumerate(natural) if i != self.STRETCH_COL and i not in hidden)
+
+        for cid in self.DROP_ORDER:
+            if needed() <= room:
+                break
+            hidden.add(ids.index(cid))
+        for i in range(len(ids)):
+            if t.isColumnHidden(i) != (i in hidden):
+                t.setColumnHidden(i, i in hidden)
+
+    def eventFilter(self, obj, event):
+        if obj is self.table.viewport() and event.type() == QEvent.Type.Resize:
+            self._fit_visible_columns()
+        return super().eventFilter(obj, event)
 
     def _refresh_header_arrows(self):
         for i, (cid, text, _w, _a) in enumerate(self.COL_DEFS):
-            arrow = (
-                (self.SORT_DESC if self._sort_rev else self.SORT_ASC)
-                if cid == self._sort_col
-                else ""
-            )
+            arrow = (self.SORT_DESC if self._sort_rev else self.SORT_ASC) if cid == self._sort_col else ""
             self.table.horizontalHeaderItem(i).setText(f"{text}{arrow}")
 
     def _sort_by(self, col: str):
@@ -9779,25 +8518,19 @@ class DashboardFrame(QWidget):
         row.addWidget(self.page_info_lbl)
         row.addStretch()
 
-        row.addWidget(make_label("Rows per page:", "small"))
+        row.addWidget(make_label("Invoices per page:", "small"))
         row.addSpacing(6)
         self.page_size_combo = QComboBox()
         self.page_size_combo.addItems([str(n) for n in self.PAGE_SIZE_OPTIONS])
         self.page_size_combo.setCurrentText(str(self._page_size))
         guard_wheel(self.page_size_combo)
         self.page_size_combo.setFixedWidth(76)
-        self.page_size_combo.currentIndexChanged.connect(
-            lambda _i: self._on_page_size_change()
-        )
+        self.page_size_combo.currentIndexChanged.connect(lambda _i: self._on_page_size_change())
         row.addWidget(self.page_size_combo)
         row.addSpacing(16)
 
-        self.prev_page_btn = make_button(
-            "◀  Prev", "secondary-outline", self._prev_page
-        )
-        self.next_page_btn = make_button(
-            "Next  ▶", "secondary-outline", self._next_page
-        )
+        self.prev_page_btn = make_button("◀  Previous", "secondary-outline", self._prev_page)
+        self.next_page_btn = make_button("Next  ▶", "secondary-outline", self._next_page)
         for b in (self.prev_page_btn, self.next_page_btn):
             b.setMinimumWidth(92)
         row.addWidget(self.prev_page_btn)
@@ -9820,7 +8553,7 @@ class DashboardFrame(QWidget):
     def _on_page_size_change(self):
         try:
             new_size = int(self.page_size_combo.currentText())
-        except TypeError, ValueError:
+        except (TypeError, ValueError):
             new_size = self.DEFAULT_PAGE_SIZE
         if new_size != self._page_size:
             self._page_size = new_size
@@ -9831,67 +8564,32 @@ class DashboardFrame(QWidget):
     def _action_bar(self, outer: QVBoxLayout):
         outer.addSpacing(10)
         row = QHBoxLayout()
-        self.hint_lbl = make_label(
-            "Select an invoice to take action", "small", wrap=True
-        )
-        self.hint_lbl.setSizePolicy(
-            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
-        )
-        self.hint_lbl.setMinimumWidth(
-            120
-        )  # wraps onto a second line in a narrow window instead of clipping
-        row.addWidget(self.hint_lbl, 1)
+        self.hint_lbl = make_elided_label("Click an invoice to see what you can do with it", "small")
+        row.addWidget(self.hint_lbl, 1)               # ends in "…" in a narrow window instead of making the row wider
 
         # -- Single-selection actions (left to right, as the Tk build packed them) --
-        self.del_btn = make_button(
-            "🗑  Delete",
-            "danger-outline",
-            self._act_delete,
-            tooltip="Delete the selected invoice (Delete key)",
-        )
-        self.note_btn = make_button("🗒  Note", "secondary-outline", self._act_edit_note)
-        self.dup_btn = make_button(
-            "📋  Duplicate",
-            "secondary-outline",
-            self._act_duplicate,
-            tooltip="Duplicate this invoice (Ctrl+D)",
-        )
-        self.edit_btn = make_button("✏  Edit", "secondary", self._act_edit)
-        self.pdf_btn = make_button(
-            "📄  View PDF",
-            "primary",
-            self._act_view_pdf,
-            tooltip="Open this invoice's PDF, ready to print or export (Ctrl+P / Ctrl+E)",
-        )
-        self._single_buttons = [
-            self.del_btn,
-            self.note_btn,
-            self.dup_btn,
-            self.edit_btn,
-            self.pdf_btn,
-        ]
+        self.del_btn  = make_button("🗑  Delete",    "danger-outline",    self._act_delete,
+                                    tooltip="Delete the selected invoice for good (Delete key)")
+        self.note_btn = make_button("🗒  Note",      "secondary-outline", self._act_edit_note,
+                                    tooltip="Add a private note to this invoice. It is never printed.")
+        self.dup_btn  = make_button("📋  Make a Copy", "secondary-outline", self._act_duplicate,
+                                    tooltip="Make a copy of this invoice as a new, unpaid invoice (Ctrl+D)")
+        self.edit_btn = make_button("✏  Edit",      "secondary",         self._act_edit,
+                                    tooltip="Open this invoice to change it")
+        self.pay_btn  = make_button("💵  Record Payment", "success-outline", self._act_record_payment,
+                                    tooltip="Write down a payment you received for this invoice")
+        self.pdf_btn  = make_button("📄  View Invoice", "primary",           self._act_view_pdf,
+                                    tooltip="Open the invoice, ready to print, save or share (Ctrl+P / Ctrl+E)")
+        self._single_buttons = [self.del_btn, self.note_btn, self.dup_btn, self.edit_btn, self.pay_btn, self.pdf_btn]
 
         # -- Bulk-selection actions --
-        self.bulk_del_btn = make_button(
-            "🗑  Bulk Delete",
-            "danger-outline",
-            self._act_bulk_delete,
-            tooltip="Delete the selected invoices (Delete key)",
-        )
-        self.bulk_export_btn = make_button(
-            "📊  Bulk Export", "secondary-outline", self._act_bulk_export
-        )
-        self.bulk_print_btn = make_button(
-            "🖨  Bulk Print",
-            "primary",
-            self._act_bulk_print,
-            tooltip="Merge & open the selected invoices' PDFs, ready to print or export (Ctrl+P / Ctrl+E)",
-        )
-        self._bulk_group = [
-            self.bulk_del_btn,
-            self.bulk_export_btn,
-            self.bulk_print_btn,
-        ]
+        self.bulk_del_btn    = make_button("🗑  Delete Selected", "danger-outline",    self._act_bulk_delete,
+                                           tooltip="Delete the selected invoices for good (Delete key)")
+        self.bulk_export_btn = make_button("📊  Export Selected", "secondary-outline", self._act_bulk_export,
+                                           tooltip="Save the selected invoices in a spreadsheet file")
+        self.bulk_print_btn  = make_button("🖨  Print Selected",  "primary",           self._act_bulk_print,
+                                           tooltip="Put the selected invoices together, ready to print or save (Ctrl+P / Ctrl+E)")
+        self._bulk_group = [self.bulk_del_btn, self.bulk_export_btn, self.bulk_print_btn]
 
         # Every button that can kick off a bulk-scale operation -- disabled together while one is
         # running (see _start_bulk_op()/_end_bulk_op()), so the user can never have two running at once
@@ -9926,16 +8624,21 @@ class DashboardFrame(QWidget):
         self._update_stats()
 
     def _on_select(self):
-        n = len(self._selected_ids())
+        ids = self._selected_ids()
+        n = len(ids)
         if n >= 2:
             self._show_bulk_actions()
             self.hint_lbl.setText(f"{n} invoices selected")
         else:
             self._show_single_actions(enabled=(n == 1))
+            if n == 1:                      # a free invoice has nothing to pay
+                free = bool((self._row_index.get(ids[0]) or {}).get("is_complimentary"))
+                self.pay_btn.setEnabled(not free)
+                self.pay_btn.setToolTip("This invoice is free of charge, so there is nothing to pay." if free
+                                        else "Write down a payment you received for this invoice")
             self.hint_lbl.setText(
-                "Double-click to edit  •  Right-click for options  •  Ctrl/Shift-click to multi-select"
-                if n
-                else "Select an invoice to take action"
+                "Double-click to open  •  Right-click for more options  •  Hold Ctrl or Shift to pick several" if n
+                else "Click an invoice to see what you can do with it"
             )
 
     def _selected_ids(self) -> List[str]:
@@ -9960,12 +8663,9 @@ class DashboardFrame(QWidget):
         # fast and light on memory at 100,000+ invoices.
         search_query = self.search_entry.text().strip()
         rows, total = self.db_manager.get_invoices_page(
-            search_query=search_query,
-            status_filter=self._status_filter,
-            sort_col=self._sort_col,
-            sort_desc=self._sort_rev,
-            page=self._page,
-            page_size=self._page_size,
+            search_query=search_query, status_filter=self._status_filter,
+            sort_col=self._sort_col, sort_desc=self._sort_rev,
+            page=self._page, page_size=self._page_size,
         )
         self._total_pages = max(1, -(-total // self._page_size))  # ceiling division
         if self._page > self._total_pages:
@@ -9973,17 +8673,17 @@ class DashboardFrame(QWidget):
             # just got deleted) -- clamp back into range and re-fetch instead of showing a blank page.
             self._page = self._total_pages
             rows, total = self.db_manager.get_invoices_page(
-                search_query=search_query,
-                status_filter=self._status_filter,
-                sort_col=self._sort_col,
-                sort_desc=self._sort_rev,
-                page=self._page,
-                page_size=self._page_size,
+                search_query=search_query, status_filter=self._status_filter,
+                sort_col=self._sort_col, sort_desc=self._sort_rev,
+                page=self._page, page_size=self._page_size,
             )
 
         start = (self._page - 1) * self._page_size
         self._row_index.clear()
         ncols = len(self.COL_DEFS)
+        due_col = ncols - 2                        # the "Due On" column sits just before the note column
+        today = datetime.date.today()
+        late_brush = QBrush(QColor(STATUS_BADGE["DUE"]["foreground"]))
         t.setUpdatesEnabled(False)
         t.blockSignals(True)
         try:
@@ -9991,56 +8691,38 @@ class DashboardFrame(QWidget):
             t.setRowCount(len(rows))
             for r, inv in enumerate(rows):
                 row = dict(inv)
-                is_comp = bool(row.get("is_complimentary"))
+                is_comp    = bool(row.get("is_complimentary"))
                 status_val = (row["status"] or "Due").upper()
                 # Display wording only -- status_val (used below for the row's colour) is untouched.
-                status_display = STATUS_DISPLAY_LABELS.get(
-                    row["status"] or "Due", status_val
-                )
-                date_val = parse_date(
-                    row["invoice_date"], DB_DATE_FORMAT, DISPLAY_DATE_FORMAT
-                )
-                total_txt = (
-                    "No Charge" if is_comp else fmt_money(row.get("grand_total"))
-                )
-                paid_txt = "-" if is_comp else fmt_money(row.get("total_paid"))
-                bal_txt = "-" if is_comp else fmt_money(row.get("balance_due"))
-                note_text = (row.get("notes") or "").strip()
-                note_icon = "📝" if note_text else ""
+                status_display = STATUS_DISPLAY_LABELS.get(row["status"] or "Due", status_val)
+                date_val   = parse_date(row["invoice_date"], DB_DATE_FORMAT, DISPLAY_DATE_FORMAT)
+                total_txt  = "No Charge" if is_comp else fmt_money(row.get("grand_total"))
+                paid_txt   = "-"         if is_comp else fmt_money(row.get("total_paid"))
+                bal_txt    = "-"         if is_comp else fmt_money(row.get("balance_due"))
+                note_text  = (row.get("notes") or "").strip()
+                note_icon  = "📝" if note_text else ""
+                due_txt, due_tip, is_late = self._due_cell(row, is_comp, today)
 
-                values = (
-                    row["invoice_number"],
-                    row["bill_to"],
-                    date_val,
-                    status_display,
-                    total_txt,
-                    paid_txt,
-                    bal_txt,
-                    note_icon,
-                )
+                values = (row["invoice_number"], row["bill_to"], date_val, status_display,
+                          total_txt, paid_txt, bal_txt, due_txt, note_icon)
                 badge = STATUS_BADGE.get(status_val)
-                brush = (
-                    QBrush(QColor(badge["foreground"]))
-                    if badge and badge.get("foreground")
-                    else None
-                )
+                brush = QBrush(QColor(badge["foreground"])) if badge and badge.get("foreground") else None
                 for c, text in enumerate(values):
                     it = QTableWidgetItem(text)
-                    it.setTextAlignment(
-                        self.COL_DEFS[c][3] | Qt.AlignmentFlag.AlignVCenter
-                    )
+                    it.setTextAlignment(self.COL_DEFS[c][3] | Qt.AlignmentFlag.AlignVCenter)
                     if brush is not None:
                         it.setForeground(brush)
                     if c == ncols - 1 and note_text:
-                        it.setToolTip(
-                            note_text
-                            if len(note_text) <= 400
-                            else note_text[:400] + "…"
-                        )
+                        it.setToolTip(note_text if len(note_text) <= 400 else note_text[:400] + "…")
                     elif c <= 1:
-                        it.setToolTip(
-                            text
-                        )  # full invoice number / client name when the column is too narrow for it
+                        it.setToolTip(text)        # full invoice number / client name when the column is too narrow for it
+                    elif c == due_col:
+                        it.setToolTip(due_tip)
+                        if is_late:                # an overdue date stands out: bold, in the "unpaid" red
+                            it.setForeground(late_brush)
+                            late_font = it.font()
+                            late_font.setBold(True)
+                            it.setFont(late_font)
                     t.setItem(r, c, it)
                 self._row_index[row["invoice_number"]] = row
 
@@ -10048,10 +8730,8 @@ class DashboardFrame(QWidget):
             if keep_selected:
                 for r in range(t.rowCount()):
                     if t.item(r, 0).text() in keep_selected:
-                        t.setRangeSelected(
-                            QTableWidgetSelectionRange(r, 0, r, ncols - 1), True
-                        )
-            self._fit_columns()  # room for the longest date / status / amount now on this page
+                        t.setRangeSelected(QTableWidgetSelectionRange(r, 0, r, ncols - 1), True)
+            self._fit_columns()                    # room for the longest date / status / amount now on this page
         finally:
             t.blockSignals(False)
             t.setUpdatesEnabled(True)
@@ -10059,13 +8739,41 @@ class DashboardFrame(QWidget):
 
         self._update_pagination_controls(total, start, len(rows))
         self._on_select()  # Re-evaluate button states
+        if rows:
+            self.empty_state.show_message("")
+        elif search_query or self._status_filter != "All":
+            self.empty_state.show_message("No invoices match what you are looking for.\nTry a different search, or choose “All”.")
+        else:
+            self.empty_state.show_message("You have not made any invoices yet.\nClick “New Invoice” to make your first one.")
+
+    @staticmethod
+    def _due_cell(row: Dict[str, Any], free: bool, today: datetime.date) -> Tuple[str, str, bool]:
+        """What the "Due On" column shows for one invoice: (text, tooltip, is it overdue)."""
+        raw = str(row.get("due_date") or "").strip()
+        if free:
+            return "-", "This invoice is free of charge, so nothing is due.", False
+        if not raw:
+            return "-", "No due date was set for this invoice.", False
+        try:
+            due = datetime.datetime.strptime(raw, DB_DATE_FORMAT).date()
+        except (TypeError, ValueError):
+            return "-", "", False
+        text = due.strftime(DISPLAY_DATE_FORMAT)
+        if safe_float(row.get("balance_due")) <= 0:
+            return text, "Nothing is left to pay on this invoice.", False
+        days = (due - today).days
+        if days < 0:
+            return text, f"Overdue by {-days} day{'s' if days != -1 else ''}", True
+        if days == 0:
+            return text, "Due today", False
+        return text, f"Due in {days} day{'s' if days != 1 else ''}", False
 
     def _update_pagination_controls(self, total: int, start: int, shown: int):
         if total == 0:
             self.page_info_lbl.setText("No invoices found")
         else:
             self.page_info_lbl.setText(
-                f"Showing {start + 1}–{start + shown} of {total}  •  "
+                f"Showing {start + 1}–{start + shown} of {total} invoices  •  "
                 f"Page {self._page} of {self._total_pages}"
             )
         self.prev_page_btn.setEnabled(self._page > 1)
@@ -10077,18 +8785,19 @@ class DashboardFrame(QWidget):
         self.s_received.setText(fmt_money(s["total_paid"]))
         self.s_due.setText(fmt_money(s["balance_due"]))
         self.s_count.setText(str(s["total"]))
+        late = self.db_manager.get_overdue_summary()
+        self.s_due.note_label.setText(f"{fmt_money(late['amount'])} is overdue" if late["count"] else "Nothing is overdue")
+        unpaid = int(s.get("due", 0)) + int(s.get("partial", 0))
+        self.s_count.note_label.setText(f"{int(s.get('paid', 0))} paid  ·  {unpaid} unpaid" if s["total"] else "None yet")
+        self._filter_btns["Overdue"].setText(f"Overdue ({late['count']})" if late["count"] else "Overdue")
 
     # ------------------------------------------------------------------ #
     #  Single-invoice actions
     # ------------------------------------------------------------------ #
     def _act_view_pdf(self):
         if inv_id := self._selected_id():
-            self.controller.show_progress(True, "Generating PDF…")
-            threading.Thread(
-                target=self._pdf_worker,
-                args=(inv_id, self.controller.task_queue),
-                daemon=True,
-            ).start()
+            self.controller.show_progress(True, "Preparing your invoice…")
+            threading.Thread(target=self._pdf_worker, args=(inv_id, self.controller.task_queue), daemon=True).start()
 
     def _act_edit(self):
         if inv_id := self._selected_id():
@@ -10098,11 +8807,7 @@ class DashboardFrame(QWidget):
         if not (inv_id := self._selected_id()):
             return
         current = (self._row_index.get(inv_id, {}) or {}).get("notes", "")
-        run_dialog(
-            NoteDialog(
-                self.controller, self.db_manager, inv_id, current, self._populate
-            )
-        )
+        run_dialog(NoteDialog(self.controller, self.db_manager, inv_id, current, self._populate))
 
     def _act_delete(self):
         """Single-invoice delete (the small Delete button / Delete key on the action bar). If the Delete
@@ -10116,13 +8821,11 @@ class DashboardFrame(QWidget):
         if len(ids) > 1:
             self._act_bulk_delete()
             return
-        if Messagebox.okcancel(
-            "Delete Invoice",
-            f"Permanently delete Invoice #{ids[0]}?\nThis cannot be undone.",
-            parent=self.controller,
-        ):
+        if Messagebox.okcancel("Delete this invoice?", f"Invoice #{ids[0]} will be deleted for good.\nThis cannot be undone.",
+                               parent=self.controller):
             self.db_manager.delete_invoices(ids)
             self.on_show()
+            notify(self.controller, f"Invoice {ids[0]} was deleted.")
 
     def _act_duplicate(self):
         if not (inv_id := self._selected_id()):
@@ -10131,43 +8834,50 @@ class DashboardFrame(QWidget):
         if not row:
             return
 
-        new_data = {
-            k: row[k]
-            for k in row.keys()
-            if k not in ("grand_total", "total_paid", "balance_due", "created_ts")
-        }
+        new_data = {k: row[k] for k in row.keys() if k not in
+                    ("grand_total", "total_paid", "balance_due", "created_ts")}
         new_data["invoice_number"] = self.db_manager.get_next_invoice_number()
-        new_data["invoice_date"] = datetime.date.today().strftime(DB_DATE_FORMAT)
-        new_data["status"] = InvoiceStatus.DUE.value
-        new_data["amount_paid"] = 0.0
+        new_data["invoice_date"]   = datetime.date.today().strftime(DB_DATE_FORMAT)
+        new_data["status"]         = InvoiceStatus.DUE.value
+        new_data["amount_paid"]    = 0.0
         new_data["advance_amount"] = 0.0
-        new_data["payment_date"] = None
-        new_data["advance_date"] = None
-        if row[
-            "due_date"
-        ]:  # the copy is due as long after its date as the original was
+        new_data["payment_date"]   = None
+        new_data["advance_date"]   = None
+        if row["due_date"]:                       # the copy is due as long after its date as the original was
             try:
-                span = datetime.datetime.strptime(
-                    row["due_date"], DB_DATE_FORMAT
-                ) - datetime.datetime.strptime(row["invoice_date"], DB_DATE_FORMAT)
-                new_data["due_date"] = (datetime.date.today() + span).strftime(
-                    DB_DATE_FORMAT
-                )
-            except TypeError, ValueError:
+                span = (datetime.datetime.strptime(row["due_date"], DB_DATE_FORMAT)
+                        - datetime.datetime.strptime(row["invoice_date"], DB_DATE_FORMAT))
+                new_data["due_date"] = (datetime.date.today() + span).strftime(DB_DATE_FORMAT)
+            except (TypeError, ValueError):
                 new_data["due_date"] = None
 
         ok, err = self.db_manager.save_invoice(new_data, is_update=False, payments=[])
         if ok:
             self.on_show()
-            Messagebox.show_info(
-                "Duplicated",
-                f"Created {new_data['invoice_number']} as a copy.",
-                parent=self.controller,
-            )
+            notify(self.controller, f"Made a copy of the invoice: {new_data['invoice_number']}.")
         else:
-            Messagebox.show_error(
-                "Error", f"Could not duplicate:\n{err}", parent=self.controller
-            )
+            Messagebox.show_error("Could not make a copy", f"The invoice could not be copied.\n{err}", parent=self.controller)
+
+    def _act_record_payment(self):
+        """Write down a payment received for the selected invoice (a small window: date, amount, method, reference, note)."""
+        if not (inv_id := self._selected_id()):
+            return
+        row = self.db_manager.get_invoice_by_id(inv_id)
+        if row is None:
+            Messagebox.show_error("Invoice not found", f"Invoice #{inv_id} no longer exists.", parent=self.controller)
+            self.on_show()
+            return
+        row = dict(row)
+        if row.get("is_complimentary"):
+            Messagebox.show_info("Nothing to pay", "This invoice is free of charge, so there is no payment to record.",
+                                 parent=self.controller)
+            return
+
+        def saved(payment: Dict[str, Any]) -> None:
+            self.on_show()
+            notify(self.controller, f"Recorded {fmt_money(payment['amount'])} for Invoice {inv_id}.")
+
+        run_dialog(RecordPaymentDialog(self.controller, self.db_manager, row, saved))
 
     # ------------------------------------------------------------------ #
     #  Bulk operation concurrency guard
@@ -10187,25 +8897,16 @@ class DashboardFrame(QWidget):
         self._bulk_op_running = False
         self._set_bulk_buttons_enabled(True)
 
-    def _run_bulk_dialog(
-        self,
-        title: str,
-        items: list,
-        work_fn: Callable,
-        on_done: Callable[[dict], None],
-    ):
+    def _run_bulk_dialog(self, title: str, items: list, work_fn: Callable, on_done: Callable[[dict], None]):
         """Open the modal progress dialog for a bulk job. The operation lock is released no matter how the
         dialog ends (the Tk build only released it from on_done, so an error there would have left every
         bulk button disabled for the rest of the session)."""
         try:
-            run_dialog(
-                BulkProgressDialog(
-                    self.controller, title, items, work_fn=work_fn, on_done=on_done
-                )
-            )
+            run_dialog(BulkProgressDialog(self.controller, title, items, work_fn=work_fn, on_done=on_done))
         finally:
             if self._bulk_op_running:
                 self._end_bulk_op()
+            free_memory()                          # a long job has finished: hand back what it used
 
     # ------------------------------------------------------------------ #
     #  Bulk actions
@@ -10216,19 +8917,13 @@ class DashboardFrame(QWidget):
         ids = self._selected_ids()
         if not ids:
             return
-        if not Messagebox.okcancel(
-            "Bulk Delete",
-            f"Permanently delete {len(ids)} invoices?\nThis cannot be undone.",
-            parent=self.controller,
-        ):
+        if not Messagebox.okcancel(f"Delete {len(ids)} invoices?",
+                                   f"These {len(ids)} invoices will be deleted for good.\nThis cannot be undone.",
+                                   parent=self.controller):
             return
         self._start_bulk_op()
-        self._run_bulk_dialog(
-            f"Deleting {len(ids)} Invoice(s)",
-            ids,
-            self._bulk_delete_work,
-            self._on_bulk_delete_done,
-        )
+        self._run_bulk_dialog(f"Deleting {len(ids)} invoices", ids,
+                              self._bulk_delete_work, self._on_bulk_delete_done)
 
     def _bulk_delete_work(self, ids: List[str], report, is_aborted) -> dict:
         CHUNK = 200
@@ -10237,50 +8932,32 @@ class DashboardFrame(QWidget):
         for i in range(0, total, CHUNK):
             if is_aborted():
                 break
-            chunk = ids[i : i + CHUNK]
+            chunk = ids[i:i + CHUNK]
             done = min(i + len(chunk), total)
             try:
                 self.db_manager.delete_invoices(chunk, chunk_size=CHUNK)
                 success += len(chunk)
-                report(
-                    done,
-                    total,
-                    f"Deleting invoices… ({done} of {total})",
-                    log_line=f"Deleted {len(chunk)} invoice(s) [batch {i // CHUNK + 1}]",
-                    success_delta=len(chunk),
-                )
+                report(done, total, f"Deleting invoices… ({done} of {total})",
+                       log_line=f"Deleted {len(chunk)} invoices", success_delta=len(chunk))
             except Exception as exc:
                 failed += len(chunk)
-                report(
-                    done,
-                    total,
-                    f"Error deleting batch {i // CHUNK + 1}",
-                    log_line=f"FAILED batch {i // CHUNK + 1}: {exc}",
-                    failed_delta=len(chunk),
-                )
+                report(done, total, "Some invoices could not be deleted",
+                       log_line=f"Could not delete a group of {len(chunk)} invoices: {exc}", failed_delta=len(chunk))
         aborted = is_aborted() and (success + failed) < total
-        return {
-            "success": success,
-            "failed": failed,
-            "aborted": aborted,
-            "result": None,
-        }
+        return {"success": success, "failed": failed, "aborted": aborted, "result": None}
 
     def _on_bulk_delete_done(self, result: dict):
         try:
-            self.on_show()  # refresh the list/stats first...
+            self.on_show()       # refresh the list/stats first...
         finally:
             self._end_bulk_op()  # ...then restore button state, so a stray _on_select() in between can't leave it stale
 
-    def _bulk_export_work_factory(
-        self, file_path: str, ids: Optional[List[str]]
-    ) -> Callable:
+    def _bulk_export_work_factory(self, file_path: str, ids: Optional[List[str]]) -> Callable:
         """Builds a work_fn that streams matching invoices straight into a CSV file in chunks, writing
         incrementally instead of loading the whole result set into memory first -- the difference between
         "fine at a few hundred invoices" and "fine at 100,000+". Handles both an explicit selection (ids
         given) and "export everything" (ids=None, fed from DatabaseManager.iter_all_invoices_chunked) with
         the same progress-reporting shape either way."""
-
         def work(items, report, is_aborted):
             total = len(items)
             written = 0
@@ -10292,89 +8969,51 @@ class DashboardFrame(QWidget):
                         for i in range(0, len(ids), CHUNK):
                             if is_aborted():
                                 break
-                            chunk_rows = self.db_manager.get_invoices_by_ids(
-                                ids[i : i + CHUNK]
-                            )
+                            chunk_rows = self.db_manager.get_invoices_by_ids(ids[i:i + CHUNK])
                             if writer is None and chunk_rows:
                                 writer = csv.writer(fh)
                                 writer.writerow(chunk_rows[0].keys())
                             if writer:
                                 writer.writerows(chunk_rows)
                             written += len(chunk_rows)
-                            report(
-                                written,
-                                total,
-                                f"Exporting… ({written} of {total})",
-                                log_line=f"Wrote {len(chunk_rows)} row(s)",
-                                success_delta=len(chunk_rows),
-                            )
+                            report(written, total, f"Saving… ({written} of {total})",
+                                   log_line=f"Saved {len(chunk_rows)} invoices", success_delta=len(chunk_rows))
                     else:
                         keys = None
                         for chunk_rows in self.db_manager.iter_all_invoices_chunked():
                             if is_aborted():
                                 break
                             if writer is None:
-                                keys = [
-                                    k for k in chunk_rows[0].keys() if k != "_rowid"
-                                ]
+                                keys = [k for k in chunk_rows[0].keys() if k != "_rowid"]
                                 writer = csv.writer(fh)
                                 writer.writerow(keys)
-                            writer.writerows(
-                                [tuple(r[k] for k in keys) for r in chunk_rows]
-                            )
+                            writer.writerows([tuple(r[k] for k in keys) for r in chunk_rows])
                             written += len(chunk_rows)
-                            report(
-                                written,
-                                total,
-                                f"Exporting… ({written} of {total})",
-                                log_line=f"Wrote {len(chunk_rows)} row(s)",
-                                success_delta=len(chunk_rows),
-                            )
+                            report(written, total, f"Saving… ({written} of {total})",
+                                   log_line=f"Saved {len(chunk_rows)} invoices", success_delta=len(chunk_rows))
                 aborted = is_aborted() and written < total
                 if written == 0 and not aborted:
-                    return {
-                        "success": 0,
-                        "failed": 0,
-                        "aborted": False,
-                        "result": None,
-                        "error": "No invoices to export.",
-                    }
-                return {
-                    "success": written,
-                    "failed": 0,
-                    "aborted": aborted,
-                    "result": None if aborted else file_path,
-                }
+                    return {"success": 0, "failed": 0, "aborted": False, "result": None,
+                            "error": "There are no invoices to save yet."}
+                return {"success": written, "failed": 0, "aborted": aborted,
+                        "result": None if aborted else file_path}
             except Exception as exc:
-                return {
-                    "success": written,
-                    "failed": max(0, total - written),
-                    "aborted": False,
-                    "result": None,
-                    "error": str(exc),
-                }
-
+                return {"success": written, "failed": max(0, total - written), "aborted": False,
+                        "result": None, "error": str(exc)}
         return work
 
     def _on_bulk_export_done(self, result: dict):
         self._end_bulk_op()
         if result.get("error"):
-            Messagebox.show_error(
-                "Export Failed", result["error"], parent=self.controller
-            )
+            Messagebox.show_error("The spreadsheet could not be saved", result["error"], parent=self.controller)
         elif result.get("result"):
-            Messagebox.show_info(
-                "Exported",
-                f"Saved {result['success']} invoice(s) to:\n{result['result']}",
-                parent=self.controller,
-            )
+            Messagebox.show_info("Spreadsheet saved", f"{result['success']} invoices were saved to:\n{result['result']}",
+                                 parent=self.controller)
 
     def _ask_csv_path(self, title: str) -> str:
         """Save-as dialog for a CSV export. Adds ".csv" when the user typed a name without an extension
         (what Tk's defaultextension=".csv" did)."""
-        path, _filter = QFileDialog.getSaveFileName(
-            self.controller, title, "", "CSV Files (*.csv)"
-        )
+        path, _filter = QFileDialog.getSaveFileName(self.controller, title, "", "Spreadsheet files (*.csv)")
         if path and not Path(path).suffix:
             path += ".csv"
         return path
@@ -10385,16 +9024,12 @@ class DashboardFrame(QWidget):
         ids = self._selected_ids()
         if not ids:
             return
-        path = self._ask_csv_path("Export Selected Invoices")
+        path = self._ask_csv_path("Save the selected invoices as a spreadsheet")
         if not path:
             return
         self._start_bulk_op()
-        self._run_bulk_dialog(
-            f"Exporting {len(ids)} Invoice(s)",
-            ids,
-            self._bulk_export_work_factory(path, ids),
-            self._on_bulk_export_done,
-        )
+        self._run_bulk_dialog(f"Saving {len(ids)} invoices to a spreadsheet", ids,
+                              self._bulk_export_work_factory(path, ids), self._on_bulk_export_done)
 
     def _bulk_print_work(self, ids: List[str], report, is_aborted) -> dict:
         """Generates a PDF per invoice and merges them into batches of at most PRINT_BATCH_SIZE each --
@@ -10416,9 +9051,7 @@ class DashboardFrame(QWidget):
                 return
             batch_num += 1
             suffix = f"-batch{batch_num}" if total > PRINT_BATCH_SIZE else ""
-            merged = merge_pdfs(
-                current_batch, BATCH_DIR / f"Batch-Print-{stamp}{suffix}.pdf"
-            )
+            merged = merge_pdfs(current_batch, BATCH_DIR / f"Batch-Print-{stamp}{suffix}.pdf")
             batch_paths.append(merged)
             current_batch.clear()
 
@@ -10428,38 +9061,23 @@ class DashboardFrame(QWidget):
             try:
                 row = self.db_manager.get_invoice_by_id(inv_id)
                 if row is None:
-                    raise ValueError("invoice no longer exists")
+                    raise ValueError("this invoice no longer exists")
                 payments = self.db_manager.get_payments(inv_id)
                 pdf_path = PDFGenerator(dict(row), cfg, payments=payments).generate()
                 current_batch.append(pdf_path)
                 success += 1
-                report(
-                    idx,
-                    total,
-                    f"Generating PDF {idx} of {total}…",
-                    log_line=f"Generated {inv_id}",
-                    success_delta=1,
-                )
+                report(idx, total, f"Preparing invoice {idx} of {total}…",
+                       log_line=f"Prepared invoice {inv_id}", success_delta=1)
             except Exception as exc:
                 failed += 1
-                report(
-                    idx,
-                    total,
-                    f"Error generating {inv_id}",
-                    log_line=f"FAILED {inv_id}: {exc}",
-                    failed_delta=1,
-                )
+                report(idx, total, f"Could not prepare invoice {inv_id}",
+                       log_line=f"Could not prepare invoice {inv_id}: {exc}", failed_delta=1)
             if len(current_batch) >= PRINT_BATCH_SIZE:
                 flush_batch()
 
         flush_batch()  # whatever's left: a partial final batch, or everything if <= PRINT_BATCH_SIZE total
         aborted = is_aborted() and (success + failed) < total
-        return {
-            "success": success,
-            "failed": failed,
-            "aborted": aborted,
-            "result": batch_paths,
-        }
+        return {"success": success, "failed": failed, "aborted": aborted, "result": batch_paths}
 
     def _on_bulk_print_done(self, result: dict, ids: Optional[List[str]] = None):
         self._end_bulk_op()
@@ -10476,8 +9094,9 @@ class DashboardFrame(QWidget):
 
         elif len(paths) > 1:
             Messagebox.show_info(
-                "Batches Ready",
-                f"Generated {len(paths)} batch PDF file(s) (up to {PRINT_BATCH_SIZE} invoices each) in:\n{BATCH_DIR}",
+                "Your PDF files are ready",
+                f"Your invoices were put into {len(paths)} PDF files (up to {PRINT_BATCH_SIZE} invoices in each).\n"
+                f"You will find them in this folder:\n{BATCH_DIR}",
                 parent=self.controller,
             )
 
@@ -10488,12 +9107,8 @@ class DashboardFrame(QWidget):
         if not ids:
             return
         self._start_bulk_op()
-        self._run_bulk_dialog(
-            f"Generating {len(ids)} PDF(s)",
-            ids,
-            self._bulk_print_work,
-            lambda result, _ids=list(ids): self._on_bulk_print_done(result, _ids),
-        )
+        self._run_bulk_dialog(f"Preparing {len(ids)} invoices for printing", ids, self._bulk_print_work,
+                              lambda result, _ids=list(ids): self._on_bulk_print_done(result, _ids))
 
     def _show_ctx_menu(self, pos):
         item = self.table.itemAt(pos)
@@ -10508,35 +9123,26 @@ class DashboardFrame(QWidget):
     def _export_csv(self):
         """Header 'Export CSV' button -- exports every invoice, not just a selection. Routed through the
         same streaming/progress-dialog path as the bulk actions above (and gated by the same lock) since
-        at 100,000+ invoices this is exactly as bulk-scale an operation as an explicit multi-select export.
-        """
+        at 100,000+ invoices this is exactly as bulk-scale an operation as an explicit multi-select export."""
         if self._bulk_op_running:
             return
-        path = self._ask_csv_path("Export All Invoices")
+        path = self._ask_csv_path("Save all your invoices as a spreadsheet")
         if not path:
             return
         total_count = self.db_manager.get_dashboard_stats().get("total", 0)
         if not total_count:
-            Messagebox.show_error(
-                "Nothing to Export",
-                "There are no invoices to export yet.",
-                parent=self.controller,
-            )
+            Messagebox.show_error("Nothing to save", "You have not made any invoices yet, so there is nothing to put in a spreadsheet.",
+                                  parent=self.controller)
             return
         self._start_bulk_op()
-        self._run_bulk_dialog(
-            f"Exporting All {total_count} Invoices",
-            list(range(total_count)),
-            self._bulk_export_work_factory(path, None),
-            self._on_bulk_export_done,
-        )
+        self._run_bulk_dialog(f"Saving all {total_count} invoices to a spreadsheet", list(range(total_count)),
+                              self._bulk_export_work_factory(path, None), self._on_bulk_export_done)
 
     def _act_refresh(self):
         """Reloads the invoice list and summary stats from the database -- used by both the Refresh
         button and Ctrl+R. This is the same query _populate()/_update_stats() already run on every
         navigation; refresh just triggers it on demand (e.g. after editing data outside the app, or just
-        to be sure the numbers are current) without changing which page or filter is active.
-        """
+        to be sure the numbers are current) without changing which page or filter is active."""
         self._populate()
         self._update_stats()
 
@@ -10585,14 +9191,7 @@ class DashboardFrame(QWidget):
             row = dict(row)
             payments = self.db_manager.get_payments(invoice_id)
             path = PDFGenerator(row, load_config(), payments=payments).generate()
-            q.put(
-                {
-                    "status": "success",
-                    "kind": "single",
-                    "path": path,
-                    "invoice_data": row,
-                }
-            )
+            q.put({"status": "success", "kind": "single", "path": path, "invoice_data": row})
         except Exception as exc:
             logger.error(f"PDF generation failed ({invoice_id}): {exc}", exc_info=True)
             q.put({"status": "error", "message": str(exc)})
@@ -10602,17 +9201,18 @@ class DashboardFrame(QWidget):
 #  Invoice form
 # -----------------------------------------------------------------------------
 # Column widths shared by the item / payment headers and their rows, so the columns always line up.
-_ROW_GAP = 8
-_AMOUNT_W = 112  # an item's rate / a payment's amount
-_DISC_W = 92
-_QTY_W = 72
-_UNIT_W = 100
-_LINE_W = 116  # an item's computed amount
-_HSN_W = 118
-_GST_W = 92
-_DATE_W = 138
-_MODE_W = 140
-_REMOVE_W = 34
+_ROW_GAP   = 8
+_AMOUNT_W  = 112      # an item's rate / a payment's amount
+_DISC_W    = 92
+_QTY_W     = 72
+_UNIT_W    = 100
+_LINE_W    = 116      # an item's computed amount
+_HSN_W     = 118
+_GST_W     = 92
+_DATE_W    = 138
+_MODE_W    = 140
+_REF_W     = 178      # a payment's reference (UTR, cheque number ...)
+_REMOVE_W  = 34
 
 
 def _num_text(value: Any) -> str:
@@ -10625,7 +9225,6 @@ class ToggleSwitch(QCheckBox):
     """A round on/off switch (ttkbootstrap's "round-toggle"). It is still a QCheckBox -- Space toggles it,
     `clicked` / `toggled` work as usual, screen readers see a check box -- but painted with the live theme
     colours, so it follows theme switches with no extra code."""
-
     TRACK_W, TRACK_H, GAP = 38, 20, 10
 
     def __init__(self, text: str = "", parent: Optional[QWidget] = None):
@@ -10641,7 +9240,7 @@ class ToggleSwitch(QCheckBox):
     def minimumSizeHint(self) -> QSize:
         return self.sizeHint()
 
-    def hitButton(self, pos) -> bool:  # the caption toggles it too, not only the switch
+    def hitButton(self, pos) -> bool:                      # the caption toggles it too, not only the switch
         return self.rect().contains(pos)
 
     def paintEvent(self, _event):
@@ -10649,17 +9248,9 @@ class ToggleSwitch(QCheckBox):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         on, enabled = self.isChecked(), self.isEnabled()
         if not enabled:
-            track, knob, text = (
-                theme_color("border"),
-                theme_color("surface"),
-                theme_color("disabled_fg"),
-            )
+            track, knob, text = theme_color("border"), theme_color("surface"), theme_color("disabled_fg")
         elif on:
-            track, knob, text = (
-                theme_color("primary"),
-                "#FFFFFF",
-                theme_color("fg"),
-            )  # a switch knob is white on every theme
+            track, knob, text = theme_color("primary"), "#FFFFFF", theme_color("fg")     # a switch knob is white on every theme
         else:
             track = theme_color("border_strong")
             knob = theme_color("fg") if theme_is_dark() else theme_color("surface")
@@ -10675,21 +9266,11 @@ class ToggleSwitch(QCheckBox):
         if self.hasFocus() and enabled:
             painter.setPen(QPen(QColor(theme_color("primary")), 1.5))
             painter.setBrush(Qt.BrushStyle.NoBrush)
-            painter.drawRoundedRect(
-                QRectF(0.5, top - 1.5, w + 3, h + 3), h / 2 + 1.5, h / 2 + 1.5
-            )
+            painter.drawRoundedRect(QRectF(0.5, top - 1.5, w + 3, h + 3), h / 2 + 1.5, h / 2 + 1.5)
         if self.text():
             painter.setPen(QColor(text))
-            painter.drawText(
-                QRectF(
-                    self.TRACK_W + 4 + self.GAP,
-                    0,
-                    self.width() - self.TRACK_W - 4 - self.GAP,
-                    self.height(),
-                ),
-                int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft),
-                self.text(),
-            )
+            painter.drawText(QRectF(self.TRACK_W + 4 + self.GAP, 0, self.width() - self.TRACK_W - 4 - self.GAP, self.height()),
+                             int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft), self.text())
 
 
 class _ChevronButton(QToolButton):
@@ -10705,24 +9286,11 @@ class _ChevronButton(QToolButton):
     def paintEvent(self, _event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        key = (
-            "disabled_fg"
-            if not self.isEnabled()
-            else ("fg" if self.underMouse() else "muted_text")
-        )
-        painter.setPen(
-            QPen(
-                QColor(theme_color(key)),
-                1.6,
-                Qt.PenStyle.SolidLine,
-                Qt.PenCapStyle.RoundCap,
-                Qt.PenJoinStyle.RoundJoin,
-            )
-        )
+        key = "disabled_fg" if not self.isEnabled() else ("fg" if self.underMouse() else "muted_text")
+        painter.setPen(QPen(QColor(theme_color(key)), 1.6, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap,
+                            Qt.PenJoinStyle.RoundJoin))
         cx, cy = self.width() / 2, self.height() / 2
-        painter.drawPolyline(
-            [QPointF(cx - 4, cy - 2), QPointF(cx, cy + 2), QPointF(cx + 4, cy - 2)]
-        )
+        painter.drawPolyline([QPointF(cx - 4, cy - 2), QPointF(cx, cy + 2), QPointF(cx + 4, cy - 2)])
 
 
 class SuggestCombo(QLineEdit):
@@ -10734,15 +9302,9 @@ class SuggestCombo(QLineEdit):
     It is a QLineEdit + QCompleter rather than an editable QComboBox on purpose: an editable combo box also
     "activates" an item whenever the typed text happens to match one (on Enter and on losing focus), which
     would auto-fill / overwrite the client details behind the user's back."""
-
     picked = Signal(str)
 
-    def __init__(
-        self,
-        placeholder: str = "",
-        values: Optional[List[str]] = None,
-        parent: Optional[QWidget] = None,
-    ):
+    def __init__(self, placeholder: str = "", values: Optional[List[str]] = None, parent: Optional[QWidget] = None):
         super().__init__(parent)
         if placeholder:
             self.setPlaceholderText(placeholder)
@@ -10782,8 +9344,7 @@ class SuggestCombo(QLineEdit):
 
     def _show_all(self) -> None:
         """The ▾ button: open the list -- every known value that contains the text typed so far (all of
-        them while the field is empty), like the Tk dropdown filtered by the typed text.
-        """
+        them while the field is empty), like the Tk dropdown filtered by the typed text."""
         self.setFocus()
         self._completer.setCompletionPrefix(self.text())
         self._completer.complete()
@@ -10792,38 +9353,20 @@ class SuggestCombo(QLineEdit):
 class _ReturnToNext(QObject):
     """Event filter: Enter / Return in a single-line field moves focus to the next field in tab order -- the
     same field-to-field flow Tab already gives, from the key people naturally press to "confirm". Applied to
-    single-line fields only: the multi-line Contact Info / Notes boxes keep plain Enter for a new line.
-    """
+    single-line fields only: the multi-line Contact Info / Notes boxes keep plain Enter for a new line."""
 
     def eventFilter(self, obj, event):
-        if event.type() == QEvent.Type.KeyPress and event.key() in (
-            Qt.Key.Key_Return,
-            Qt.Key.Key_Enter,
-        ):
-            blocked = (
-                Qt.KeyboardModifier.ControlModifier
-                | Qt.KeyboardModifier.AltModifier
-                | Qt.KeyboardModifier.ShiftModifier
-                | Qt.KeyboardModifier.MetaModifier
-            )
+        if event.type() == QEvent.Type.KeyPress and event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            blocked = (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.AltModifier
+                       | Qt.KeyboardModifier.ShiftModifier | Qt.KeyboardModifier.MetaModifier)
             if event.modifiers() & blocked:
                 return False
-            completer = (
-                obj.completer() if isinstance(obj, (QLineEdit, QComboBox)) else None
-            )
-            if (
-                completer is not None
-                and completer.popup().isVisible()
-                and completer.popup().currentIndex().isValid()
-            ):
-                return False  # a highlighted suggestion: the completer takes the key
+            completer = obj.completer() if isinstance(obj, (QLineEdit, QComboBox)) else None
+            if completer is not None and completer.popup().isVisible() and completer.popup().currentIndex().isValid():
+                return False                                   # a highlighted suggestion: the completer takes the key
             # A QDateEdit's own focusNextChild() first steps through its day / month / year sections; asking its
             # parent instead moves straight on to the next field, like Enter in the Tk date entry did.
-            target = (
-                obj.parentWidget()
-                if isinstance(obj, QAbstractSpinBox) and obj.parentWidget() is not None
-                else obj
-            )
+            target = obj.parentWidget() if isinstance(obj, QAbstractSpinBox) and obj.parentWidget() is not None else obj
             target.focusNextChild()
             return True
         return False
@@ -10834,9 +9377,7 @@ def advance_on_enter(widget: QWidget) -> QWidget:
     return widget
 
 
-def make_money_edit(
-    value: float, width: int, tooltip: str = "", advance: bool = True
-) -> QLineEdit:
+def make_money_edit(value: float, width: int, tooltip: str = "", advance: bool = True) -> QLineEdit:
     """A right-aligned "0.00" amount field: digits and one decimal point only (two decimals at most),
     re-formatted to two decimals when it loses focus."""
     edit = QLineEdit(f"{value:.2f}")
@@ -10880,9 +9421,7 @@ class _DiscountBlurFilter(QObject):
         if event.type() == QEvent.Type.FocusOut:
             text = obj.text().strip()
             number = safe_float(text.rstrip("%"))
-            tidy = (
-                f"{number:g}%" if text.endswith("%") and number > 0 else f"{number:.2f}"
-            )
+            tidy = f"{number:g}%" if text.endswith("%") and number > 0 else f"{number:.2f}"
             if tidy != obj.text():
                 obj.setText(tidy)
         return False
@@ -10906,33 +9445,20 @@ def make_discount_edit(text: str) -> QLineEdit:
     edit = QLineEdit(text)
     edit.setAlignment(Qt.AlignmentFlag.AlignRight)
     edit.setFixedWidth(_DISC_W)
-    edit.setValidator(
-        QRegularExpressionValidator(
-            QRegularExpression(r"^\d{0,9}(\.\d{0,2})?%?$"), edit
-        )
-    )
+    edit.setValidator(QRegularExpressionValidator(QRegularExpression(r"^\d{0,9}(\.\d{0,2})?%?$"), edit))
     edit.installEventFilter(_DiscountBlurFilter(edit))
     advance_on_enter(edit)
-    edit.setToolTip(
-        "Per-item discount: an amount (150) or a percentage of the line (10%)"
-    )
+    edit.setToolTip("Per-item discount: an amount (150) or a percentage of the line (10%)")
     return edit
 
 
-def make_editable_combo(
-    presets: List[str],
-    width: int,
-    placeholder: str,
-    max_length: int,
-    advance: bool = True,
-) -> QComboBox:
+def make_editable_combo(presets: List[str], width: int, placeholder: str, max_length: int,
+                        advance: bool = True) -> QComboBox:
     """A combo box in which anything can be typed (the list is only a convenience): unit and GST-rate fields."""
     combo = QComboBox()
     combo.setEditable(True)
     combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
-    combo.setCompleter(
-        None
-    )  # what is typed is what is meant -- no auto-completion surprises
+    combo.setCompleter(None)                      # what is typed is what is meant -- no auto-completion surprises
     combo.addItems(presets)
     combo.setCurrentIndex(-1)
     combo.lineEdit().setPlaceholderText(placeholder)
@@ -10940,9 +9466,7 @@ def make_editable_combo(
     combo.setFixedWidth(width)
     guard_wheel(combo)
     if advance:
-        advance_on_enter(
-            combo
-        )  # the combo itself holds the focus (its line edit's focus proxy)
+        advance_on_enter(combo)        # the combo itself holds the focus (its line edit's focus proxy)
     return combo
 
 
@@ -10954,26 +9478,11 @@ class _EnterAddsRow(QObject):
         self.row, self.form = row, form
 
     def eventFilter(self, obj, event):
-        if (
-            event.type() == QEvent.Type.KeyPress
-            and event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter)
-            and not (
-                event.modifiers()
-                & (
-                    Qt.KeyboardModifier.ControlModifier
-                    | Qt.KeyboardModifier.AltModifier
-                    | Qt.KeyboardModifier.ShiftModifier
-                    | Qt.KeyboardModifier.MetaModifier
-                )
-            )
-        ):
+        if event.type() == QEvent.Type.KeyPress and event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter) \
+                and not (event.modifiers() & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.AltModifier
+                                              | Qt.KeyboardModifier.ShiftModifier | Qt.KeyboardModifier.MetaModifier)):
             rows = self.form.item_rows
-            if (
-                rows
-                and rows[-1] is self.row
-                and obj is self.row.last_field()
-                and self.row.is_filled()
-            ):
+            if rows and rows[-1] is self.row and obj is self.row.last_field() and self.row.is_filled():
                 self.form.add_item()
                 return True
         return False
@@ -10989,37 +9498,19 @@ class _ItemRow(QWidget):
     as before. The stored line keeps its old keys (title, description, amount = quantity x rate, discount) and only
     gains qty / unit / rate / hsn / tax_rate / disc_type / disc_value when the line uses them, so a plain line is saved
     exactly like one from an older build."""
+    changed = Signal()                       # a figure was edited -> the totals must be recalculated
+    remove_requested = Signal(object)        # this row asks the form to delete it
+    title_picked = Signal(object, str)       # (row, title) -- a catalog title was chosen
+    title_edited = Signal(object, str)       # (row, title) -- the title text changed (any way)
 
-    changed = Signal()  # a figure was edited -> the totals must be recalculated
-    remove_requested = Signal(object)  # this row asks the form to delete it
-    title_picked = Signal(object, str)  # (row, title) -- a catalog title was chosen
-    title_edited = Signal(
-        object, str
-    )  # (row, title) -- the title text changed (any way)
-
-    def __init__(
-        self,
-        titles: List[str],
-        title: str = "",
-        description: str = "",
-        amount: float = 0.0,
-        discount: float = 0.0,
-        parent: Optional[QWidget] = None,
-    ):
+    def __init__(self, titles: List[str], title: str = "", description: str = "", amount: float = 0.0,
+                 discount: float = 0.0, parent: Optional[QWidget] = None):
         super().__init__(parent)
-        self._per_item = (
-            False  # GST % shown / stored only when the invoice charges GST per item
-        )
-        self._gst_touched = False  # the user (or a catalog item) chose this line's rate: stop following the default
-        self._default_gst = (
-            "18"  # the invoice's default rate -- what an emptied GST field means
-        )
-        self._unit_rates: Dict[str, float] = (
-            {}
-        )  # the picked catalog item's units -> rate per unit (lower-case keys)
-        self._dropdown_units: List[str] = (
-            []
-        )  # what the unit list currently offers besides the presets
+        self._per_item = False               # GST % shown / stored only when the invoice charges GST per item
+        self._gst_touched = False            # the user (or a catalog item) chose this line's rate: stop following the default
+        self._default_gst = "18"             # the invoice's default rate -- what an emptied GST field means
+        self._unit_rates: Dict[str, float] = {}      # the picked catalog item's units -> rate per unit (lower-case keys)
+        self._dropdown_units: List[str] = []         # what the unit list currently offers besides the presets
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 7, 0, 0)
         lay.setSpacing(5)
@@ -11037,38 +9528,24 @@ class _ItemRow(QWidget):
         self.qty_edit.textChanged.connect(self._on_edited)
         top.addWidget(self.qty_edit)
         self.unit_combo = make_editable_combo(UNIT_PRESETS, _UNIT_W, "Unit", 14)
-        self.unit_combo.setToolTip(
-            "Unit of measure: pick one or type your own (Nos, Day, Plate, Sq.ft ...)"
-        )
+        self.unit_combo.setToolTip("Unit of measure: pick one or type your own (Nos, Day, Plate, Sq.ft ...)")
         self.unit_combo.activated.connect(self._on_unit_activated)
         top.addWidget(self.unit_combo)
-        self.amount_edit = make_money_edit(
-            amount, _AMOUNT_W, "Rate: the price of one unit (before any discount)"
-        )
+        self.amount_edit = make_money_edit(amount, _AMOUNT_W, "Rate: the price of one unit (before any discount)")
         self.amount_edit.textChanged.connect(self._on_edited)
         top.addWidget(self.amount_edit)
         self.disc_edit = make_discount_edit(f"{discount:.2f}")
         self.disc_edit.textChanged.connect(self._on_edited)
         top.addWidget(self.disc_edit)
-        self.line_lbl = make_label(
-            "",
-            "muted",
-            align=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
-        )
+        self.line_lbl = make_label("", "muted", align=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         self.line_lbl.setFixedWidth(_LINE_W)
         self.line_lbl.setToolTip("Quantity x rate, less this line's discount")
         top.addWidget(self.line_lbl)
 
-        self.remove_btn = make_button(
-            "✕",
-            "danger-outline",
-            tooltip="Remove this item (Ctrl+Shift+Del or Ctrl+Minus)",
-        )
+        self.remove_btn = make_button("✕", "danger-outline", tooltip="Remove this item (Ctrl+Shift+Del or Ctrl+Minus)")
         self.remove_btn.setFixedWidth(_REMOVE_W)
         set_flag(self.remove_btn, "glyph", True)
-        self.remove_btn.setFocusPolicy(
-            Qt.FocusPolicy.NoFocus
-        )  # Tab skips it, as in the Tk build (takefocus=False)
+        self.remove_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)      # Tab skips it, as in the Tk build (takefocus=False)
         self.remove_btn.clicked.connect(self._on_remove)
         top.addWidget(self.remove_btn)
         lay.addLayout(top)
@@ -11085,9 +9562,7 @@ class _ItemRow(QWidget):
         self.hsn_edit = QLineEdit()
         self.hsn_edit.setFixedWidth(_HSN_W)
         self.hsn_edit.setPlaceholderText("optional")
-        self.hsn_edit.setToolTip(
-            "HSN code (goods) or SAC code (services): 2 to 8 digits, printed under the item"
-        )
+        self.hsn_edit.setToolTip("HSN code (goods) or SAC code (services): 2 to 8 digits, printed under the item")
         restrict_to_digits(self.hsn_edit, 8)
         advance_on_enter(self.hsn_edit)
         second.addWidget(self.hsn_edit)
@@ -11101,7 +9576,7 @@ class _ItemRow(QWidget):
         self.gst_combo.activated.connect(self._on_gst_touched)
         self.gst_combo.currentTextChanged.connect(self._on_edited)
         second.addWidget(self.gst_combo)
-        second.addSpacing(_REMOVE_W)  # line the right edge up with the line above
+        second.addSpacing(_REMOVE_W)         # line the right edge up with the line above
         lay.addLayout(second)
         lay.addSpacing(4)
         lay.addWidget(hline())
@@ -11134,9 +9609,7 @@ class _ItemRow(QWidget):
     # ---- what the row shows -------------------------------------------------- #
     def _numbers(self) -> Tuple[float, float, float, str, float]:
         """(quantity, rate, line amount, discount kind, discount typed) -- the amount is quantity x rate to the paisa."""
-        qty, rate = safe_float(self.qty_edit.text()), safe_float(
-            self.amount_edit.text()
-        )
+        qty, rate = safe_float(self.qty_edit.text()), safe_float(self.amount_edit.text())
         gross = float(_round2(Decimal(str(qty)) * Decimal(str(rate))))
         text = self.disc_edit.text().strip()
         typed = safe_float(text.rstrip("%"))
@@ -11146,18 +9619,12 @@ class _ItemRow(QWidget):
         """(discount amount, kind, the number typed) for the current line."""
         _qty, _rate, gross, kind, typed = self._numbers()
         if kind == "percent":
-            return (
-                float(
-                    _round2(Decimal(str(gross)) * Decimal(str(typed)) / Decimal("100"))
-                ),
-                kind,
-                typed,
-            )
+            return float(_round2(Decimal(str(gross)) * Decimal(str(typed)) / Decimal("100"))), kind, typed
         return max(0.0, typed), kind, typed
 
     def _refresh_line(self):
         _qty, _rate, gross, _kind, _typed = self._numbers()
-        self.line_lbl.setText(fmt_money(max(0.0, gross - self._discount()[0])))
+        self.line_lbl.setText(fmt_money(item_net_amount({"amount": gross, "discount": self._discount()[0]})))
 
     def refresh_line(self) -> None:
         """Redraw the line amount (the currency symbol may have changed in Settings)."""
@@ -11190,14 +9657,7 @@ class _ItemRow(QWidget):
         current = self.unit_combo.currentText()
         self.unit_combo.blockSignals(True)
         self.unit_combo.clear()
-        self.unit_combo.addItems(
-            wanted
-            + [
-                u
-                for u in UNIT_PRESETS
-                if u.casefold() not in {w.casefold() for w in wanted}
-            ]
-        )
+        self.unit_combo.addItems(wanted + [u for u in UNIT_PRESETS if u.casefold() not in {w.casefold() for w in wanted}])
         self.unit_combo.setCurrentIndex(-1)
         self.unit_combo.setCurrentText(current)
         self.unit_combo.blockSignals(False)
@@ -11221,11 +9681,7 @@ class _ItemRow(QWidget):
         qty = item_qty(item)
         raw_rate = item.get("rate")
         gross = safe_float(item.get("amount"))
-        rate = (
-            safe_float(raw_rate)
-            if raw_rate not in (None, "")
-            else (gross / qty if qty else gross)
-        )
+        rate = safe_float(raw_rate) if raw_rate not in (None, "") else (gross / qty if qty else gross)
         self.qty_edit.setText(fmt_qty(qty))
         self.unit_combo.setCurrentText(str(item.get("unit") or ""))
         self.amount_edit.setText(f"{rate:.2f}")
@@ -11239,12 +9695,8 @@ class _ItemRow(QWidget):
 
     def is_filled(self) -> bool:
         """Whether anything has been entered on this line (an untouched row is ignored when the invoice is saved)."""
-        return bool(
-            self.title_edit.text().strip()
-            or self.desc_edit.text().strip()
-            or self.hsn_edit.text().strip()
-            or safe_float(self.amount_edit.text()) > 0
-        )
+        return bool(self.title_edit.text().strip() or self.desc_edit.text().strip() or self.hsn_edit.text().strip()
+                    or safe_float(self.amount_edit.text()) > 0)
 
     def last_field(self) -> QWidget:
         return self.gst_combo if self._per_item else self.hsn_edit
@@ -11254,15 +9706,7 @@ class _ItemRow(QWidget):
         return safe_float(self.gst_combo.currentText().strip() or self._default_gst)
 
     def focus_widgets(self) -> List[QWidget]:
-        chain = [
-            self.title_edit,
-            self.qty_edit,
-            self.unit_combo,
-            self.amount_edit,
-            self.disc_edit,
-            self.desc_edit,
-            self.hsn_edit,
-        ]
+        chain = [self.title_edit, self.qty_edit, self.unit_combo, self.amount_edit, self.disc_edit, self.desc_edit, self.hsn_edit]
         if self._per_item:
             chain.append(self.gst_combo)
         return chain
@@ -11277,17 +9721,9 @@ class _ItemRow(QWidget):
             "discount": discount,
         }
         unit, hsn = self.unit_combo.currentText().strip(), self.hsn_edit.text().strip()
-        tax_rate = (
-            min(
-                100.0,
-                safe_float(self.gst_combo.currentText().strip() or self._default_gst),
-            )
-            if self._per_item
-            else None
-        )
-        if (
-            qty != 1.0 or unit or hsn or tax_rate is not None
-        ):  # more than a title and an amount: keep the detail
+        tax_rate = (min(100.0, safe_float(self.gst_combo.currentText().strip() or self._default_gst))
+                    if self._per_item else None)
+        if qty != 1.0 or unit or hsn or tax_rate is not None:           # more than a title and an amount: keep the detail
             item["qty"], item["rate"] = qty, rate
             if unit:
                 item["unit"] = unit
@@ -11302,19 +9738,11 @@ class _ItemRow(QWidget):
 
 class _PaymentRow(QWidget):
     """One line of the payment ledger: date, amount, mode, note."""
-
     changed = Signal()
     remove_requested = Signal(object)
 
-    def __init__(
-        self,
-        amount: float = 0.0,
-        payment_date: Optional[str] = None,
-        mode: str = "Cash",
-        note: str = "",
-        payment_id: Optional[int] = None,
-        parent: Optional[QWidget] = None,
-    ):
+    def __init__(self, amount: float = 0.0, payment_date: Optional[str] = None, mode: str = "Cash", note: str = "",
+                 payment_id: Optional[int] = None, parent: Optional[QWidget] = None, reference: str = ""):
         super().__init__(parent)
         self.payment_id = payment_id
         lay = QVBoxLayout(self)
@@ -11341,15 +9769,26 @@ class _PaymentRow(QWidget):
         guard_wheel(self.mode_combo)
         row.addWidget(self.mode_combo)
 
+        # The reference box changes with the payment method: a UPI payment asks for its 12-digit UTR, a cheque for its
+        # number, a bank transfer or card payment for a reference. Cash has none, so the box hides (keeping its space,
+        # so the columns stay lined up under their headings).
+        self.reference_edit = QLineEdit(reference)
+        self.reference_edit.setFixedWidth(_REF_W)
+        policy = self.reference_edit.sizePolicy()
+        policy.setRetainSizeWhenHidden(True)
+        self.reference_edit.setSizePolicy(policy)
+        advance_on_enter(self.reference_edit)
+        self._digits_only = QRegularExpressionValidator(QRegularExpression(r"^\d*$"), self.reference_edit)   # one, reused
+        row.addWidget(self.reference_edit)
+        self.mode_combo.currentTextChanged.connect(self._on_mode_changed)
+
         self.note_edit = QLineEdit(note)
         self.note_edit.setPlaceholderText("Note (optional)")
         self.note_edit.setCursorPosition(0)
         advance_on_enter(self.note_edit)
         row.addWidget(self.note_edit, 1)
 
-        self.remove_btn = make_button(
-            "✕", "danger-outline", tooltip="Remove this payment"
-        )
+        self.remove_btn = make_button("✕", "danger-outline", tooltip="Remove this payment")
         self.remove_btn.setFixedWidth(_REMOVE_W)
         set_flag(self.remove_btn, "glyph", True)
         self.remove_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
@@ -11358,21 +9797,39 @@ class _PaymentRow(QWidget):
         lay.addLayout(row)
         lay.addSpacing(4)
         lay.addWidget(hline())
+        self._on_mode_changed(self.mode_combo.currentText())
+
+    def _on_mode_changed(self, mode: str) -> None:
+        """Re-shape the reference box for the chosen payment method (what it asks for, what it accepts)."""
+        spec = PAYMENT_REFERENCE_FIELDS.get(mode)
+        self.reference_edit.setVisible(spec is not None)
+        if spec is None:
+            return
+        caption, hint, digits_only, longest = spec
+        self.reference_edit.setPlaceholderText(hint)
+        self.reference_edit.setToolTip(caption)
+        self.reference_edit.setValidator(self._digits_only if digits_only else None)
+        self.reference_edit.setMaxLength(longest)
+        text = self.reference_edit.text()
+        if digits_only and text and not text.isdigit():
+            self.reference_edit.clear()                          # what was typed for another method does not fit this one
+        elif len(text) > longest:
+            self.reference_edit.setText(text[:longest])
+
+    def _has_reference(self) -> bool:
+        return self.mode_combo.currentText() in PAYMENT_REFERENCE_FIELDS
 
     def _on_remove(self, _checked: bool = False):
         self.remove_requested.emit(self)
 
     def focus_widgets(self) -> List[QWidget]:
-        return [self.date_edit, self.amount_edit, self.mode_combo, self.note_edit]
+        chain = [self.date_edit, self.amount_edit, self.mode_combo]
+        if self._has_reference():
+            chain.append(self.reference_edit)
+        return chain + [self.note_edit]
 
     def set_editable(self, editable: bool) -> None:
-        for w in (
-            self.date_edit,
-            self.amount_edit,
-            self.mode_combo,
-            self.note_edit,
-            self.remove_btn,
-        ):
+        for w in (self.date_edit, self.amount_edit, self.mode_combo, self.reference_edit, self.note_edit, self.remove_btn):
             w.setEnabled(editable)
 
     def values(self) -> Dict[str, Any]:
@@ -11380,6 +9837,7 @@ class _PaymentRow(QWidget):
             "amount": safe_float(self.amount_edit.text()),
             "payment_date": date_edit_db(self.date_edit),
             "mode": self.mode_combo.currentText(),
+            "reference": self.reference_edit.text().strip() if self._has_reference() else "",
             "note": self.note_edit.text().strip(),
             "payment_id": self.payment_id,
         }
@@ -11388,9 +9846,7 @@ class _PaymentRow(QWidget):
 class _SummaryRow(QWidget):
     """One "label ............ value" line of the live totals box."""
 
-    def __init__(
-        self, label: str = "", bold: bool = False, parent: Optional[QWidget] = None
-    ):
+    def __init__(self, label: str = "", bold: bool = False, parent: Optional[QWidget] = None):
         super().__init__(parent)
         lay = QHBoxLayout(self)
         lay.setContentsMargins(0, 2, 0, 2)
@@ -11417,24 +9873,20 @@ class InvoiceFormFrame(QWidget):
 
     def __init__(self, parent, controller):
         super().__init__(parent)
-        self.controller = controller
-        self.db_manager = controller.db_manager
+        self.controller  = controller
+        self.db_manager  = controller.db_manager
         self.editing_id: Optional[str] = None
-        self.item_rows: List[_ItemRow] = []
+        self.item_rows:    List[_ItemRow] = []
         self.payment_rows: List[_PaymentRow] = []
         self._catalog_cache: List[Dict] = []
-        self._client_cache: List[Dict] = []
+        self._client_cache:  List[Dict] = []
         self._initial_snapshot: Optional[str] = None
-        self._catalog_exact: Dict[str, Dict] = (
-            {}
-        )  # catalog items by title (exact spelling / ignoring case)
-        self._catalog_fold: Dict[str, Dict] = {}
-        self._place_auto = False  # the place of supply was filled in from the customer's GSTIN, not typed
-        self._due_days: Optional[int] = (
-            None  # the due date was set as "n days after the invoice date" (None: by hand)
-        )
+        self._catalog_exact: Dict[str, Dict] = {}     # catalog items by title (exact spelling / ignoring case)
+        self._catalog_fold:  Dict[str, Dict] = {}
+        self._place_auto = False         # the place of supply was filled in from the customer's GSTIN, not typed
+        self._due_days: Optional[int] = None       # the due date was set as "n days after the invoice date" (None: by hand)
         self._setting_due = False
-        self._loading = False  # True while the fields are being (re)filled: no live recalculation, no "dirty" checks
+        self._loading = False            # True while the fields are being (re)filled: no live recalculation, no "dirty" checks
         self._build()
 
     # ------------------------------------------------------------------ #
@@ -11448,13 +9900,9 @@ class InvoiceFormFrame(QWidget):
         header = QHBoxLayout()
         header.setContentsMargins(24, 16, 24, 6)
         header.setSpacing(20)
-        self.top_back_btn = make_button(
-            "←  Back to Dashboard  (Esc)",
-            "secondary-outline",
-            self._go_back,
-            tooltip="Return to the invoice list (Esc). Unsaved changes will ask first.",
-            min_height=36,
-        )
+        self.top_back_btn = make_button("←  Back to Invoices  (Esc)", "secondary-outline", self._go_back,
+                                        tooltip="Return to the invoice list (Esc). Unsaved changes will ask first.",
+                                        min_height=36)
         header.addWidget(self.top_back_btn)
         self.title_lbl = make_label("New Invoice", "h1")
         header.addWidget(self.title_lbl)
@@ -11512,16 +9960,14 @@ class InvoiceFormFrame(QWidget):
         label.setFixedWidth(label_width)
         lay.addWidget(label)
         lay.addWidget(widget, 1)
-        row.label = label  # so a caption can be changed later (e.g. "Default GST Rate")
+        row.label = label                      # so a caption can be changed later (e.g. "Default GST Rate")
         return row
 
     @staticmethod
     def _text_box(placeholder: str) -> PlaceholderText:
         box = PlaceholderText(placeholder=placeholder, height=3)
         box.setAcceptRichText(False)
-        box.setTabChangesFocus(
-            True
-        )  # Tab moves on (a literal tab character makes no sense in an address)
+        box.setTabChangesFocus(True)          # Tab moves on (a literal tab character makes no sense in an address)
         return box
 
     # ---- Billing (Bill To / From) ------------------------------------ #
@@ -11588,14 +10034,10 @@ class InvoiceFormFrame(QWidget):
         self.due_combo = QComboBox()
         for text, days in DUE_CHOICES:
             self.due_combo.addItem(text, days)
-        self.due_combo.setSizeAdjustPolicy(
-            QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
-        )
+        self.due_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
         self.due_combo.setMinimumContentsLength(10)
-        self.due_combo.setToolTip(
-            "When payment is due: a number of days after the invoice date, or a date you pick.\n"
-            "The due date is printed on the invoice."
-        )
+        self.due_combo.setToolTip("When payment is due: a number of days after the invoice date, or a date you pick.\n"
+                                  "The due date is printed on the invoice.")
         self.due_combo.activated.connect(self._on_due_chosen)
         guard_wheel(self.due_combo)
         lay.addWidget(self._labeled("Due Date", self.due_combo))
@@ -11603,9 +10045,7 @@ class InvoiceFormFrame(QWidget):
         self.due_date_edit.setEnabled(False)
         self.due_date_edit.dateChanged.connect(self._on_due_date_edited)
         advance_on_enter(self.due_date_edit)
-        self._due_date_row = self._labeled(
-            "Due On", self.due_date_edit
-        )  # shown only while there is a due date
+        self._due_date_row = self._labeled("Due On", self.due_date_edit)       # shown only while there is a due date
         self._due_date_row.setVisible(False)
         lay.addWidget(self._due_date_row)
 
@@ -11616,49 +10056,37 @@ class InvoiceFormFrame(QWidget):
 
         self.po_entry = QLineEdit()
         self.po_entry.setMaxLength(60)
-        self.po_entry.setPlaceholderText(
-            "Your customer's PO / reference number (optional)"
-        )
+        self.po_entry.setPlaceholderText("Your customer's PO / reference number (optional)")
         advance_on_enter(self.po_entry)
         lay.addWidget(self._labeled("PO / Reference No.", self.po_entry))
 
         self.template_combo = QComboBox()
-        self.template_combo.setSizeAdjustPolicy(
-            QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
-        )
+        self.template_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
         self.template_combo.setMinimumContentsLength(10)
-        self.template_combo.setToolTip(
-            'The look this invoice is printed in.\n"Default" is the template picked in '
-            "Settings > PDF."
-        )
+        self.template_combo.setToolTip("The look this invoice is printed in.\n\"Default\" is the look you chose in "
+                                       "Settings > Invoice Design.")
         guard_wheel(self.template_combo)
         self._fill_template_combo()
-        lay.addWidget(self._labeled("PDF Template", self.template_combo))
+        lay.addWidget(self._labeled("Invoice Look", self.template_combo))
 
         self.watermark_combo = QComboBox()
-        self.watermark_combo.setSizeAdjustPolicy(
-            QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
-        )
+        self.watermark_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
         self.watermark_combo.setMinimumContentsLength(10)
-        self.watermark_combo.setToolTip(
-            "The faint PAID / BALANCE DUE ... stamp across the printed invoice: turn it on or off "
-            'for this invoice.\n"Default" follows Settings > PDF.'
-        )
+        self.watermark_combo.setToolTip("The faint PAID / BALANCE DUE stamp across the printed invoice: turn it on or off "
+                                        "for this invoice.\n\"Default\" follows Settings > Invoice Design.")
         guard_wheel(self.watermark_combo)
         self._fill_watermark_combo()
         lay.addWidget(self._labeled("Status Watermark", self.watermark_combo))
 
         lay.addSpacing(4)
-        self.no_charge_toggle = ToggleSwitch("Mark as Complimentary (No Charge)")
+        self.no_charge_toggle = ToggleSwitch("Free of charge (complimentary) - nothing to pay")
         self.no_charge_toggle.clicked.connect(self._toggle_no_charge)
         lay.addWidget(self.no_charge_toggle)
-        self.show_qr_toggle = ToggleSwitch("Show UPI QR Code on PDF")
+        self.show_qr_toggle = ToggleSwitch("Print a UPI QR code for easy payment")
         self.show_qr_toggle.setChecked(True)
         lay.addWidget(self.show_qr_toggle)
         self.reverse_toggle = ToggleSwitch("Reverse charge applies")
-        self.reverse_toggle.setToolTip(
-            'The tax is paid by the customer, not by you: prints "Reverse Charge: Yes" on a GST invoice'
-        )
+        self.reverse_toggle.setToolTip("The tax is paid by the customer, not by you: prints \"Reverse Charge: Yes\" on a GST invoice")
         lay.addWidget(self.reverse_toggle)
         lay.addStretch()
         row.addWidget(left, 1)
@@ -11667,22 +10095,16 @@ class InvoiceFormFrame(QWidget):
         lay.setSpacing(8)
         self.gst_toggle = ToggleSwitch("This is a GST Invoice")
         self.gst_toggle.setChecked(True)
-        self.gst_toggle.clicked.connect(
-            self._on_gst_toggle
-        )  # toggling GST immediately recalculates the totals
+        self.gst_toggle.clicked.connect(self._on_gst_toggle)          # toggling GST immediately recalculates the totals
         lay.addWidget(self.gst_toggle)
 
         self.tax_mode_combo = QComboBox()
         self.tax_mode_combo.addItem("One rate for the whole invoice", TAX_MODE_OVERALL)
         self.tax_mode_combo.addItem("A rate for each item", TAX_MODE_PER_ITEM)
-        self.tax_mode_combo.setToolTip(
-            "Overall: one GST rate on everything.  Per item: every item line gets its own GST % "
-            "and the totals show tax per rate."
-        )
+        self.tax_mode_combo.setToolTip("Overall: one GST rate on everything.  Per item: every item line gets its own GST % "
+                                       "and the totals show tax per rate.")
         self.tax_mode_combo.currentIndexChanged.connect(self._on_tax_mode_changed)
-        self.tax_mode_combo.setSizeAdjustPolicy(
-            QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
-        )
+        self.tax_mode_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
         self.tax_mode_combo.setMinimumContentsLength(12)
         guard_wheel(self.tax_mode_combo)
         lay.addWidget(self._labeled("GST Applied", self.tax_mode_combo))
@@ -11697,9 +10119,7 @@ class InvoiceFormFrame(QWidget):
 
         self.gst_type_combo = QComboBox()
         self.gst_type_combo.addItems(["CGST/SGST", "IGST"])
-        self.gst_type_combo.currentTextChanged.connect(
-            self._recalc_totals
-        )  # live update when switching CGST <-> IGST
+        self.gst_type_combo.currentTextChanged.connect(self._recalc_totals)   # live update when switching CGST <-> IGST
         guard_wheel(self.gst_type_combo)
         lay.addWidget(self._labeled("Tax Split Type", self.gst_type_combo))
 
@@ -11707,22 +10127,16 @@ class InvoiceFormFrame(QWidget):
         self.place_combo.setEditable(True)
         self.place_combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
         self.place_combo.addItems([state_label(code) for code, _name in INDIAN_STATES])
-        self.place_combo.setSizeAdjustPolicy(
-            QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
-        )
+        self.place_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
         self.place_combo.setMinimumContentsLength(12)
         self.place_combo.setCurrentIndex(-1)
-        self.place_combo.lineEdit().setPlaceholderText(
-            "State the supply is made to (optional)"
-        )
+        self.place_combo.lineEdit().setPlaceholderText("State the supply is made to (optional)")
         self.place_combo.lineEdit().setMaxLength(60)
         place_completer = QCompleter(self.place_combo.model(), self.place_combo)
         place_completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
         place_completer.setFilterMode(Qt.MatchFlag.MatchContains)
         self.place_combo.setCompleter(place_completer)
-        self.place_combo.setToolTip(
-            "Another state than yours switches the tax split to IGST; your own state to CGST/SGST"
-        )
+        self.place_combo.setToolTip("Another state than yours switches the tax split to IGST; your own state to CGST/SGST")
         self.place_combo.currentTextChanged.connect(self._on_place_changed)
         self.place_combo.lineEdit().textEdited.connect(self._on_place_typed)
         self.place_combo.activated.connect(self._on_place_typed)
@@ -11755,51 +10169,46 @@ class InvoiceFormFrame(QWidget):
         row.addWidget(right, 1)
         parent.addLayout(row)
 
-        self.gst_dependents = [
-            self.tax_mode_combo,
-            self.tax_rate_entry,
-            self.gst_type_combo,
-            self.place_combo,
-            self.reverse_toggle,
-        ]
+        self.gst_dependents = [self.tax_mode_combo, self.tax_rate_entry, self.gst_type_combo, self.place_combo,
+                               self.reverse_toggle]
 
     def _fill_template_combo(self):
-        """ "Default (<the template picked in Settings>)", then every template; the choice is kept across a refill."""
-        chosen = (
-            self.template_combo.currentData() if self.template_combo.count() else ""
-        )
-        default = PDF_TEMPLATES.get(
-            (CONFIG.get("pdf_settings") or {}).get("template"), PDF_TEMPLATE_CLASSIC
-        )
+        """"Default (<the template picked in Settings>)", then every template; the choice is kept across a refill."""
+        chosen = self.template_combo.currentData() if self.template_combo.count() else ""
+        default = PDF_TEMPLATES.get((CONFIG.get("pdf_settings") or {}).get("template"), PDF_TEMPLATE_CLASSIC)
         self.template_combo.clear()
         self.template_combo.addItem(f"Default ({default.label})", "")
         for tpl in PDF_TEMPLATES.values():
             self.template_combo.addItem(tpl.label, tpl.key)
-        self.template_combo.setCurrentIndex(
-            max(0, self.template_combo.findData(chosen or ""))
-        )
+        self.template_combo.setCurrentIndex(max(0, self.template_combo.findData(chosen or "")))
 
     def _fill_watermark_combo(self):
-        """ "Default (On|Off)" -- what Settings says -- then On and Off; the choice is kept across a refill."""
-        chosen = (
-            self.watermark_combo.currentData()
-            if self.watermark_combo.count()
-            else WATERMARK_DEFAULT
-        )
+        """"Default (On|Off)" -- what Settings says -- then On and Off; the choice is kept across a refill."""
+        chosen = self.watermark_combo.currentData() if self.watermark_combo.count() else WATERMARK_DEFAULT
         on = bool((CONFIG.get("pdf_settings") or {}).get("status_watermark", True))
         self.watermark_combo.clear()
-        self.watermark_combo.addItem(
-            f"Default ({'On' if on else 'Off'})", WATERMARK_DEFAULT
-        )
+        self.watermark_combo.addItem(f"Default ({'On' if on else 'Off'})", WATERMARK_DEFAULT)
         self.watermark_combo.addItem("On", WATERMARK_SHOW)
         self.watermark_combo.addItem("Off", WATERMARK_HIDE)
-        self.watermark_combo.setCurrentIndex(
-            max(0, self.watermark_combo.findData(chosen or WATERMARK_DEFAULT))
-        )
+        self.watermark_combo.setCurrentIndex(max(0, self.watermark_combo.findData(chosen or WATERMARK_DEFAULT)))
 
     def _toggle_no_charge(self, _checked: bool = False):
+        self._sync_free_invoice_terms()
         self._apply_field_states()
         self._recalc_totals()
+
+    def _sync_free_invoice_terms(self):
+        """A free (complimentary) invoice starts with the payment terms "No payment required"; switching it off brings
+        back the usual terms. Only an empty or untouched box is replaced -- terms the user typed are left alone."""
+        if self._loading:
+            return
+        text = self.payment_terms_entry.text().strip()
+        usual = str(CONFIG.get("payment_details", {}).get("payment_terms", "") or "").strip()
+        if self.no_charge_toggle.isChecked():
+            if not text or text == usual:
+                self.payment_terms_entry.setText(NO_PAYMENT_TERMS)
+        elif text == NO_PAYMENT_TERMS:
+            self.payment_terms_entry.setText(usual)
 
     def _on_gst_toggle(self, _checked: bool = False):
         self._apply_field_states()
@@ -11818,8 +10227,7 @@ class InvoiceFormFrame(QWidget):
 
     def _on_place_changed(self, text: str):
         """Choosing where the supply goes decides the tax split: another state than the seller's is IGST, the
-        seller's own state CGST/SGST. (Loading a saved invoice never changes what was saved.)
-        """
+        seller's own state CGST/SGST. (Loading a saved invoice never changes what was saved.)"""
         if self._loading:
             return
         kind = gst_type_for_place(CONFIG, text)
@@ -11827,14 +10235,11 @@ class InvoiceFormFrame(QWidget):
             self.gst_type_combo.setCurrentText(kind)
 
     def _on_place_typed(self, *_):
-        self._place_auto = (
-            False  # the user chose the place: a customer's GSTIN no longer overrides it
-        )
+        self._place_auto = False             # the user chose the place: a customer's GSTIN no longer overrides it
 
     def _autofill_place_from_gstin(self, *_):
         """A valid customer GSTIN names the customer's state: it becomes the place of supply, unless the user chose
-        one (a place filled in this way follows the GSTIN when another customer is picked).
-        """
+        one (a place filled in this way follows the GSTIN when another customer is picked)."""
         gstin = self.client_gstin_entry.text().strip().upper()
         if self._loading or not is_valid_gstin(gstin):
             return
@@ -11848,14 +10253,10 @@ class InvoiceFormFrame(QWidget):
         """How many days after the invoice date a due date starts at: read from the payment terms ("Net 15",
         "30 days"), 0 for "on receipt", else 15."""
         terms = self.payment_terms_entry.text()
-        found = re.search(
-            r"\bnet\s*(\d{1,3})\b|\b(\d{1,3})\s*days?\b", terms, re.IGNORECASE
-        )
+        found = re.search(r"\bnet\s*(\d{1,3})\b|\b(\d{1,3})\s*days?\b", terms, re.IGNORECASE)
         if found:
             return int(found.group(1) or found.group(2))
-        return (
-            0 if re.search(r"receipt|immediate|advance", terms, re.IGNORECASE) else 15
-        )
+        return 0 if re.search(r"receipt|immediate|advance", terms, re.IGNORECASE) else 15
 
     def _set_due_in(self, days: int):
         due = date_edit_value(self.invoice_date_edit) + datetime.timedelta(days=days)
@@ -11910,11 +10311,9 @@ class InvoiceFormFrame(QWidget):
         set_date_edit_from_db(self.due_date_edit, due)
         self._set_due_active(True)
         try:
-            days = (
-                datetime.datetime.strptime(due, DB_DATE_FORMAT)
-                - datetime.datetime.strptime(invoice_date or "", DB_DATE_FORMAT)
-            ).days
-        except TypeError, ValueError:
+            days = (datetime.datetime.strptime(due, DB_DATE_FORMAT)
+                    - datetime.datetime.strptime(invoice_date or "", DB_DATE_FORMAT)).days
+        except (TypeError, ValueError):
             days = -1
         index = self.due_combo.findData(days) if days >= 0 else -1
         if index > 0:
@@ -11925,26 +10324,20 @@ class InvoiceFormFrame(QWidget):
 
     def _per_item_active(self) -> bool:
         """True when GST is charged per item (and there is GST to charge at all)."""
-        return (
-            self.gst_toggle.isChecked()
-            and not self.no_charge_toggle.isChecked()
-            and self.tax_mode_combo.currentData() == TAX_MODE_PER_ITEM
-        )
+        return (self.gst_toggle.isChecked() and not self.no_charge_toggle.isChecked()
+                and self.tax_mode_combo.currentData() == TAX_MODE_PER_ITEM)
 
     def _apply_field_states(self):
         no_charge = self.no_charge_toggle.isChecked()
-        is_gst = self.gst_toggle.isChecked() and not no_charge
+        is_gst    = self.gst_toggle.isChecked() and not no_charge
         for w in self.gst_dependents:
             w.setEnabled(is_gst)
         self.round_off_toggle.setEnabled(not no_charge)
         per_item = self._per_item_active()
         for item_row in self.item_rows:
             item_row.set_per_item(per_item)
-        self._tax_rate_row.label.setText(
-            "Default GST Rate (%)"
-            if self.tax_mode_combo.currentData() == TAX_MODE_PER_ITEM
-            else "GST / Tax Rate (%)"
-        )
+        self._tax_rate_row.label.setText("Default GST Rate (%)" if self.tax_mode_combo.currentData() == TAX_MODE_PER_ITEM
+                                         else "GST / Tax Rate (%)")
         self.add_payment_btn.setEnabled(not no_charge)
         for row in self.payment_rows:
             row.set_editable(not no_charge)
@@ -11954,25 +10347,15 @@ class InvoiceFormFrame(QWidget):
     # ---- Items ---------------------------------------------------------- #
     def _section_items(self, parent: QVBoxLayout):
         card, lay = self._card("Items")
-        lay.addWidget(
-            make_label(
-                "Quantity × rate is the line amount. Pick a unit or type your own; a discount can be an "
-                "amount (150) or a percentage (10%). Press Enter in an item's last field to start the next one.",
-                "muted",
-                wrap=True,
-            )
-        )
+        lay.addWidget(make_label("Quantity × rate is the line amount. Pick a unit or type your own; a discount can be an "
+                                 "amount (150) or a percentage (10%). Press Enter in an item's last field to start the next one.",
+                                 "muted", wrap=True))
         lay.addSpacing(8)
         header = QHBoxLayout()
         header.setSpacing(_ROW_GAP)
         header.addWidget(make_label("ITEM / SERVICE", "section"), 1)
-        for text, width in (
-            ("QTY", _QTY_W),
-            ("UNIT", _UNIT_W),
-            ("RATE", _AMOUNT_W),
-            ("DISCOUNT", _DISC_W),
-            ("AMOUNT", _LINE_W),
-        ):
+        for text, width in (("QTY", _QTY_W), ("UNIT", _UNIT_W), ("RATE", _AMOUNT_W), ("DISCOUNT", _DISC_W),
+                            ("AMOUNT", _LINE_W)):
             caption = make_label(text, "section", align=Qt.AlignmentFlag.AlignCenter)
             caption.setFixedWidth(width)
             header.addWidget(caption)
@@ -11986,12 +10369,8 @@ class InvoiceFormFrame(QWidget):
         lay.addLayout(self.items_layout)
         lay.addSpacing(10)
         row = QHBoxLayout()
-        self.add_item_btn = make_button(
-            "＋  Add Item  (Ctrl+Shift+A)",
-            "secondary-outline",
-            self._add_item_row_clicked,
-            tooltip="Add a blank item row (Ctrl+Shift+A or Ctrl+Plus)",
-        )
+        self.add_item_btn = make_button("＋  Add Item  (Ctrl+Shift+A)", "secondary-outline", self._add_item_row_clicked,
+                                        tooltip="Add a blank item row (Ctrl+Shift+A or Ctrl+Plus)")
         row.addWidget(self.add_item_btn)
         row.addStretch()
         lay.addLayout(row)
@@ -12007,17 +10386,12 @@ class InvoiceFormFrame(QWidget):
         row.set_per_item(self._per_item_active())
         if item is not None:
             row.load_item(item)
-            self._on_item_title_edited(
-                row, row.title_edit.text()
-            )  # offer the units its catalog item is sold in
+            self._on_item_title_edited(row, row.title_edit.text())          # offer the units its catalog item is sold in
         row.changed.connect(self._recalc_totals)
         row.remove_requested.connect(self._remove_item_row)
         row.title_picked.connect(self._on_catalog_picked)
         row.title_edited.connect(self._on_item_title_edited)
-        for last in (
-            row.hsn_edit,
-            row.gst_combo,
-        ):  # Enter in the last field starts the next row
+        for last in (row.hsn_edit, row.gst_combo):                            # Enter in the last field starts the next row
             last.installEventFilter(_EnterAddsRow(row, self))
         self.items_layout.addWidget(row)
         self.item_rows.append(row)
@@ -12038,11 +10412,7 @@ class InvoiceFormFrame(QWidget):
     def _catalog_entry(self, title: str) -> Optional[Dict[str, Any]]:
         """The catalog item called `title` (the exact spelling first, then ignoring upper / lower case)."""
         entry = self._catalog_exact.get(title)
-        return (
-            entry
-            if entry is not None
-            else self._catalog_fold.get(title.strip().casefold())
-        )
+        return entry if entry is not None else self._catalog_fold.get(title.strip().casefold())
 
     def _on_catalog_picked(self, row: _ItemRow, chosen: str):
         # Matched against the text the user actually chose, so a still-visible placeholder can never be
@@ -12051,7 +10421,7 @@ class InvoiceFormFrame(QWidget):
         if entry is not None:
             row.desc_edit.setText(entry.get("description") or "")
             row.desc_edit.setCursorPosition(0)
-            row.apply_catalog(entry)  # rate, unit, HSN/SAC and GST rate of the item
+            row.apply_catalog(entry)                  # rate, unit, HSN/SAC and GST rate of the item
         self._recalc_totals()
 
     def _on_item_title_edited(self, row: _ItemRow, text: str):
@@ -12063,11 +10433,7 @@ class InvoiceFormFrame(QWidget):
     # ---- Payment History ------------------------------------------------ #
     def _section_payments(self, parent: QVBoxLayout):
         card, lay = self._card("Payment History")
-        lay.addWidget(
-            make_label(
-                "Log each payment received. Status updates automatically.", "muted"
-            )
-        )
+        lay.addWidget(make_label("Log each payment received. Status updates automatically.", "muted"))
         lay.addSpacing(8)
         header = QHBoxLayout()
         header.setSpacing(_ROW_GAP)
@@ -12077,9 +10443,13 @@ class InvoiceFormFrame(QWidget):
         amount_hdr.setFixedWidth(_AMOUNT_W)
         mode_hdr = make_label("MODE", "section")
         mode_hdr.setFixedWidth(_MODE_W)
+        ref_hdr = make_label("REFERENCE", "section")
+        ref_hdr.setFixedWidth(_REF_W)
+        ref_hdr.setToolTip("UPI: the 12-digit UTR number. Cheque: the cheque number. Bank transfer or card: the reference number.")
         header.addWidget(date_hdr)
         header.addWidget(amount_hdr)
         header.addWidget(mode_hdr)
+        header.addWidget(ref_hdr)
         header.addWidget(make_label("NOTE", "section"), 1)
         header.addSpacing(_REMOVE_W)
         lay.addLayout(header)
@@ -12091,9 +10461,7 @@ class InvoiceFormFrame(QWidget):
         lay.addLayout(self.payments_layout)
         lay.addSpacing(10)
         row = QHBoxLayout()
-        self.add_payment_btn = make_button(
-            "＋  Add Payment", "secondary-outline", self._add_payment_row_clicked
-        )
+        self.add_payment_btn = make_button("＋  Add Payment", "secondary-outline", self._add_payment_row_clicked)
         row.addWidget(self.add_payment_btn)
         row.addStretch()
         lay.addLayout(row)
@@ -12102,15 +10470,9 @@ class InvoiceFormFrame(QWidget):
     def _add_payment_row_clicked(self):
         self._add_payment_row()
 
-    def _add_payment_row(
-        self,
-        amount: float = 0.0,
-        payment_date: Optional[str] = None,
-        mode: str = "Cash",
-        note: str = "",
-        payment_id: Optional[int] = None,
-    ) -> _PaymentRow:
-        row = _PaymentRow(amount, payment_date, mode, note, payment_id)
+    def _add_payment_row(self, amount: float = 0.0, payment_date: Optional[str] = None, mode: str = "Cash",
+                         note: str = "", payment_id: Optional[int] = None, reference: str = "") -> _PaymentRow:
+        row = _PaymentRow(amount, payment_date, mode, note, payment_id, reference=reference)
         row.changed.connect(self._recalc_totals)
         row.remove_requested.connect(self._remove_payment_row)
         row.set_editable(not self.no_charge_toggle.isChecked())
@@ -12133,13 +10495,23 @@ class InvoiceFormFrame(QWidget):
     # ---- Notes & Terms (printed) ------------------------------------------ #
     def _section_print_notes(self, parent: QVBoxLayout):
         card, lay = self._card("Notes & Terms")
-        lay.addWidget(
-            make_label(
-                "Printed on the invoice, under the totals. Leave a box empty to print nothing.",
-                "muted",
-                wrap=True,
-            )
-        )
+        lay.addWidget(make_label("Choose what is printed on the invoice, under the totals. A box you leave empty prints nothing.",
+                                 "muted", wrap=True))
+        lay.addSpacing(8)
+        choose = QHBoxLayout()
+        choose.setSpacing(10)
+        choose.addWidget(_caption("Print on the invoice"))
+        self.print_extras_combo = QComboBox()
+        for key, label in PRINT_EXTRAS_CHOICES:
+            self.print_extras_combo.addItem(label, key)
+        self.print_extras_combo.setToolTip("Print the note, the terms, both, or neither on this invoice. "
+                                           "Whatever you leave out is only hidden, not deleted.")
+        self.print_extras_combo.setMinimumWidth(250)
+        guard_wheel(self.print_extras_combo)
+        self.print_extras_combo.currentIndexChanged.connect(self._on_print_extras_changed)
+        choose.addWidget(self.print_extras_combo)
+        choose.addStretch(1)
+        lay.addLayout(choose)
         lay.addSpacing(8)
         row = QHBoxLayout()
         row.setSpacing(16)
@@ -12156,60 +10528,43 @@ class InvoiceFormFrame(QWidget):
         head = QHBoxLayout()
         head.addWidget(_caption("Terms & Conditions"))
         head.addStretch()
-        self.default_terms_btn = make_button(
-            "Use default terms",
-            "link",
-            self._use_default_terms,
-            tooltip="Fill this box with the default terms from Settings > Invoice PDF",
-        )
+        self.default_terms_btn = make_button("Use default terms", "link", self._use_default_terms,
+                                             tooltip="Fill this box with the default terms from Settings > Invoice Design")
         self.default_terms_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         head.addWidget(self.default_terms_btn)
         right.addLayout(head)
-        self.terms_text = self._text_box(
-            "e.g. Payment within 15 days. Late fee 2% per month."
-        )
+        self.terms_text = self._text_box("e.g. Payment within 15 days. Late fee 2% per month.")
         right.addWidget(self.terms_text)
         row.addLayout(right, 1)
         lay.addLayout(row)
         parent.addWidget(card)
 
+    def _on_print_extras_changed(self, _index: int = 0):
+        """A box that will not be printed is greyed out (its text is kept, in case the choice is changed back)."""
+        choice = self.print_extras_combo.currentData() or "both"
+        self.customer_notes_text.setEnabled(choice in ("both", "notes"))
+        self.terms_text.setEnabled(choice in ("both", "terms"))
+        self.default_terms_btn.setEnabled(choice in ("both", "terms"))
+
     def _use_default_terms(self):
-        default = str(
-            CONFIG.get("pdf_settings", {}).get("default_terms", "") or ""
-        ).strip()
+        default = str(CONFIG.get("pdf_settings", {}).get("default_terms", "") or "").strip()
         if not default:
-            Messagebox.show_info(
-                "No Default Terms",
-                "No default terms have been set yet.\nAdd them in Settings > Invoice PDF > Footer and terms.",
-                parent=self.controller,
-            )
+            Messagebox.show_info("No Default Terms",
+                                 "No default terms have been set yet.\nAdd them in Settings > Invoice Design > Footer and terms.",
+                                 parent=self.controller)
             return
         current = self.terms_text.toPlainText().strip()
-        if (
-            current
-            and current != default
-            and not Messagebox.yesno(
-                "Replace Terms?",
-                "Replace the terms written here with the default terms?",
-                parent=self.controller,
-            )
-        ):
+        if current and current != default and not Messagebox.yesno(
+                "Replace Terms?", "Replace the terms written here with the default terms?", parent=self.controller):
             return
         self.terms_text.setPlainText(default)
 
     # ---- Notes ------------------------------------------------------------ #
     def _section_notes(self, parent: QVBoxLayout):
         card, lay = self._card("Internal Notes")
-        lay.addWidget(
-            make_label(
-                "Visible only inside Vyaprix — never printed on the invoice PDF.",
-                "muted",
-            )
-        )
+        lay.addWidget(make_label("Visible only inside Vyaprix — never printed on the invoice PDF.", "muted"))
         lay.addSpacing(6)
-        self.notes_text = self._text_box(
-            "Internal notes (optional) — not shown on the PDF"
-        )
+        self.notes_text = self._text_box("Internal notes (optional) — not shown on the PDF")
         lay.addWidget(self.notes_text)
         parent.addWidget(card)
 
@@ -12223,35 +10578,22 @@ class InvoiceFormFrame(QWidget):
         self.summary_layout.setContentsMargins(0, 0, 0, 0)
         self.summary_layout.setSpacing(0)
 
-        self.row_subtotal = _SummaryRow("Subtotal:")
-        self.row_disc = _SummaryRow("Discount:")
-        self.row_taxable = _SummaryRow("Taxable Amount:")
-        self.row_round = _SummaryRow("Round Off:")
+        self.row_subtotal    = _SummaryRow("Subtotal:")
+        self.row_disc        = _SummaryRow("Discount:")
+        self.row_taxable     = _SummaryRow("Taxable Amount:")
+        self.row_round       = _SummaryRow("Round Off:")
         self.row_grand_total = _SummaryRow("Grand Total:", bold=True)
-        self.row_paid = _SummaryRow("Total Paid:")
-        self.row_balance = _SummaryRow(
-            "Balance Due:", bold=True
-        )  # flips to "Advance / Credit:" when overpaid
+        self.row_paid        = _SummaryRow("Total Paid:")
+        self.row_balance     = _SummaryRow("Balance Due:", bold=True)     # flips to "Advance / Credit:" when overpaid
         # The tax lines (one CGST and one SGST, or one IGST) are made on demand and slotted in between
         # "Taxable Amount" and "Round Off", so _summary_rows is always in on-screen order.
         self._tax_pool: List[_SummaryRow] = []
-        self._summary_rows: List[_SummaryRow] = [
-            self.row_subtotal,
-            self.row_disc,
-            self.row_taxable,
-            self.row_round,
-            self.row_grand_total,
-            self.row_paid,
-            self.row_balance,
-        ]
+        self._summary_rows: List[_SummaryRow] = [self.row_subtotal, self.row_disc, self.row_taxable, self.row_round,
+                                                 self.row_grand_total, self.row_paid, self.row_balance]
         for r in self._summary_rows:
             self.summary_layout.addWidget(r)
-        self.words_lbl = make_label(
-            "",
-            "muted",
-            wrap=True,
-            align=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignTop,
-        )
+        self.words_lbl = make_label("", "muted", wrap=True,
+                                    align=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignTop)
         self.words_lbl.setMaximumWidth(440)
         self.words_lbl.setVisible(False)
         self.summary_layout.addSpacing(4)
@@ -12266,9 +10608,7 @@ class InvoiceFormFrame(QWidget):
         while len(self._tax_pool) <= index:
             row = _SummaryRow()
             row.setVisible(False)
-            self.summary_layout.insertWidget(
-                self.summary_layout.indexOf(self.row_round), row
-            )
+            self.summary_layout.insertWidget(self.summary_layout.indexOf(self.row_round), row)
             self._summary_rows.insert(self._summary_rows.index(self.row_round), row)
             self._tax_pool.append(row)
         return self._tax_pool[index]
@@ -12277,22 +10617,12 @@ class InvoiceFormFrame(QWidget):
         row = QHBoxLayout()
         row.setContentsMargins(0, 4, 0, 12)
         row.addStretch()
-        self.save_btn = make_button(
-            "💾  Save Invoice  (Ctrl+S)",
-            "success",
-            self._save,
-            tooltip="Save this invoice (Ctrl+S)",
-            min_height=40,
-        )
+        self.save_btn = make_button("💾  Save Invoice  (Ctrl+S)", "success", self._save, tooltip="Save this invoice (Ctrl+S)",
+                                    min_height=40)
         row.addWidget(self.save_btn)
         row.addSpacing(8)
-        self.back_btn = make_button(
-            "←  Back to Dashboard  (Esc)",
-            "secondary",
-            self._go_back,
-            tooltip="Return to the invoice list (Esc). Unsaved changes will ask first.",
-            min_height=40,
-        )
+        self.back_btn = make_button("←  Back to Invoices  (Esc)", "secondary", self._go_back,
+                                    tooltip="Return to the invoice list (Esc). Unsaved changes will ask first.", min_height=40)
         row.addWidget(self.back_btn)
         parent.addLayout(row)
 
@@ -12301,50 +10631,23 @@ class InvoiceFormFrame(QWidget):
 
     def _restore_tab_order(self):
         """Qt appends widgets created later (new item / payment rows) to the END of the focus chain; this rebuilds
-        the chain in on-screen order after every structural change, so Tab / Enter always go to the next field.
-        """
+        the chain in on-screen order after every structural change, so Tab / Enter always go to the next field."""
         chain: List[QWidget] = [
-            self.top_back_btn,
-            self.client_edit,
-            self.client_contact_text,
-            self.client_gstin_entry,
-            self.your_name_entry,
-            self.your_contact_text,
-            self.invoice_number_entry,
-            self.invoice_date_edit,
-            self.due_combo,
-            self.due_date_edit,
-            self.payment_terms_entry,
-            self.po_entry,
-            self.template_combo,
-            self.watermark_combo,
-            self.no_charge_toggle,
-            self.show_qr_toggle,
-            self.reverse_toggle,
-            self.gst_toggle,
-            self.tax_mode_combo,
-            self.tax_rate_entry,
-            self.gst_type_combo,
-            self.place_combo,
-            self.global_discount_entry,
-            self.disc_type_combo,
-            self.round_off_toggle,
+            self.top_back_btn, self.client_edit, self.client_contact_text, self.client_gstin_entry,
+            self.your_name_entry, self.your_contact_text,
+            self.invoice_number_entry, self.invoice_date_edit, self.due_combo, self.due_date_edit,
+            self.payment_terms_entry, self.po_entry, self.template_combo, self.watermark_combo,
+            self.no_charge_toggle, self.show_qr_toggle, self.reverse_toggle,
+            self.gst_toggle, self.tax_mode_combo, self.tax_rate_entry, self.gst_type_combo, self.place_combo,
+            self.global_discount_entry, self.disc_type_combo, self.round_off_toggle,
         ]
         for r in self.item_rows:
             chain.extend(r.focus_widgets())
         chain.append(self.add_item_btn)
         for r in self.payment_rows:
             chain.extend(r.focus_widgets())
-        chain.extend(
-            [
-                self.add_payment_btn,
-                self.customer_notes_text,
-                self.terms_text,
-                self.notes_text,
-                self.save_btn,
-                self.back_btn,
-            ]
-        )
+        chain.extend([self.add_payment_btn, self.print_extras_combo, self.customer_notes_text, self.terms_text,
+                      self.notes_text, self.save_btn, self.back_btn])
         for first, second in zip(chain, chain[1:]):
             QWidget.setTabOrder(first, second)
 
@@ -12360,16 +10663,13 @@ class InvoiceFormFrame(QWidget):
                 new_gstin = c.get("gstin") or ""
 
                 # Fields that already hold different, typed-in data must not be wiped silently.
-                needs_prompt = bool(
-                    (current_contact and current_contact != new_contact)
-                    or (current_gstin and current_gstin != new_gstin)
-                )
+                needs_prompt = bool((current_contact and current_contact != new_contact)
+                                    or (current_gstin and current_gstin != new_gstin))
                 if needs_prompt and not Messagebox.yesno(
-                    "Overwrite Contact Info?",
-                    f"Do you want to replace the current contact info and GSTIN with the saved details for {chosen}?",
-                    parent=self.controller,
-                ):
-                    break  # user clicked No: leave their typed text alone
+                        "Overwrite Contact Info?",
+                        f"Do you want to replace the current contact info and GSTIN with the saved details for {chosen}?",
+                        parent=self.controller):
+                    break                                      # user clicked No: leave their typed text alone
                 self.client_contact_text.setPlainText(new_contact)
                 self.client_gstin_entry.setText(new_gstin)
                 self.client_gstin_entry.setCursorPosition(0)
@@ -12383,51 +10683,45 @@ class InvoiceFormFrame(QWidget):
 
     def _filled_items(self) -> List[Dict]:
         """The lines that make up the invoice: a row nothing has been entered in is ignored (live totals and save)."""
-        return [
-            i
-            for i in self._collect_items()
-            if i["title"] or i["description"] or i["amount"]
-        ]
+        return [i for i in self._collect_items() if i["title"] or i["description"] or i["amount"]]
 
     def _collect_payments(self) -> List[Dict]:
         return [r.values() for r in self.payment_rows]
 
     def _snapshot(self) -> str:
         """The whole editable state as a string, to tell "changed" from "just looked at". Numbers are compared as
-        numbers, not as text, so tabbing through a field that re-formats itself ("18" -> "18.00") is not a change.
-        """
+        numbers, not as text, so tabbing through a field that re-formats itself ("18" -> "18.00") is not a change."""
         try:
             state = {
                 "invoice_number": self.invoice_number_entry.text().strip(),
-                "bill_to": self.client_edit.text().strip(),
+                "bill_to":        self.client_edit.text().strip(),
                 "client_contact": self.client_contact_text.toPlainText().strip(),
-                "client_gstin": self.client_gstin_entry.text().strip(),
-                "your_name": self.your_name_entry.text().strip(),
-                "your_contact": self.your_contact_text.toPlainText().strip(),
-                "invoice_date": date_edit_db(self.invoice_date_edit),
-                "due_date": (
-                    date_edit_db(self.due_date_edit) if self._due_on() else None
-                ),
-                "payment_terms": self.payment_terms_entry.text().strip(),
-                "po_number": self.po_entry.text().strip(),
-                "pdf_template": self.template_combo.currentData() or "",
-                "pdf_watermark": self.watermark_combo.currentData() or "",
-                "notes": self.notes_text.toPlainText().strip(),
+                "client_gstin":   self.client_gstin_entry.text().strip(),
+                "your_name":      self.your_name_entry.text().strip(),
+                "your_contact":   self.your_contact_text.toPlainText().strip(),
+                "invoice_date":   date_edit_db(self.invoice_date_edit),
+                "due_date":       date_edit_db(self.due_date_edit) if self._due_on() else None,
+                "payment_terms":  self.payment_terms_entry.text().strip(),
+                "po_number":      self.po_entry.text().strip(),
+                "pdf_template":   self.template_combo.currentData() or "",
+                "pdf_watermark":  self.watermark_combo.currentData() or "",
+                "notes":          self.notes_text.toPlainText().strip(),
                 "customer_notes": self.customer_notes_text.toPlainText().strip(),
-                "terms": self.terms_text.toPlainText().strip(),
-                "no_charge": self.no_charge_toggle.isChecked(),
-                "show_qr": self.show_qr_toggle.isChecked(),
-                "reverse": self.reverse_toggle.isChecked(),
-                "gst": self.gst_toggle.isChecked(),
-                "tax_mode": self.tax_mode_combo.currentData(),
-                "tax_rate": safe_float(self.tax_rate_entry.text()),
-                "gst_type": self.gst_type_combo.currentText(),
-                "place": self.place_combo.currentText().strip(),
-                "g_disc": safe_float(self.global_discount_entry.text()),
-                "g_disc_type": self.disc_type_combo.currentText(),
-                "round_off": self.round_off_toggle.isChecked(),
-                "items": self._collect_items(),
-                "payments": self._collect_payments(),
+                "terms":          self.terms_text.toPlainText().strip(),
+                "print_extras":   self.print_extras_combo.currentData() or "both",
+                "no_charge":      self.no_charge_toggle.isChecked(),
+                "show_qr":        self.show_qr_toggle.isChecked(),
+                "reverse":        self.reverse_toggle.isChecked(),
+                "gst":            self.gst_toggle.isChecked(),
+                "tax_mode":       self.tax_mode_combo.currentData(),
+                "tax_rate":       safe_float(self.tax_rate_entry.text()),
+                "gst_type":       self.gst_type_combo.currentText(),
+                "place":          self.place_combo.currentText().strip(),
+                "g_disc":         safe_float(self.global_discount_entry.text()),
+                "g_disc_type":    self.disc_type_combo.currentText(),
+                "round_off":      self.round_off_toggle.isChecked(),
+                "items":          self._collect_items(),
+                "payments":       self._collect_payments(),
             }
             return json.dumps(state, sort_keys=True, default=str)
         except Exception:
@@ -12480,31 +10774,21 @@ class InvoiceFormFrame(QWidget):
             _retone(self.row_balance.value, "secondary")
             for r in (self.row_subtotal, self.row_grand_total, self.row_balance):
                 r.setVisible(True)
-            self._set_badge(
-                STATUS_DISPLAY_LABELS[InvoiceStatus.COMPLIMENTARY.value],
-                STATUS_TONES["Complimentary"],
-            )
+            self._set_badge(STATUS_DISPLAY_LABELS[InvoiceStatus.COMPLIMENTARY.value], STATUS_TONES["Complimentary"])
             return
 
-        items = self._filled_items()
-        is_gst = self.gst_toggle.isChecked()
+        items    = self._filled_items()
+        is_gst   = self.gst_toggle.isChecked()
         tax_rate = safe_float(self.tax_rate_entry.text()) if is_gst else 0.0
-        g_disc = safe_float(self.global_discount_entry.text())
+        g_disc   = safe_float(self.global_discount_entry.text())
         gst_type = self.gst_type_combo.currentText()
 
         totals = DatabaseManager.calculate_totals(
-            items,
-            tax_rate,
-            g_disc,
-            self.disc_type_combo.currentText(),
+            items, tax_rate, g_disc, self.disc_type_combo.currentText(),
             tax_mode=TAX_MODE_PER_ITEM if self._per_item_active() else TAX_MODE_OVERALL,
-            gst_type=gst_type,
-            round_off=self.round_off_toggle.isChecked(),
-        )
-        paid = sum(r.values()["amount"] for r in self.payment_rows)
-        status, balance, credit = DatabaseManager.compute_payment_status(
-            totals["grand_total"], paid
-        )
+            gst_type=gst_type, round_off=self.round_off_toggle.isChecked())
+        paid   = sum(r.values()["amount"] for r in self.payment_rows)
+        status, balance, credit = DatabaseManager.compute_payment_status(totals["grand_total"], paid)
 
         # Grand Total = Subtotal - Discount + Tax (+ Round Off): already true here, since calculate_totals() derives
         # grand_total as taxable + cgst + sgst, where taxable is subtotal minus total_discount.
@@ -12543,29 +10827,14 @@ class InvoiceFormFrame(QWidget):
         if taxed:
             several = len(taxed) > 1
             if gst_type == "IGST":
-                tax_lines.append(
-                    (
-                        "IGST:" if several else f"IGST ({taxed[0]['rate']:g}%):",
-                        totals["tax"],
-                        gst_breakdown_text(taxed, "tax", 1.0) if several else "",
-                    )
-                )
+                tax_lines.append(("IGST:" if several else f"IGST ({taxed[0]['rate']:g}%):", totals["tax"],
+                                  gst_breakdown_text(taxed, "tax", 1.0) if several else ""))
             else:
                 half = taxed[0]["rate"] / 2.0
-                tax_lines.append(
-                    (
-                        "CGST:" if several else f"CGST ({half:g}%):",
-                        totals["cgst"],
-                        gst_breakdown_text(taxed, "cgst", 0.5) if several else "",
-                    )
-                )
-                tax_lines.append(
-                    (
-                        "SGST:" if several else f"SGST ({half:g}%):",
-                        totals["sgst"],
-                        gst_breakdown_text(taxed, "sgst", 0.5) if several else "",
-                    )
-                )
+                tax_lines.append(("CGST:" if several else f"CGST ({half:g}%):", totals["cgst"],
+                                  gst_breakdown_text(taxed, "cgst", 0.5) if several else ""))
+                tax_lines.append(("SGST:" if several else f"SGST ({half:g}%):", totals["sgst"],
+                                  gst_breakdown_text(taxed, "sgst", 0.5) if several else ""))
         for line, (label, amount, tip) in enumerate(tax_lines):
             tax_row = self._tax_pool_row(line)
             tax_row.set(fmt_money(amount), label)
@@ -12574,9 +10843,7 @@ class InvoiceFormFrame(QWidget):
 
         # 5. Round Off -- only when the total was actually rounded.
         if totals["round_off"]:
-            self.row_round.set(
-                f"{'+' if totals['round_off'] > 0 else '−'} {fmt_money(abs(totals['round_off']))}"
-            )
+            self.row_round.set(f"{'+' if totals['round_off'] > 0 else '−'} {fmt_money(abs(totals['round_off']))}")
             self.row_round.setVisible(True)
 
         # 6. Grand Total always shows.
@@ -12598,10 +10865,7 @@ class InvoiceFormFrame(QWidget):
 
         # Status badge -- UNPAID / PARTIALLY PAID / PAID / OVERPAID, from the exact same status
         # compute_payment_status() just returned, so the badge can never disagree with the numbers above it.
-        self._set_badge(
-            STATUS_DISPLAY_LABELS.get(status, status.upper()),
-            STATUS_TONES.get(status, "secondary"),
-        )
+        self._set_badge(STATUS_DISPLAY_LABELS.get(status, status.upper()), STATUS_TONES.get(status, "secondary"))
 
     # ------------------------------------------------------------------ #
     #  Page life-cycle
@@ -12609,26 +10873,24 @@ class InvoiceFormFrame(QWidget):
     def _refresh_suggestions(self):
         self._catalog_cache = self.db_manager.get_all_catalog_items()
         self._catalog_exact = {c["title"]: c for c in self._catalog_cache}
-        self._catalog_fold = {c["title"].casefold(): c for c in self._catalog_cache}
-        self._client_cache = self.db_manager.get_all_clients()
+        self._catalog_fold  = {c["title"].casefold(): c for c in self._catalog_cache}
+        self._client_cache  = self.db_manager.get_all_clients()
         self.client_edit.set_values([c["name"] for c in self._client_cache])
         titles = [c["title"] for c in self._catalog_cache]
         for row in self.item_rows:
             row.title_edit.set_values(titles)
 
     def refresh_after_settings_change(self):
-        self._fill_template_combo()  # "Default (...)" names the template Settings now has
-        self._fill_watermark_combo()  # ... and whether Settings has the status watermark on
+        self._fill_template_combo()            # "Default (...)" names the template Settings now has
+        self._fill_watermark_combo()           # ... and whether Settings has the status watermark on
         self._refresh_suggestions()
         for row in self.item_rows:
-            row.refresh_line()  # the currency symbol may have changed
+            row.refresh_line()                 # the currency symbol may have changed
         self._recalc_totals()
 
     def on_show(self, *args):
         invoice_id: Optional[str] = args[0] if args else None
-        self._initial_snapshot = (
-            None  # nothing to compare against (and no "unsaved changes") while loading
-        )
+        self._initial_snapshot = None          # nothing to compare against (and no "unsaved changes") while loading
         self._loading = True
         try:
             self._refresh_suggestions()
@@ -12639,18 +10901,12 @@ class InvoiceFormFrame(QWidget):
                 self.editing_id = None
                 self.title_lbl.setText("New Invoice")
                 self.save_btn.setText("💾  Save Invoice  (Ctrl+S)")
-                self.invoice_number_entry.setText(
-                    self.db_manager.get_next_invoice_number()
-                )
+                self.invoice_number_entry.setText(self.db_manager.get_next_invoice_number())
                 set_date_edit_from_db(self.invoice_date_edit, None)
-                self.payment_terms_entry.setText(
-                    CONFIG.get("payment_details", {}).get("payment_terms", "")
-                )
+                self.payment_terms_entry.setText(CONFIG.get("payment_details", {}).get("payment_terms", ""))
                 self.your_name_entry.setText(compose_your_name(CONFIG))
                 self.your_contact_text.setPlainText(compose_your_contact(CONFIG))
-                self.terms_text.setPlainText(
-                    str(CONFIG.get("pdf_settings", {}).get("default_terms", "") or "")
-                )
+                self.terms_text.setPlainText(str(CONFIG.get("pdf_settings", {}).get("default_terms", "") or ""))
                 self._add_item_row()
         finally:
             self._loading = False
@@ -12707,17 +10963,14 @@ class InvoiceFormFrame(QWidget):
         self.reverse_toggle.setChecked(False)
         self.customer_notes_text.clear()
         self.terms_text.clear()
+        self.print_extras_combo.setCurrentIndex(0)
         self._set_badge("", "secondary")
         self._restore_tab_order()
 
     def _load_for_edit(self, invoice_id: str):
         row = self.db_manager.get_invoice_by_id(invoice_id)
         if not row:
-            Messagebox.show_error(
-                "Not Found",
-                f"Invoice {invoice_id} no longer exists.",
-                parent=self.controller,
-            )
+            Messagebox.show_error("Not Found", f"Invoice {invoice_id} no longer exists.", parent=self.controller)
             self.controller.show_frame(DashboardFrame)
             return
         d = dict(row)
@@ -12741,27 +10994,24 @@ class InvoiceFormFrame(QWidget):
         self.gst_type_combo.setCurrentText(d.get("gst_type") or "CGST/SGST")
         self.global_discount_entry.setText(_num_text(d.get("global_discount_value")))
         self.disc_type_combo.setCurrentText(d.get("global_discount_type") or "amount")
-        self.tax_mode_combo.setCurrentIndex(
-            max(0, self.tax_mode_combo.findData(d.get("tax_mode") or TAX_MODE_OVERALL))
-        )
+        self.tax_mode_combo.setCurrentIndex(max(0, self.tax_mode_combo.findData(d.get("tax_mode") or TAX_MODE_OVERALL)))
         self.round_off_toggle.setChecked(bool(d.get("round_off")))
         self.place_combo.setEditText(d.get("place_of_supply") or "")
         self._place_auto = False
         self.po_entry.setText(d.get("po_number") or "")
-        self.template_combo.setCurrentIndex(
-            max(0, self.template_combo.findData(d.get("pdf_template") or ""))
-        )
-        self.watermark_combo.setCurrentIndex(
-            max(0, self.watermark_combo.findData(d.get("pdf_watermark") or ""))
-        )
+        self.template_combo.setCurrentIndex(max(0, self.template_combo.findData(d.get("pdf_template") or "")))
+        self.watermark_combo.setCurrentIndex(max(0, self.watermark_combo.findData(d.get("pdf_watermark") or "")))
         self.reverse_toggle.setChecked(bool(d.get("reverse_charge")))
         self._show_stored_due(d.get("invoice_date"), d.get("due_date"))
         self.customer_notes_text.setPlainText(d.get("customer_notes") or "")
         self.terms_text.setPlainText(d.get("terms") or "")
+        self.print_extras_combo.setCurrentIndex(max(0, self.print_extras_combo.findData(d.get("print_extras") or "both")))
+        if d.get("is_complimentary") and not self.payment_terms_entry.text().strip():
+            self.payment_terms_entry.setText(NO_PAYMENT_TERMS)        # a free invoice saved without terms shows the default
 
         try:
             stored_items = json.loads(d.get("items") or "[]")
-        except TypeError, ValueError:
+        except (TypeError, ValueError):
             stored_items = []
         for item in stored_items if isinstance(stored_items, list) else []:
             if isinstance(item, dict):
@@ -12770,13 +11020,9 @@ class InvoiceFormFrame(QWidget):
             self._add_item_row()
 
         for p in self.db_manager.get_payments(invoice_id):
-            self._add_payment_row(
-                safe_float(p.get("amount")),
-                p.get("payment_date"),
-                p.get("mode") or "Cash",
-                p.get("note") or "",
-                payment_id=p.get("id"),
-            )
+            self._add_payment_row(safe_float(p.get("amount")), p.get("payment_date"),
+                                  p.get("mode") or "Cash", p.get("note") or "", payment_id=p.get("id"),
+                                  reference=p.get("reference") or "")
 
     # ------------------------------------------------------------------ #
     #  Validation & Save
@@ -12789,20 +11035,14 @@ class InvoiceFormFrame(QWidget):
         bill_to = self.client_edit.text().strip()
         your_name = self.your_name_entry.text().strip()
         if not inv_num or not bill_to or not your_name:
-            return self._error(
-                "Validation",
-                "Invoice Number, Client Name, and Your Name are all required.",
-            )
+            return self._error("Validation", "Invoice Number, Client Name, and Your Name are all required.")
         if INVALID_FILENAME_CHARS.search(inv_num):
             return self._error(
                 "Validation",
                 'Invoice Number cannot contain any of:  \\  /  :  * ?  "  <  >  |\n'
                 "(these characters break the PDF file that gets generated from it).",
             )
-        if (
-            inv_num != self.editing_id
-            and self.db_manager.get_invoice_by_id(inv_num) is not None
-        ):
+        if inv_num != self.editing_id and self.db_manager.get_invoice_by_id(inv_num) is not None:
             return self._error(
                 "Duplicate Invoice Number",
                 f'Invoice number "{inv_num}" is already used by another invoice.\n'
@@ -12822,30 +11062,23 @@ class InvoiceFormFrame(QWidget):
         inv_date = date_edit_db(self.invoice_date_edit)
 
         no_charge = self.no_charge_toggle.isChecked()
-        tax_rate = 0.0
+        tax_rate  = 0.0
         if not no_charge and self.gst_toggle.isChecked():
             tax_rate = safe_float(self.tax_rate_entry.text())
             if not (0 <= tax_rate <= 100):
-                return self._error(
-                    "Validation", "GST / Tax Rate must be between 0 and 100."
-                )
+                return self._error("Validation", "GST / Tax Rate must be between 0 and 100.")
 
         g_disc = safe_float(self.global_discount_entry.text())
         if g_disc < 0:
             return self._error("Validation", "Overall discount cannot be negative.")
         if self.disc_type_combo.currentText() == "%" and g_disc > 100:
-            return self._error(
-                "Validation", "A percentage discount cannot exceed 100%."
-            )
+            return self._error("Validation", "A percentage discount cannot exceed 100%.")
 
         due_date: Optional[str] = None
         if self._due_on() and not no_charge:
             due_date = date_edit_db(self.due_date_edit)
             if due_date < inv_date:
-                return self._error(
-                    "Validation",
-                    "The due date cannot be earlier than the invoice date.",
-                )
+                return self._error("Validation", "The due date cannot be earlier than the invoice date.")
 
         items = self._filled_items()
         if not no_charge and not items:
@@ -12854,13 +11087,9 @@ class InvoiceFormFrame(QWidget):
         for i in items:
             name = i["title"] or "an item"
             if i["amount"] < 0 or i["discount"] < 0:
-                return self._error(
-                    "Validation", "Item amounts and discounts cannot be negative."
-                )
+                return self._error("Validation", "Item amounts and discounts cannot be negative.")
             if i.get("qty", 1.0) <= 0:
-                return self._error(
-                    "Validation", f'The quantity of "{name}" must be greater than zero.'
-                )
+                return self._error("Validation", f'The quantity of "{name}" must be greater than zero.')
             if i["discount"] > i["amount"]:
                 return self._error(
                     "Validation",
@@ -12868,46 +11097,34 @@ class InvoiceFormFrame(QWidget):
                 )
         for i in items:
             if i.get("hsn") and not 2 <= len(i["hsn"]) <= 8:
-                return self._error(
-                    "Validation",
-                    f'The HSN / SAC code of "{i["title"] or "an item"}" must be 2 to 8 digits.',
-                )
+                return self._error("Validation", f'The HSN / SAC code of "{i["title"] or "an item"}" must be 2 to 8 digits.')
         if per_item:
             for row in self.item_rows:
                 if row.is_filled() and not 0 <= row.raw_gst() <= 100:
-                    return self._error(
-                        "Validation",
-                        f'The GST rate of "{row.title_edit.text().strip() or "an item"}" '
-                        "must be between 0 and 100.",
-                    )
+                    return self._error("Validation", f'The GST rate of "{row.title_edit.text().strip() or "an item"}" '
+                                                     "must be between 0 and 100.")
 
         payments = []
         if not no_charge:
+            for number, row in enumerate(self.payment_rows, start=1):
+                p = row.values()
+                if p["amount"] > 0 and (problem := payment_reference_problem(p["mode"], p["reference"])):
+                    return self._error("Check the payment details", f"Payment {number}: {problem}")
             payments = [p for p in self._collect_payments() if p["amount"] > 0]
 
         data = {
-            "invoice_number": inv_num,
-            "bill_to": bill_to,
+            "invoice_number": inv_num, "bill_to": bill_to,
             "client_contact": self.client_contact_text.toPlainText().strip(),
             "client_gstin": client_gstin,
             "your_name": your_name,
             "your_contact": self.your_contact_text.toPlainText().strip(),
-            "items": json.dumps(items),
-            "amount_paid": 0.0,
-            "tax_rate": tax_rate,
-            "invoice_date": inv_date,
-            "payment_date": None,
-            "status": InvoiceStatus.DUE.value,
-            "payment_terms": self.payment_terms_entry.text().strip(),
-            "payment_mode": None,
-            "show_qr_code": int(self.show_qr_toggle.isChecked()),
-            "is_complimentary": int(no_charge),
-            "is_gst_invoice": int(self.gst_toggle.isChecked()),
-            "global_discount_value": g_disc,
-            "global_discount_type": self.disc_type_combo.currentText(),
-            "advance_amount": 0.0,
-            "advance_date": None,
-            "gst_type": self.gst_type_combo.currentText(),
+            "items": json.dumps(items), "amount_paid": 0.0, "tax_rate": tax_rate,
+            "invoice_date": inv_date, "payment_date": None,
+            "status": InvoiceStatus.DUE.value, "payment_terms": self.payment_terms_entry.text().strip(),
+            "payment_mode": None, "show_qr_code": int(self.show_qr_toggle.isChecked()),
+            "is_complimentary": int(no_charge), "is_gst_invoice": int(self.gst_toggle.isChecked()),
+            "global_discount_value": g_disc, "global_discount_type": self.disc_type_combo.currentText(),
+            "advance_amount": 0.0, "advance_date": None, "gst_type": self.gst_type_combo.currentText(),
             "notes": self.notes_text.toPlainText().strip(),
             "tax_mode": TAX_MODE_PER_ITEM if per_item else TAX_MODE_OVERALL,
             "round_off": int(self.round_off_toggle.isChecked() and not no_charge),
@@ -12919,40 +11136,26 @@ class InvoiceFormFrame(QWidget):
             "reverse_charge": int(self.reverse_toggle.isChecked()),
             "customer_notes": self.customer_notes_text.toPlainText().strip(),
             "terms": self.terms_text.toPlainText().strip(),
+            "print_extras": self.print_extras_combo.currentData() or "both",
         }
 
         is_update = self.editing_id is not None
-        ok, err = self.db_manager.save_invoice(
-            data,
-            is_update,
-            original_id=self.editing_id,
-            payments=None if no_charge else payments,
-        )
+        ok, err = self.db_manager.save_invoice(data, is_update, original_id=self.editing_id,
+                                               payments=None if no_charge else payments)
         if not ok:
             return self._error("Save Failed", err)
 
         if bill_to:
-            self.db_manager.save_client(
-                bill_to, data["client_contact"], data["client_gstin"]
-            )
+            self.db_manager.save_client(bill_to, data["client_contact"], data["client_gstin"])
         for item in items:
-            if item[
-                "title"
-            ]:  # what this line teaches the catalog: its rate in this unit, HSN/SAC, GST rate
-                self.db_manager.remember_catalog_item(
-                    item["title"],
-                    item["description"],
-                    safe_float(item.get("rate", item["amount"])),
-                    item.get("unit", ""),
-                    item.get("hsn", ""),
-                    item.get("tax_rate"),
-                )
+            if item["title"]:                      # what this line teaches the catalog: its rate in this unit, HSN/SAC, GST rate
+                self.db_manager.remember_catalog_item(item["title"], item["description"],
+                                                      safe_float(item.get("rate", item["amount"])),
+                                                      item.get("unit", ""), item.get("hsn", ""), item.get("tax_rate"))
 
-        Messagebox.show_info(
-            "Saved", f"Invoice #{inv_num} saved successfully.", parent=self.controller
-        )
         self._initial_snapshot = self._snapshot()
         self.controller.show_frame(DashboardFrame)
+        notify(self.controller, f"Invoice {inv_num} {'updated' if is_update else 'saved'}.")
 
     # ------------------------------------------------------------------ #
     #  Public API used by application-level keyboard shortcuts
@@ -12963,8 +11166,7 @@ class InvoiceFormFrame(QWidget):
 
     def _focused_item_row(self) -> Optional[_ItemRow]:
         """Walks up from the current keyboard focus to find which item row (if any) owns it, so shortcuts can act
-        on "whichever row the user is in" the same way F2/Ctrl+Shift+Delete do in a spreadsheet.
-        """
+        on "whichever row the user is in" the same way F2/Ctrl+Shift+Delete do in a spreadsheet."""
         widget = QApplication.focusWidget()
         while widget is not None:
             if isinstance(widget, _ItemRow) and widget in self.item_rows:
@@ -12974,8 +11176,7 @@ class InvoiceFormFrame(QWidget):
 
     def _show_row(self, widget: QWidget):
         """Focus a field and make sure it is on screen. A freshly added row only gets its geometry (and the page its
-        new scroll range) when the pending layout request is processed, so that is done before scrolling.
-        """
+        new scroll range) when the pending layout request is processed, so that is done before scrolling."""
         widget.setFocus()
         QTimer.singleShot(0, lambda: self._reveal(widget))
 
@@ -12992,17 +11193,13 @@ class InvoiceFormFrame(QWidget):
     def remove_selected_item(self):
         """Ctrl+Shift+Delete / Ctrl+Minus: removes whichever item row currently has focus, or the last row if none
         does -- the same row a row's own "✕" button would remove."""
-        row = self._focused_item_row() or (
-            self.item_rows[-1] if self.item_rows else None
-        )
+        row = self._focused_item_row() or (self.item_rows[-1] if self.item_rows else None)
         if row is not None:
             self._remove_item_row(row)
 
     def edit_selected_item(self):
         """F2: jumps focus into the title field of the currently focused/last item row, ready to edit."""
-        row = self._focused_item_row() or (
-            self.item_rows[-1] if self.item_rows else None
-        )
+        row = self._focused_item_row() or (self.item_rows[-1] if self.item_rows else None)
         if row is not None:
             self._show_row(row.title_edit)
 
@@ -13010,355 +11207,1029 @@ class InvoiceFormFrame(QWidget):
 # =============================================================================
 #  16. APPLICATION SHELL
 # =============================================================================
+def _ui_font(pixels: float, weight: Optional[QFont.Weight] = None, spacing: float = 0.0) -> QFont:
+    """The app's font at an exact pixel size -- for the screens that are drawn by hand (the opening screen)."""
+    font = QFont()
+    font.setFamilies([FONT_FAMILY, "Noto Sans", "Helvetica Neue", "Arial"])
+    font.setPixelSize(max(1, int(round(pixels))))
+    if weight is not None:
+        font.setWeight(weight)
+    if spacing:
+        font.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, spacing)
+    return font
+
+
 class SplashScreen(QWidget):
-    SIZE = 420
-    FADE_STEP = 0.05
-    FADE_INTERVAL_MS = 15
-    FADE_TARGET = 0.97  # a very subtle, modern transparency
-    MESSAGE_INTERVAL_MS = (
-        400  # six messages: the last one appears right as the 2.5 s splash ends
-    )
-    LOADING_MESSAGES: List[str] = [
-        "Waking up the database...",
-        "Calculating dashboard stats...",
-        "Preparing invoice registry...",
-        "Loading your address book...",
-        "Polishing the interface...",
-        "Almost ready...",
+    """The opening screen: a floating card with rounded corners, a soft shadow and a thin coloured edge. An invoice
+    writes itself on the right while the bar on the left fills up as Vyaprix gets ready; when everything is loaded a
+    green READY stamp lands on it and the card fades away. It is drawn by hand on a see-through window, so the corners
+    really are curved, and it scales with the screen. Click it to skip the wait.
+
+    The program reports how far it has got with set_progress(); finish() says that everything is loaded and `finished`
+    is emitted when the closing flourish is over. The bar never fills faster than MIN_FILL_MS, so the animation is always
+    seen, however quickly the program starts."""
+    DESIGN_W, DESIGN_H = 600, 350            # the card, in design units (the real size scales with the screen)
+    MARGIN = 34                              # room around the card for its shadow
+    RADIUS = 28.0
+    INTRO_MS = 340
+    MIN_FILL_MS = 640
+    STAMP_MS = 360
+    HOLD_MS = 280
+    OUTRO_MS = 220
+    TICK_MS = 16
+    STATUS_FADE_MS = 220
+    STAGES: List[Tuple[float, str]] = [
+        (0.00, "Getting things ready…"),
+        (0.25, "Opening your invoices…"),
+        (0.50, "Loading your clients and items…"),
+        (0.75, "Setting up your workspace…"),
+        (0.95, "Almost there…"),
+        (1.00, "You're all set!"),
     ]
+    finished = Signal()
+    _alive: Set["SplashScreen"] = set()          # a card that is fading out must not be freed before it has closed
 
     def __init__(self):
-        super().__init__(
-            None,
-            Qt.WindowType.SplashScreen
-            | Qt.WindowType.FramelessWindowHint
-            | Qt.WindowType.WindowStaysOnTopHint,
-        )
+        super().__init__(None, Qt.WindowType.SplashScreen | Qt.WindowType.FramelessWindowHint
+                         | Qt.WindowType.WindowStaysOnTopHint)
+        SplashScreen._alive.add(self)
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)      # see-through corners and shadow
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
         self.setWindowTitle(APP_NAME)
-        self.setFixedSize(self.SIZE, self.SIZE)
-        self.setWindowOpacity(0.0)  # starts invisible for the fade-in
-        self.loading_messages = list(self.LOADING_MESSAGES)
-        self.msg_index = 0
-        self._build()
+        self.setAccessibleName(f"{APP_NAME} is starting")
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setToolTip("")
+        self._scale = self._scale_for_screen()
+        self.setFixedSize(round((self.DESIGN_W + 2 * self.MARGIN) * self._scale),
+                          round((self.DESIGN_H + 2 * self.MARGIN) * self._scale))
         self._center_on_screen()
+        self._animated = animations_enabled()
+        self._logo: Optional[QPixmap] = _logo_pixmap_for(self, int(150 * self._scale) + 1)
+        self._cache: Optional[QPixmap] = None
+        self._cache_key: Tuple[float, str] = (0.0, "")
+        # timeline (seconds on a monotonic clock; _advance() is given the time, so a test can drive it by hand)
+        self._t0: Optional[float] = None
+        self._last = 0.0
+        self._elapsed = 0.0
+        self._target = 0.0
+        self._shown = 0.0
+        self._complete = False
+        self._skipped = False
+        self._stamp_at: Optional[float] = None
+        self._done_emitted = False
+        self._outro_at: Optional[float] = None
+        self._status = self.STAGES[0][1]
+        self._status_prev = ""
+        self._status_at = -10.0
+        self._ticker = QTimer(self)
+        self._ticker.setInterval(self.TICK_MS)
+        self._ticker.setTimerType(Qt.TimerType.PreciseTimer)
+        self._ticker.timeout.connect(lambda: self._advance(time.monotonic()))
+        if not self._animated:
+            self._shown = self._target
+            self._elapsed = 10.0
 
-        self._fade_timer = QTimer(self)
-        self._fade_timer.setInterval(self.FADE_INTERVAL_MS)
-        self._fade_timer.timeout.connect(self._fade_in)
-        self._fade_timer.start()
-        self._message_timer = QTimer(self)
-        self._message_timer.setInterval(self.MESSAGE_INTERVAL_MS)
-        self._message_timer.timeout.connect(self._cycle_messages)
-        self._cycle_messages()
+    # ---- size and place ---------------------------------------------------------------------------------------- #
+    @staticmethod
+    def _scale_for_screen() -> float:
+        """1.0 on a full-HD screen, smaller on a laptop, a little larger on a big or very sharp one."""
+        area = screen_area(None)
+        if area is None:
+            return 1.0
+        return max(0.82, min(1.25, min(area.height() / 900.0, area.width() / 1500.0)))
 
     def _center_on_screen(self) -> None:
-        screen = QApplication.primaryScreen()
+        screen = QGuiApplication.primaryScreen()
         if screen is not None:
-            geo = screen.geometry()
-            self.move(geo.center() - QPoint(self.SIZE // 2, self.SIZE // 2))
+            self.move(screen.geometry().center() - QPoint(self.width() // 2, self.height() // 2))
 
-    def _build(self):
-        # A 2 px border in the accent colour: a frameless window has no OS outline or shadow, and this keeps the splash
-        # from bleeding into a white desktop.
-        outer = QVBoxLayout(self)
-        outer.setContentsMargins(0, 0, 0, 0)
-        border = QFrame()
-        border.setProperty("role", "splash-border")
-        outer.addWidget(border)
-        border_col = QVBoxLayout(border)
-        border_col.setContentsMargins(2, 2, 2, 2)
-        panel = QFrame()
-        panel.setProperty("role", "splash")
-        border_col.addWidget(panel)
+    # ---- what the program tells it ----------------------------------------------------------------------------- #
+    @property
+    def status_text(self) -> str:
+        return self._status
 
-        col = QVBoxLayout(panel)
-        col.setContentsMargins(0, 0, 0, 0)
-        col.setSpacing(0)
+    @property
+    def progress_value(self) -> float:
+        """How far the bar has filled (0 .. 1) -- it follows the real progress at a pace that can be watched."""
+        return self._shown
 
-        # Branding, a little above the exact centre for better visual balance.
-        col.addStretch(9)
-        logo = _logo_pixmap_for(self, 160)
-        self.logo_label: Optional[QLabel] = None
-        if logo is not None:
-            self.logo_label = QLabel()
-            self.logo_label.setPixmap(logo)
-            self.logo_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            col.addWidget(self.logo_label)
-            col.addSpacing(20)
-        col.addWidget(
-            make_label(APP_NAME, "display", align=Qt.AlignmentFlag.AlignCenter)
-        )
-        col.addSpacing(5)
-        col.addWidget(
-            make_label(APP_TAGLINE, "muted", align=Qt.AlignmentFlag.AlignCenter)
-        )
-        col.addStretch(11)
+    @property
+    def is_complete(self) -> bool:
+        return self._complete
 
-        # Loading status.
-        self.progress = QProgressBar()
-        self.progress.setRange(0, 0)  # indeterminate
-        self.progress.setTextVisible(False)
-        bar_row = QHBoxLayout()
-        bar_row.setContentsMargins(20, 0, 20, 0)
-        bar_row.addWidget(self.progress)
-        col.addLayout(bar_row)
+    def set_progress(self, fraction: float) -> None:
+        """The program has got this far (0 .. 1); progress only ever goes forward. The sentence under the card follows
+        the bar as it fills, so what it says always matches what is on screen."""
+        self._target = max(self._target, _clamp01(float(fraction)))
+        if not self._animated:
+            self._shown = self._target
+            self._set_status(self._status_for(self._shown))
+        self._start_ticker()
+        self.update()
 
-        bottom = QHBoxLayout()
-        bottom.setContentsMargins(20, 12, 20, 15)
-        self.status_lbl = make_label("Starting up...", "section")
-        bottom.addWidget(self.status_lbl)
-        bottom.addStretch(1)
-        bottom.addWidget(make_label(APP_VERSION, "small"))
-        col.addLayout(bottom)
+    @classmethod
+    def _status_for(cls, fraction: float) -> str:
+        """The sentence for a bar that is `fraction` full."""
+        return next((text for start, text in reversed(cls.STAGES[:-1]) if fraction >= start), cls.STAGES[0][1])
 
-    def _fade_in(self) -> None:
-        opacity = min(self.FADE_TARGET, self.windowOpacity() + self.FADE_STEP)
-        self.setWindowOpacity(opacity)
-        if opacity >= self.FADE_TARGET:
-            self._fade_timer.stop()
+    def finish(self) -> None:
+        """Everything is loaded: fill the bar, stamp READY, then emit `finished`."""
+        self._complete = True
+        self._target = 1.0
+        if not self._animated:
+            self._shown = 1.0
+            self._stamp_at = time.monotonic()
+            self._set_status(self.STAGES[-1][1])
+            self.update()
+            QTimer.singleShot(0, self, self._emit_finished)             # (not if the card is closed before then)
+            return
+        if self._skipped:
+            self._shown = 1.0
+        self._start_ticker()
 
-    def _cycle_messages(self) -> None:
-        """Walks through the friendly loading messages so the app feels alive while it starts."""
-        if self.msg_index < len(self.loading_messages):
-            self.status_lbl.setText(self.loading_messages[self.msg_index])
-            self.msg_index += 1
-            self._message_timer.start()
-        else:
-            self._message_timer.stop()
+    def skip(self) -> None:
+        """The person clicked the card: no more waiting. It still shows the full bar and the stamp for an instant."""
+        self._skipped = True
+        if self._complete:
+            self._shown = 1.0
+        self._start_ticker()
+
+    def fade_out_and_close(self) -> None:
+        """Fades the card away and closes the window (at once when animations are off)."""
+        if not self._animated:
+            self.close()
+            return
+        if self._outro_at is None:
+            self._outro_at = time.monotonic()
+        self._start_ticker()
+
+    def _emit_finished(self) -> None:
+        if not self._done_emitted:
+            self._done_emitted = True
+            self.finished.emit()
+
+    def _set_status(self, text: str) -> None:
+        if text == self._status:
+            return
+        self._status_prev = self._status
+        self._status = text
+        self._status_at = self._elapsed if self._t0 is not None else 0.0
+        self.setAccessibleDescription(text)
+
+    # ---- the clock ---------------------------------------------------------------------------------------------- #
+    def _start_ticker(self) -> None:
+        if self._animated and not self._ticker.isActive():
+            self._ticker.start()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if self._animated and self._t0 is None:
+            self._advance(time.monotonic())
+            self._start_ticker()
+
+    def _advance(self, now: float) -> None:
+        """Moves the whole timeline on to the monotonic time `now` (seconds) and asks for a repaint."""
+        if self._t0 is None:
+            self._t0 = self._last = now
+        dt = max(0.0, min(0.1, now - self._last))
+        self._last = now
+        self._elapsed = now - self._t0
+        if self._shown < self._target:
+            self._shown = min(self._target, self._shown + dt / (self.MIN_FILL_MS / 1000.0))
+        if self._stamp_at is None:
+            self._set_status(self._status_for(self._shown))
+        if self._complete and self._shown >= 0.999 and self._stamp_at is None:
+            self._shown = 1.0
+            self._stamp_at = now
+            self._set_status(self.STAGES[-1][1])
+        if self._stamp_at is not None and not self._done_emitted:
+            wait = 0.0 if self._skipped else (self.STAMP_MS + self.HOLD_MS) / 1000.0
+            if now - self._stamp_at >= wait:
+                self._emit_finished()
+        if self._outro_at is not None and now - self._outro_at >= self.OUTRO_MS / 1000.0:
+            self._ticker.stop()
+            self.close()
+            return
+        self.update()
+
+    def mousePressEvent(self, event):
+        self.skip()
+        event.accept()
 
     def closeEvent(self, event):
-        self._fade_timer.stop()
-        self._message_timer.stop()
+        self._ticker.stop()
+        SplashScreen._alive.discard(self)
         super().closeEvent(event)
+
+    # ---- drawing ------------------------------------------------------------------------------------------------ #
+    @staticmethod
+    def _card_rect() -> QRectF:
+        return QRectF(SplashScreen.MARGIN, SplashScreen.MARGIN, SplashScreen.DESIGN_W, SplashScreen.DESIGN_H)
+
+    def _build_cache(self, dpr: float) -> QPixmap:
+        """The parts that never move -- shadow, card, glow, edge, logo, name and tagline -- drawn once."""
+        pm = QPixmap(max(1, int(round(self.width() * dpr))), max(1, int(round(self.height() * dpr))))
+        pm.setDevicePixelRatio(dpr)
+        pm.fill(Qt.GlobalColor.transparent)
+        p = QPainter(pm)
+        p.setRenderHints(QPainter.RenderHint.Antialiasing | QPainter.RenderHint.TextAntialiasing
+                         | QPainter.RenderHint.SmoothPixmapTransform)
+        p.scale(self._scale, self._scale)
+        card, r = self._card_rect(), self.RADIUS
+        # soft shadow: rings that fade outwards, lowered a little so the card seems to float
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        steps = 26
+        for i in range(steps):
+            a = 0.075 * (1.0 - i / steps) ** 2.2
+            p.setPen(QPen(_with_alpha("#000000", a), 1.4))
+            p.drawRoundedRect(card.adjusted(-i, -i + 10, i, i + 10), r + i, r + i)
+        # the card
+        path = QPainterPath()
+        path.addRoundedRect(card, r, r)
+        base = QLinearGradient(card.topLeft(), card.bottomLeft())
+        base.setColorAt(0.0, QColor(theme_color("surface")))
+        base.setColorAt(1.0, QColor(_mix(theme_color("surface"), theme_color("alt"), 0.85)))
+        p.setPen(Qt.PenStyle.NoPen)
+        p.fillPath(path, QBrush(base))
+        p.save()
+        p.setClipPath(path)
+        glow = QRadialGradient(card.left() + 30, card.top() + 20, 330)
+        glow.setColorAt(0.0, _with_alpha(theme_color("primary"), 0.22))
+        glow.setColorAt(1.0, _with_alpha(theme_color("primary"), 0.0))
+        p.fillRect(card, QBrush(glow))
+        glow2 = QRadialGradient(card.right() - 20, card.bottom() - 10, 300)
+        glow2.setColorAt(0.0, _with_alpha(theme_color("success"), 0.16))
+        glow2.setColorAt(1.0, _with_alpha(theme_color("success"), 0.0))
+        p.fillRect(card, QBrush(glow2))
+        p.restore()
+        # a thin edge that fades from the main colour to a second one
+        edge = QLinearGradient(card.topLeft(), card.bottomRight())
+        edge.setColorAt(0.0, _with_alpha(theme_color("primary"), 0.75))
+        edge.setColorAt(0.55, _with_alpha(theme_color("border_strong"), 0.55))
+        edge.setColorAt(1.0, _with_alpha(theme_color("info"), 0.65))
+        p.setPen(QPen(QBrush(edge), 1.6))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawRoundedRect(card.adjusted(0.8, 0.8, -0.8, -0.8), r - 0.8, r - 0.8)
+        # the mark: the logo, or a monogram when there is no logo file
+        left, top = card.left() + 48, card.top() + 42
+        if self._logo is not None:
+            ratio = self._logo.devicePixelRatio() or 1.0
+            lw, lh = self._logo.width() / ratio / self._scale, self._logo.height() / ratio / self._scale
+            k = min(1.0, 190.0 / max(1.0, lw), 84.0 / max(1.0, lh))
+            p.drawPixmap(QRectF(left, top + (84 - lh * k) / 2, lw * k, lh * k), self._logo,
+                         QRectF(0, 0, self._logo.width(), self._logo.height()))
+        else:
+            badge = QRectF(left, top + 4, 76, 76)
+            fill = QLinearGradient(badge.topLeft(), badge.bottomRight())
+            fill.setColorAt(0.0, QColor(theme_color("primary")))
+            fill.setColorAt(1.0, QColor(theme_color("info")))
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QBrush(fill))
+            p.drawRoundedRect(badge, 22, 22)
+            p.setPen(QColor("#FFFFFF"))
+            p.setFont(_ui_font(46, QFont.Weight.Bold))
+            p.drawText(badge, int(Qt.AlignmentFlag.AlignCenter), APP_NAME[:1].upper())
+        p.setPen(QColor(theme_color("fg")))
+        p.setFont(_ui_font(42, QFont.Weight.Bold, 0.4))
+        p.drawText(QRectF(left, card.top() + 134, 290, 52), int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft),
+                   APP_NAME)
+        p.setPen(QColor(theme_color("muted_text")))
+        p.setFont(_ui_font(15))
+        p.drawText(QRectF(left, card.top() + 188, 300, 24), int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft),
+                   APP_TAGLINE)
+        p.setFont(_ui_font(11))
+        p.drawText(QRectF(left, card.top() + 301, 170, 18), int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft),
+                   f"Version {APP_VERSION.lstrip('v')}  ·  by EllowLabs")
+        p.end()
+        return pm
+
+    def paintEvent(self, _event):
+        dpr = self.devicePixelRatioF() or 1.0
+        key = (round(dpr, 3), active_theme_name())
+        if self._cache is None or self._cache_key != key:
+            self._cache, self._cache_key = self._build_cache(dpr), key
+        el = self._elapsed
+        intro = 1.0 if not self._animated else _ease_out_cubic(el / (self.INTRO_MS / 1000.0))
+        outro = 1.0
+        if self._outro_at is not None:
+            outro = 1.0 - _ease_in_cubic((time.monotonic() - self._outro_at) / (self.OUTRO_MS / 1000.0))
+        p = QPainter(self)
+        p.setRenderHints(QPainter.RenderHint.Antialiasing | QPainter.RenderHint.TextAntialiasing
+                         | QPainter.RenderHint.SmoothPixmapTransform)
+        centre = QPointF(self.width() / 2.0, self.height() / 2.0)
+        grow = (0.94 + 0.06 * intro) * (0.985 + 0.015 * outro)
+        p.setOpacity(_clamp01(intro * outro))
+        p.translate(centre)
+        p.scale(grow, grow)
+        p.translate(-centre)
+        p.drawPixmap(0, 0, self._cache)
+        p.scale(self._scale, self._scale)
+        p.translate(self.MARGIN, self.MARGIN)                     # from here on: card coordinates, in design units
+        self._paint_paper(p)
+        self._paint_progress(p)
+        p.end()
+
+    def _paint_progress(self, p: QPainter) -> None:
+        left, bar_w, bar_y = 48.0, 268.0, 286.0
+        shown = self._shown
+        # what it is doing: the old sentence slides up and fades while the new one rises in
+        k = _ease_out_cubic((self._elapsed - self._status_at) / (self.STATUS_FADE_MS / 1000.0)) if self._status_prev else 1.0
+        p.setFont(_ui_font(14, QFont.Weight.DemiBold))
+        flags = int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
+        if k < 1.0 and self._status_prev:
+            p.setPen(_with_alpha(theme_color("fg"), 1.0 - k))
+            p.drawText(QRectF(left, 246 - 8 * k, 290, 26), flags, self._status_prev)
+        p.setPen(_with_alpha(theme_color("fg"), k))
+        p.drawText(QRectF(left, 246 + 8 * (1.0 - k), 290, 26), flags, self._status)
+        # the bar
+        track = QRectF(left, bar_y, bar_w, 6)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(_with_alpha(theme_color("border_strong"), 0.45))
+        p.drawRoundedRect(track, 3, 3)
+        width = max(0.0, bar_w * shown)
+        if width > 0.5:
+            done = _ease_out_cubic((self._elapsed - (self._stamp_at_elapsed() or 0.0)) / 0.3) if self._stamp_at is not None else 0.0
+            fill = QLinearGradient(left, 0, left + bar_w, 0)
+            fill.setColorAt(0.0, QColor(_mix(theme_color("primary"), theme_color("success"), done)))
+            fill.setColorAt(1.0, QColor(_mix(theme_color("info"), theme_color("success"), done)))
+            bar = QRectF(left, bar_y, max(6.0, width), 6)
+            p.setBrush(QBrush(fill))
+            p.drawRoundedRect(bar, 3, 3)
+            if self._animated and shown < 1.0:                      # a soft shine that keeps sweeping along the bar
+                p.save()
+                clip = QPainterPath()
+                clip.addRoundedRect(bar, 3, 3)
+                p.setClipPath(clip)
+                x = left - 70 + ((self._elapsed * 520.0) % (bar.width() + 140.0))
+                shine = QLinearGradient(x, 0, x + 70, 0)
+                shine.setColorAt(0.0, _with_alpha("#FFFFFF", 0.0))
+                shine.setColorAt(0.5, _with_alpha("#FFFFFF", 0.45))
+                shine.setColorAt(1.0, _with_alpha("#FFFFFF", 0.0))
+                p.fillRect(bar, QBrush(shine))
+                p.restore()
+        p.setPen(QColor(theme_color("muted_text")))
+        p.setFont(_ui_font(11, QFont.Weight.DemiBold))
+        p.drawText(QRectF(left + bar_w - 60, 301, 60, 18), int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight),
+                   f"{int(round(shown * 100))}%")
+
+    def _stamp_at_elapsed(self) -> Optional[float]:
+        """When the stamp landed, on the same clock as `_elapsed` (0 when nothing moves: it is simply there)."""
+        if self._stamp_at is None:
+            return None
+        if self._t0 is None:
+            return None if self._animated else 0.0
+        return self._stamp_at - self._t0
+
+    def _paint_paper(self, p: QPainter) -> None:
+        """The invoice that writes itself. Line by line it fills in as the progress passes it; the READY stamp lands last."""
+        width, height = 204.0, 266.0
+        shown, el = self._shown, self._elapsed
+        bob = math.sin(el * 2.2) * 2.0 if self._animated else 0.0
+        p.save()
+        p.translate(348 + width / 2, 42 + height / 2 + bob)
+        p.rotate(-3.0)
+        p.translate(-width / 2, -height / 2)
+        paper = QRectF(0, 0, width, height)
+        p.setPen(Qt.PenStyle.NoPen)
+        for grow, alpha in ((12, 0.025), (8, 0.035), (5, 0.05), (2, 0.07)):            # shadow under the sheet
+            p.setBrush(_with_alpha("#000000", alpha))
+            p.drawRoundedRect(paper.adjusted(-grow, -grow + 10, grow, grow + 10), 16 + grow, 16 + grow)
+        p.setBrush(QColor("#FFFFFF"))
+        p.setPen(QPen(QColor("#E5E7EB"), 1.0))
+        p.drawRoundedRect(paper, 16, 16)
+        p.setPen(Qt.PenStyle.NoPen)
+        # letterhead
+        mark = QLinearGradient(19, 25, 41, 47)
+        mark.setColorAt(0.0, QColor(theme_color("primary")))
+        mark.setColorAt(1.0, QColor(theme_color("info")))
+        p.setBrush(QBrush(mark))
+        p.drawEllipse(QPointF(30, 36), 11, 11)
+        p.setBrush(QColor("#CBD5E1"))
+        p.drawRoundedRect(QRectF(50, 29, 84, 9), 4.5, 4.5)
+        p.setBrush(QColor("#E2E8F0"))
+        p.drawRoundedRect(QRectF(50, 43, 54, 6), 3, 3)
+        p.setBrush(_with_alpha(theme_color("primary"), 0.35))
+        p.drawRoundedRect(QRectF(width - 58, 31, 40, 8), 4, 4)
+        p.setBrush(QColor("#EEF1F5"))
+        p.drawRect(QRectF(18, 66, width - 36, 1.4))
+        # item lines write themselves in turn
+        left_w = (96.0, 70.0, 110.0, 82.0, 60.0)
+        right_w = (36.0, 30.0, 40.0, 34.0, 28.0)
+        for i in range(5):
+            row = _ease_out_cubic((shown - (0.06 + i * 0.15)) / 0.17)
+            y = 84.0 + i * 28.0
+            if row <= 0.0:
+                continue
+            p.setBrush(QColor("#CBD5E1"))
+            p.drawRoundedRect(QRectF(18, y, left_w[i] * row, 8), 4, 4)
+            p.setBrush(_with_alpha("#94A3B8", 0.55 * row))
+            p.drawRoundedRect(QRectF(width - 18 - right_w[i], y, right_w[i], 8), 4, 4)
+        p.setBrush(QColor("#EEF1F5"))
+        p.drawRect(QRectF(18, 230, width - 36, 1.4))
+        total = _ease_out_cubic((shown - 0.84) / 0.16)
+        if total > 0.0:
+            p.setBrush(QColor("#94A3B8"))
+            p.drawRoundedRect(QRectF(18, 246, 44, 8), 4, 4)
+            p.setBrush(_with_alpha(theme_color("primary"), 0.9))
+            p.drawRoundedRect(QRectF(width - 18 - 76 * total, 242, 76 * total, 15), 7.5, 7.5)
+        # READY: lands with a small bounce once everything is loaded
+        stamp = self._stamp_at_elapsed()
+        if stamp is not None:
+            k = (el - stamp) / (self.STAMP_MS / 1000.0) if self._animated else 1.0
+            if k > 0.0:
+                scale = 1.0 + 0.85 * (1.0 - _ease_out_back(k)) if k < 1.0 else 1.0
+                alpha = _clamp01(k * 3.0)
+                green = theme_color("success")
+                p.save()
+                p.translate(width / 2 + 4, 176)
+                p.rotate(-12.0)
+                p.scale(scale, scale)
+                p.setOpacity(p.opacity() * alpha)
+                ring = QRectF(-70, -26, 140, 52)
+                p.setBrush(_with_alpha("#FFFFFF", 0.82))
+                p.setPen(QPen(QColor(green), 3.2))
+                p.drawRoundedRect(ring, 12, 12)
+                p.setBrush(Qt.BrushStyle.NoBrush)
+                p.setPen(QPen(_with_alpha(green, 0.55), 1.1))
+                p.drawRoundedRect(ring.adjusted(5, 5, -5, -5), 8, 8)
+                p.setPen(QColor(green))
+                p.setFont(_ui_font(23, QFont.Weight.Black, 3.0))
+                p.drawText(ring, int(Qt.AlignmentFlag.AlignCenter), "READY")
+                p.restore()
+        p.restore()
+
+
+SIDEBAR_WIDTH = 240            # the menu with names
+SIDEBAR_RAIL_WIDTH = 72        # the narrow menu: pictures only
+
+
+class NavButton(QPushButton):
+    """One row of the menu: a picture in a fixed square on the left and the name beside it. It is painted by hand, so the
+    picture stays put while the menu slides narrower, the name fades out as the room for it runs out, and the highlight
+    shrinks with the menu instead of being cut off. It is still an ordinary button: Tab reaches it, Space presses it, and
+    screen readers read its name."""
+    SIDE = 12                  # gap between the menu's edge and the button
+    CELL = 48                  # the picture's square: also the button's width in the narrow menu
+    HEIGHT = 44
+    LABEL_FROM = 118           # the name starts to appear when the menu is wider than this ...
+    LABEL_SPAN = 80            # ... and is fully there this much wider
+
+    def __init__(self, icon: str, label: str, kind: str = "nav", parent: Optional[QWidget] = None):
+        super().__init__(label, parent)
+        self._icon, self._kind = icon, kind
+        self._active = False
+        self._menu_width = SIDEBAR_WIDTH
+        self.setProperty("role", "nav")
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFixedHeight(self.HEIGHT)
+        self.setAccessibleName(label)
+        self.setAttribute(Qt.WidgetAttribute.WA_Hover, True)
+        self._key_focus = False                 # the outline is for people using the keyboard, not for a mouse click
+
+    def focusInEvent(self, event):
+        self._key_focus = event.reason() in (Qt.FocusReason.TabFocusReason, Qt.FocusReason.BacktabFocusReason,
+                                             Qt.FocusReason.ShortcutFocusReason)
+        super().focusInEvent(event)
+        self.update()
+
+    def focusOutEvent(self, event):
+        self._key_focus = False
+        super().focusOutEvent(event)
+        self.update()
+
+    # ---- state ----------------------------------------------------------------------------------------------- #
+    @property
+    def active(self) -> bool:
+        return self._active
+
+    @property
+    def icon_name(self) -> str:
+        return self._icon
+
+    def set_active(self, on: bool) -> None:
+        on = bool(on)
+        if on != self._active:
+            self._active = on
+            self.setProperty("role", "nav-active" if on else "nav")
+            self.update()
+
+    def set_icon_name(self, name: str) -> None:
+        if name != self._icon:
+            self._icon = name
+            self.update()
+
+    def set_label(self, label: str) -> None:
+        self.setText(label)
+        self.setAccessibleName(label)
+        self.update()
+
+    def set_menu_width(self, width: int) -> None:
+        """The menu's current width, while it slides: the name and the highlight follow it."""
+        if width != self._menu_width:
+            self._menu_width = int(width)
+            self.update()
+
+    def label_alpha(self) -> float:
+        return _clamp01((self._menu_width - self.LABEL_FROM) / float(self.LABEL_SPAN))
+
+    def sizeHint(self) -> QSize:
+        return QSize(SIDEBAR_WIDTH - 2 * self.SIDE, self.HEIGHT)
+
+    def minimumSizeHint(self) -> QSize:
+        return QSize(self.CELL, self.HEIGHT)
+
+    # ---- painting -------------------------------------------------------------------------------------------- #
+    def paintEvent(self, _event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        h = float(self.height())
+        pill_w = float(max(self.CELL, min(self.width(), self._menu_width - 2 * self.SIDE)))
+        pill = QRectF(0, 0, pill_w, h)
+        enabled, hot, down = self.isEnabled(), self.underMouse(), self.isDown()
+        if self._kind == "action":
+            back = theme_color("success_pressed" if down else ("success_hover" if hot else "success"))
+            text_c = icon_c = QColor(theme_color("success_on"))
+        else:
+            back = None
+            if self._active:
+                back = theme_color("primary_soft")
+            if down:
+                back = _mix(theme_color("alt"), theme_color("border"), 0.5)
+            elif hot and not self._active:
+                back = theme_color("alt")
+            text_c = QColor(theme_color("nav_sel_fg" if self._active else "fg"))
+            icon_c = QColor(theme_color("primary_text" if self._active else ("fg" if hot else "muted_text")))
+        if not enabled:
+            text_c = icon_c = QColor(theme_color("disabled_fg"))
+        p.setPen(Qt.PenStyle.NoPen)
+        if back is not None:
+            p.setBrush(QColor(back))
+            p.drawRoundedRect(pill, 12, 12)
+        if self._active and self._kind != "action":
+            p.setBrush(QColor(theme_color("primary")))
+            p.drawRoundedRect(QRectF(0, h / 2 - 11, 3.4, 22), 1.7, 1.7)
+        draw_icon(p, self._icon, QRectF((self.CELL - 22) / 2.0, (h - 22) / 2.0, 22, 22), icon_c, 1.9 if self._active else 1.7)
+        alpha = self.label_alpha()
+        if alpha > 0.01 and self.text():
+            font = QFont(self.font())
+            font.setPixelSize(14)
+            font.setWeight(QFont.Weight.DemiBold if (self._active or self._kind == "action") else QFont.Weight.Medium)
+            p.setFont(font)
+            room = max(0.0, pill_w - self.CELL - 8)
+            shown = QFontMetrics(font).elidedText(self.text(), Qt.TextElideMode.ElideRight, int(room))
+            colour = QColor(text_c)
+            colour.setAlphaF(alpha)
+            p.setPen(colour)
+            p.drawText(QRectF(self.CELL - 4, 0, room + 4, h), int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft), shown)
+        if self.hasFocus() and self._key_focus and enabled:
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.setPen(QPen(QColor(theme_color("primary")), 1.8))
+            p.drawRoundedRect(pill.adjusted(1.2, 1.2, -1.2, -1.2), 11, 11)
+
+
+class SidebarLabel(QWidget):
+    """A small caption in the menu ("MENU", "SETTINGS & HELP") or the version line. It fades out as the menu narrows and,
+    in its place, shows a short line (or a shorter text such as just the version number)."""
+
+    def __init__(self, text: str, rail_text: str = "", centered: bool = False, parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        self._text, self._rail_text, self._centered = text, rail_text, centered
+        self._menu_width = SIDEBAR_WIDTH
+        self.setFixedHeight(24)
+        self.setAccessibleName(text)
+
+    def text(self) -> str:
+        return self._text
+
+    def rail_text(self) -> str:
+        return self._rail_text
+
+    def set_text(self, text: str, rail_text: Optional[str] = None) -> None:
+        self._text = text
+        if rail_text is not None:
+            self._rail_text = rail_text
+        self.setAccessibleName(text)
+        self.update()
+
+    def set_menu_width(self, width: int) -> None:
+        if width != self._menu_width:
+            self._menu_width = int(width)
+            self.update()
+
+    def label_alpha(self) -> float:
+        return _clamp01((self._menu_width - NavButton.LABEL_FROM) / float(NavButton.LABEL_SPAN))
+
+    def paintEvent(self, _event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        alpha = self.label_alpha()
+        muted = theme_color("muted_text")
+        font = QFont(self.font())
+        font.setPixelSize(11)
+        font.setWeight(QFont.Weight.DemiBold if self._centered else QFont.Weight.Bold)
+        if not self._centered:
+            font.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 0.7)
+        p.setFont(font)
+        full = QRectF(-float(self.x()), 0, float(self._menu_width), float(self.height()))      # the whole visible menu
+        if alpha > 0.01:
+            p.setPen(_with_alpha(muted, alpha))
+            if self._centered:
+                p.drawText(full, int(Qt.AlignmentFlag.AlignCenter), self._text)
+            else:
+                p.drawText(QRectF(6, 0, self.width() - 6, self.height()),
+                           int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft), self._text)
+        if alpha < 0.99:
+            if self._rail_text:
+                p.setPen(_with_alpha(muted, 1.0 - alpha))
+                p.drawText(full, int(Qt.AlignmentFlag.AlignCenter), self._rail_text)
+            else:
+                p.setPen(QPen(_with_alpha(theme_color("border_strong"), 0.9 * (1.0 - alpha)), 1.4, Qt.PenStyle.SolidLine,
+                              Qt.PenCapStyle.RoundCap))
+                cx, cy = full.center().x(), self.height() / 2.0
+                p.drawLine(QPointF(cx - 11, cy), QPointF(cx + 11, cy))
+
+
+class BrandHeader(QWidget):
+    """The top of the menu: the logo (or a "V" badge when there is no logo file), the name and who made it. It grows and
+    shrinks smoothly with the menu: a big logo with the name beneath it in the full menu, a small logo alone in the
+    narrow one. In a window that is not tall it becomes one slim row instead, so everything still fits."""
+    clicked = Signal()
+    LOGO_SIZES = (48, 96, 160)             # the logo is kept at these widths so a size is never a big reduction
+
+    def __init__(self, parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        self._menu_width = SIDEBAR_WIDTH
+        self._short = False
+        self._logos: Dict[int, QPixmap] = {}
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setToolTip("Go to your invoices")
+        self.setAccessibleName(f"{APP_NAME} home")
+        self._aspect: Optional[float] = None               # logo height / width; None when there is no logo file
+        big = self._logo(self.LOGO_SIZES[-1])
+        if big is not None and big.width() > 0:
+            self._aspect = big.height() / float(big.width())
+        self.set_menu_width(SIDEBAR_WIDTH)
+
+    # ---- the logo -------------------------------------------------------------------------------------------- #
+    def _logo(self, size: int) -> Optional[QPixmap]:
+        if size not in self._logos:
+            pm = _logo_pixmap_for(self, size)
+            if pm is not None:
+                self._logos[size] = pm
+            else:
+                return None
+        return self._logos[size]
+
+    @property
+    def has_logo(self) -> bool:
+        return self._aspect is not None
+
+    def logo_pixmap(self) -> Optional[QPixmap]:
+        """The logo at the size the menu is showing it at now (settled): the biggest in the full menu."""
+        return self._logo(self.LOGO_SIZES[-1]) if self.has_logo else None
+
+    def refresh_for_screen(self) -> None:
+        """The window moved to a screen with another scale: draw the logo again at that screen's sharpness."""
+        self._logos.clear()
+        big = self._logo(self.LOGO_SIZES[-1])
+        self._aspect = (big.height() / float(big.width())) if big is not None and big.width() > 0 else None
+        self.update()
+
+    # ---- size ------------------------------------------------------------------------------------------------ #
+    @staticmethod
+    def metrics(t: float, short: bool, aspect: Optional[float]) -> Dict[str, float]:
+        """Where everything goes for a menu `t` of the way from narrow (0) to full width (1). Pure arithmetic, so it can
+        be checked without a screen."""
+        t = _clamp01(t)
+        lerp = lambda a, b: a + (b - a) * t
+        if short:
+            box = lerp(32, 34)
+            mark_w, mark_h = (box, box) if aspect is None else (min(box, box / aspect), min(box, box / aspect) * aspect)
+            height = lerp(52, 64)
+            return {"height": height, "mark_w": mark_w, "mark_h": mark_h, "mark_cx": lerp(36, 20 + mark_w / 2),
+                    "mark_y": (height - mark_h) / 2, "name_x": 66.0, "name_y": 13.0, "byline_y": 33.0, "horizontal": 1.0}
+        if aspect is None:
+            mark_w = mark_h = lerp(44, 72)
+        else:
+            box_w, box_h = lerp(48, 150), lerp(48, 96)
+            mark_w = min(box_w, box_h / aspect)
+            mark_h = mark_w * aspect
+        slot = lerp(48, 96) if aspect is not None else lerp(44, 72)
+        top, gap = lerp(14, 20), 8.0 * t
+        text_zone = 50.0 * min(1.0, t * 1.4)                    # room for the name and who made it, once there is room
+        name_y = top + slot + gap
+        return {"height": top + slot + gap + text_zone + lerp(14, 6), "mark_w": mark_w, "mark_h": mark_h,
+                "mark_cx": lerp(36, 120), "mark_y": top + (slot - mark_h) / 2, "name_y": name_y, "byline_y": name_y + 26,
+                "horizontal": 0.0}
+
+    def _t(self) -> float:
+        return _clamp01((self._menu_width - SIDEBAR_RAIL_WIDTH) / float(SIDEBAR_WIDTH - SIDEBAR_RAIL_WIDTH))
+
+    def set_menu_width(self, width: int) -> None:
+        self._menu_width = int(width)
+        height = int(round(self.metrics(self._t(), self._short, self._aspect)["height"]))
+        if self.height() != height or self.minimumHeight() != height:
+            self.setFixedHeight(height)
+        self.update()
+
+    def set_short(self, short: bool) -> None:
+        if bool(short) != self._short:
+            self._short = bool(short)
+            self.set_menu_width(self._menu_width)
+
+    def sizeHint(self) -> QSize:
+        return QSize(SIDEBAR_WIDTH, int(round(self.metrics(self._t(), self._short, self._aspect)["height"])))
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton and self.rect().contains(event.position().toPoint()):
+            self.clicked.emit()
+        super().mouseReleaseEvent(event)
+
+    # ---- painting -------------------------------------------------------------------------------------------- #
+    def paintEvent(self, _event):
+        p = QPainter(self)
+        p.setRenderHints(QPainter.RenderHint.Antialiasing | QPainter.RenderHint.TextAntialiasing
+                         | QPainter.RenderHint.SmoothPixmapTransform)
+        m = self.metrics(self._t(), self._short, self._aspect)
+        centre = self._menu_width / 2.0
+        cx = m["mark_cx"] if m["horizontal"] else centre
+        mark = QRectF(cx - m["mark_w"] / 2.0, m["mark_y"], m["mark_w"], m["mark_h"])
+        if self.has_logo:
+            size = next((s for s in self.LOGO_SIZES if s >= m["mark_w"] - 0.5), self.LOGO_SIZES[-1])
+            pm = self._logo(size)
+            if pm is not None:
+                p.drawPixmap(mark, pm, QRectF(0, 0, pm.width(), pm.height()))
+        else:
+            fill = QLinearGradient(mark.topLeft(), mark.bottomRight())
+            fill.setColorAt(0.0, QColor(theme_color("primary")))
+            fill.setColorAt(1.0, QColor(theme_color("info")))
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QBrush(fill))
+            p.drawRoundedRect(mark, mark.width() * 0.28, mark.width() * 0.28)
+            p.setPen(QColor("#FFFFFF"))
+            p.setFont(_ui_font(mark.width() * 0.6, QFont.Weight.Bold))
+            p.drawText(mark, int(Qt.AlignmentFlag.AlignCenter), APP_NAME[:1].upper())
+        alpha = _clamp01((self._menu_width - NavButton.LABEL_FROM - 20) / 70.0)
+        if alpha <= 0.01:
+            return
+        if m["horizontal"]:
+            p.setPen(_with_alpha(theme_color("fg"), alpha))
+            p.setFont(_ui_font(17, QFont.Weight.Bold))
+            p.drawText(QRectF(m["name_x"], m["name_y"], self._menu_width - m["name_x"] - 8, 22),
+                       int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft), APP_NAME)
+            p.setPen(_with_alpha(theme_color("muted_text"), alpha))
+            p.setFont(_ui_font(11))
+            p.drawText(QRectF(m["name_x"], m["byline_y"], self._menu_width - m["name_x"] - 8, 16),
+                       int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft), "by EllowLabs")
+        else:
+            box = QRectF(0, 0, float(self._menu_width), 1.0)
+            p.setPen(_with_alpha(theme_color("fg"), alpha))
+            p.setFont(_ui_font(22, QFont.Weight.Bold))
+            p.drawText(QRectF(box.left(), m["name_y"], box.width(), 26), int(Qt.AlignmentFlag.AlignCenter), APP_NAME)
+            p.setPen(_with_alpha(theme_color("muted_text"), alpha))
+            p.setFont(_ui_font(11, QFont.Weight.DemiBold))
+            p.drawText(QRectF(box.left(), m["byline_y"], box.width(), 16), int(Qt.AlignmentFlag.AlignCenter), "by EllowLabs")
 
 
 class Sidebar(QFrame):
-    """The navigation column. It has three looks, chosen by the window it sits in (see InvoiceApp._apply_density): the
-    full one (240 px wide), a compact one that shows only the icons (72 px wide, for narrow windows) and a short one that
-    drops the logo (for windows that are not tall enough for it). Every button keeps its full name as its tooltip and
-    its accessible name, so nothing is lost when the labels are hidden."""
+    """The menu on the left. It slides between two widths -- the full menu (240 px, with names) and a narrow strip (72 px,
+    pictures only) -- when the person presses "Hide menu" (or Ctrl+\\), and it also becomes the narrow strip by itself
+    when the window is too small to spare the room (see InvoiceApp._apply_density). A window that is not tall enough
+    gets a slimmer header, so every button still fits.
 
-    NAV_ITEMS: List[Tuple[str, str]] = [
-        ("⊞   Dashboard", "DashboardFrame"),
-        ("👥   Clients", "ClientsFrame"),
-        ("📑   Catalog", "CatalogFrame"),
+    How it slides: the content (`_body`) is always laid out at the full width and the sidebar just shows as much of it as
+    it is wide; the pictures sit in the same place in both widths and the names fade with the width, so nothing jumps."""
+    NAV_ITEMS: List[Tuple[str, str, str, str]] = [        # (picture, name, page, what it is for)
+        ("invoices", "Invoices", "DashboardFrame", "See, search and manage all your invoices"),
+        ("clients",  "Clients",  "ClientsFrame",   "The people and businesses you bill"),
+        ("items",    "Items",    "CatalogFrame",   "The things you sell, with their prices"),
     ]
-    WIDTH = 240
-    COMPACT_WIDTH = 72
-    LOGO_WIDTH = 160
-    COMPACT_LOGO_WIDTH = 40
+    WIDTH = SIDEBAR_WIDTH
+    COMPACT_WIDTH = SIDEBAR_RAIL_WIDTH
+    SLIDE_MS = 260
+    collapsedChanged = Signal(bool)
 
     def __init__(self, parent, controller):
         super().__init__(parent)
         self.controller = controller
         self.setProperty("role", "sidebar")
         self.setFixedWidth(self.WIDTH)
-        self._nav_btns: Dict[str, QPushButton] = {}
-        self._compact = False
-        self._short = False
-        self._wide_only: List[QWidget] = []  # labels that only the full sidebar shows
-        self._icon_buttons: List[Tuple[QPushButton, str, str, str]] = (
-            []
-        )  # (button, full text, icon, tooltip)
-        self._margin_layouts: List[
-            Tuple[QVBoxLayout, Tuple[int, int], Tuple[int, int]]
-        ] = []  # (layout, full v, short v)
+        self._nav_btns: Dict[str, NavButton] = {}
+        self._narrow = False                  # the window is narrow: the narrow strip, whatever was chosen
+        self._short = False                   # the window is not tall: the slim header
+        self._collapsed = False               # the person chose the narrow strip
+        self._cur_w = self.WIDTH
+        self._hints: Dict[NavButton, str] = {}
+        self._reveal_parts: List[QWidget] = []
+        self._margin_layouts: List[Tuple[QVBoxLayout, Tuple[int, int], Tuple[int, int]]] = []   # (layout, full v, short v)
+        self._anim = QVariantAnimation(self)
+        self._anim.setEasingCurve(QEasingCurve.Type.InOutCubic)
+        self._anim.valueChanged.connect(lambda value: self._apply_width(int(value)))
+        self._anim.finished.connect(self._slide_finished)
         self._build()
 
+    # ---- state the rest of the program reads --------------------------------------------------------------------- #
     @property
     def compact(self) -> bool:
-        return self._compact
+        """True when the narrow strip is what is shown (or is where the menu is sliding to)."""
+        return self._narrow or self._collapsed
 
     @property
     def short(self) -> bool:
         return self._short
 
-    @staticmethod
-    def _left_aligned(btn: QPushButton) -> QPushButton:
-        btn.setProperty("align", "left")
-        return btn
+    @property
+    def collapsed(self) -> bool:
+        """The person's choice: True = narrow strip, False = full menu (kept between runs)."""
+        return self._collapsed
 
-    def _register_button(self, btn: QPushButton) -> QPushButton:
-        """Remembers how a button looks in each density: its text splits into the icon (the first word) and the name."""
-        full = btn.text()
-        icon, _sep, name = full.partition(" ")
-        name = name.strip() or full
-        btn.setAccessibleName(name)
-        self._icon_buttons.append((btn, full, icon, btn.toolTip()))
-        return btn
+    @property
+    def narrow(self) -> bool:
+        return self._narrow
 
-    def _layout(
-        self, full_v: Tuple[int, int], short_v: Optional[Tuple[int, int]] = None
-    ) -> QVBoxLayout:
+    @property
+    def animating(self) -> bool:
+        return self._anim.state() == QAbstractAnimation.State.Running
+
+    @property
+    def current_width(self) -> int:
+        return self._cur_w
+
+    def logo_pixmap(self) -> Optional[QPixmap]:
+        return self.header.logo_pixmap()
+
+    # ---- building --------------------------------------------------------------------------------------------- #
+    def _layout(self, full_v: Tuple[int, int], short_v: Optional[Tuple[int, int]] = None) -> QVBoxLayout:
         lay = QVBoxLayout()
         self._margin_layouts.append((lay, full_v, short_v or full_v))
-        lay.setContentsMargins(20, full_v[0], 20, full_v[1])
+        lay.setContentsMargins(NavButton.SIDE, full_v[0], NavButton.SIDE, full_v[1])
         return lay
 
+    def _add_button(self, layout: QVBoxLayout, icon: str, label: str, hint: str, slot: Callable[[], None],
+                    kind: str = "nav") -> NavButton:
+        btn = NavButton(icon, label, kind)
+        btn.clicked.connect(lambda _checked=False: slot())
+        self._hints[btn] = hint
+        self._reveal_parts.append(btn)
+        layout.addWidget(btn)
+        return btn
+
     def _build(self):
-        root = QVBoxLayout(self)
+        body = self._body = QWidget(self)
+        body.setFixedWidth(self.WIDTH)
+        root = QVBoxLayout(body)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
-        # --- branding header ---------------------------------------------
-        header = self._layout((25, 10), (10, 6))
-        header.setSpacing(0)
-        self.logo_label: Optional[QLabel] = None
-        if _logo_pixmap_for(self, self.LOGO_WIDTH) is not None:
-            self.logo_label = QLabel()
-            self.logo_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            header.addWidget(self.logo_label)
-            header.addSpacing(10)
-        self.name_label = make_label(
-            "Vyaprix", "h1", align=Qt.AlignmentFlag.AlignCenter
-        )
-        self.byline_label = make_label(
-            "by EllowLabs", "section", align=Qt.AlignmentFlag.AlignCenter
-        )
-        self.mark_label = make_label(
-            "V", "h1", align=Qt.AlignmentFlag.AlignCenter
-        )  # stands in for the name when compact
-        self.mark_label.setVisible(False)
-        header.addWidget(self.name_label)
-        header.addWidget(self.byline_label)
-        header.addWidget(self.mark_label)
-        self._wide_only += [self.name_label, self.byline_label]
-        root.addLayout(header)
+        self.header = BrandHeader()
+        self.header.clicked.connect(lambda: self.controller.show_frame_by_name("DashboardFrame"))
+        self._reveal_parts.append(self.header)
+        root.addWidget(self.header)
 
-        divider = self._layout((15, 15), (8, 8))
+        divider = self._layout((6, 8), (2, 4))
         divider.addWidget(hline())
         root.addLayout(divider)
 
-        # --- quick action --------------------------------------------------
-        quick = self._layout((0, 15), (0, 8))
-        self.new_invoice_btn = make_button(
-            "＋  New Invoice",
-            "success",
-            lambda: self.controller.show_frame_by_name("InvoiceFormFrame"),
-            tooltip="Instantly start a new invoice (Ctrl+N)",
-            min_height=44,
-        )
-        self._register_button(self.new_invoice_btn)
-        quick.addWidget(self.new_invoice_btn)
+        quick = self._layout((2, 12), (0, 6))
+        self.new_invoice_btn = self._add_button(
+            quick, "plus", "New Invoice", "Start a new invoice (Ctrl+N)",
+            lambda: self.controller.show_frame_by_name("InvoiceFormFrame"), kind="action")
         root.addLayout(quick)
 
-        # --- main navigation -----------------------------------------------
         nav = self._layout((0, 0))
-        nav.setSpacing(6)
-        menu_label = make_label("MAIN MENU", "section")
-        menu_label.setContentsMargins(4, 0, 0, 2)
-        nav.addWidget(menu_label)
-        self._wide_only.append(menu_label)
-        for label, frame_name in self.NAV_ITEMS:
-            btn = make_button(
-                label,
-                "secondary-outline",
-                lambda n=frame_name: self.controller.show_frame_by_name(n),
-            )
-            self._left_aligned(btn)
-            self._register_button(btn)
-            nav.addWidget(btn)
-            self._nav_btns[frame_name] = btn
+        nav.setSpacing(4)
+        self.menu_caption = SidebarLabel("MENU")
+        self._reveal_parts.append(self.menu_caption)
+        nav.addWidget(self.menu_caption)
+        for icon, label, frame_name, hint in self.NAV_ITEMS:
+            self._nav_btns[frame_name] = self._add_button(
+                nav, icon, label, hint, lambda n=frame_name: self.controller.show_frame_by_name(n))
         root.addLayout(nav)
 
         root.addStretch(1)
 
-        # --- system / bottom -----------------------------------------------
-        bottom = self._layout((15, 15), (8, 8))
+        bottom = self._layout((6, 10), (2, 6))
         bottom.setSpacing(4)
-        system_label = make_label("SYSTEM", "section")
-        system_label.setContentsMargins(4, 0, 0, 4)
-        bottom.addWidget(system_label)
-        self._wide_only.append(system_label)
-        self.settings_btn = self._left_aligned(
-            make_button(
-                "⚙️  Settings", "info-outline", lambda: self.controller.open_settings()
-            )
-        )
-        self.shortcuts_btn = self._left_aligned(
-            make_button(
-                "⌨️  Shortcuts",
-                "info-outline",
-                lambda: self.controller.open_shortcuts(),
-            )
-        )
-        self.about_btn = self._left_aligned(
-            make_button(
-                "ℹ️  About", "info-outline", lambda: self.controller.open_about()
-            )
-        )
-        for btn in (self.settings_btn, self.shortcuts_btn, self.about_btn):
-            self._register_button(btn)
-            bottom.addWidget(btn)
-        bottom.addSpacing(11)
-        self.version_label = make_label(
-            f"Version {APP_VERSION}", "small", align=Qt.AlignmentFlag.AlignCenter
-        )
-        self.version_short_label = make_label(
-            APP_VERSION, "small", align=Qt.AlignmentFlag.AlignCenter
-        )
-        self.version_short_label.setVisible(False)
+        bottom.addWidget(hline())
+        bottom.addSpacing(4)
+        self.more_caption = SidebarLabel("SETTINGS & HELP")
+        self._reveal_parts.append(self.more_caption)
+        bottom.addWidget(self.more_caption)
+        self.settings_btn = self._add_button(bottom, "settings", "Settings", "Your business details, payment details and how invoices look",
+                                             lambda: self.controller.open_settings())
+        self.help_btn = self._add_button(bottom, "help", "Help", "Quick answers and a step-by-step start (F1)",
+                                         lambda: self.controller.open_help())
+        self.about_btn = self._add_button(bottom, "info", "About", "Version and what is new",
+                                          lambda: self.controller.open_about())
+        self.toggle_btn = self._add_button(bottom, "chevrons-left", "Hide menu", "", self.toggle_collapsed)
+        self.version_label = SidebarLabel(f"Version {APP_VERSION.lstrip('v')}", rail_text=APP_VERSION, centered=True)
+        self._reveal_parts.append(self.version_label)
         bottom.addWidget(self.version_label)
-        bottom.addWidget(self.version_short_label)
-        self._wide_only.append(self.version_label)
         root.addLayout(bottom)
-        self._refresh_logo()
+        self._update_toggle()
+        self._refresh_tooltips()
+
+    # ---- placing the content ---------------------------------------------------------------------------------- #
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._body.setGeometry(0, 0, self.WIDTH, self.height())
+
+    def sizeHint(self) -> QSize:
+        return QSize(self._cur_w, self._body.sizeHint().height())
+
+    def minimumSizeHint(self) -> QSize:
+        return QSize(self._cur_w, self._body.minimumSizeHint().height())
+
+    # ---- sliding ---------------------------------------------------------------------------------------------- #
+    def _target_width(self) -> int:
+        return self.COMPACT_WIDTH if self.compact else self.WIDTH
+
+    def _apply_width(self, width: int) -> None:
+        """Sets the visible width (called for every step of the slide) and lets the parts that fade with it know."""
+        width = int(width)
+        self._cur_w = width
+        if self.width() != width or self.minimumWidth() != width or self.maximumWidth() != width:
+            self.setFixedWidth(width)
+        for part in self._reveal_parts:
+            part.set_menu_width(width)
+
+    def _retarget(self, animate: bool) -> None:
+        target = self._target_width()
+        slide = (animate and animations_enabled() and self.isVisible() and target != self._cur_w)
+        self._anim.stop()
+        if slide:
+            distance = abs(target - self._cur_w)
+            self._anim.setDuration(max(140, int(self.SLIDE_MS * distance / float(self.WIDTH - self.COMPACT_WIDTH))))
+            self._anim.setStartValue(self._cur_w)
+            self._anim.setEndValue(target)
+            self._anim.start()
+        elif target != self._cur_w:
+            self._apply_width(target)
+        self._update_toggle()
+        self._refresh_tooltips()
+
+    def _slide_finished(self) -> None:
+        self._apply_width(self._target_width())
+
+    def set_collapsed(self, collapsed: bool, animate: bool = True) -> None:
+        """Chooses the narrow strip (True) or the full menu (False). `collapsedChanged` is sent when the choice changes."""
+        collapsed = bool(collapsed)
+        changed = collapsed != self._collapsed
+        self._collapsed = collapsed
+        self._retarget(animate)
+        if changed:
+            self.collapsedChanged.emit(collapsed)
+
+    def toggle_collapsed(self) -> bool:
+        """Hides or shows the menu names. Returns False (and does nothing) while the window is too small for the full
+        menu -- the strip is the only choice then."""
+        if self._narrow:
+            return False
+        self.set_collapsed(not self._collapsed)
+        return True
 
     def set_density(self, compact: bool, short: bool) -> None:
-        """Switches between the full, the compact (icons only) and the short (no logo) look; does nothing when the look
-        is already the requested one."""
+        """The window's size decides two things: `compact` (too small for the full menu -> the narrow strip) and `short`
+        (not tall enough for the big logo -> the slim header). Does nothing when neither changed."""
         compact, short = bool(compact), bool(short)
-        if (compact, short) == (self._compact, self._short):
+        if (compact, short) == (self._narrow, self._short):
             return
-        self._compact, self._short = compact, short
-        self.setFixedWidth(self.COMPACT_WIDTH if compact else self.WIDTH)
-        side = 8 if compact else 20
-        for lay, full_v, short_v in self._margin_layouts:
-            top, bottom = short_v if short else full_v
-            lay.setContentsMargins(side, top, side, bottom)
-        for widget in self._wide_only:
-            widget.setVisible(not compact)
-        self.version_short_label.setVisible(compact)
-        for btn, full, icon, tip in self._icon_buttons:
-            btn.setText(icon if compact else full)
-            btn.setToolTip(
-                f"{btn.accessibleName()}  —  {tip}"
-                if (compact and tip)
-                else (btn.accessibleName() if compact else tip)
-            )
-            if (
-                btn.property("align") != ("icon" if compact else "left")
-                and btn is not self.new_invoice_btn
-            ):
-                btn.setProperty("align", "icon" if compact else "left")
-                _repolish(btn)
-        self._refresh_logo()
+        short_changed = short != self._short
+        self._narrow, self._short = compact, short
+        if short_changed:
+            self.header.set_short(short)
+            side = NavButton.SIDE
+            for lay, full_v, short_v in self._margin_layouts:
+                top, bottom = short_v if short else full_v
+                lay.setContentsMargins(side, top, side, bottom)
+        self.toggle_btn.setVisible(not compact)
+        self._retarget(animate=True)
         self.updateGeometry()
 
-    def _refresh_logo(self) -> None:
-        """The logo at the size the current look wants, rendered for the screen the window is on now (so it stays sharp
-        after the window is dragged to a monitor with another scale). With no logo file, compact shows a "V" instead.
-        """
-        show_logo = self.logo_label is not None and not self._short
-        if self.logo_label is not None:
-            self.logo_label.setVisible(show_logo)
-            if show_logo:
-                pixmap = _logo_pixmap_for(
-                    self, self.COMPACT_LOGO_WIDTH if self._compact else self.LOGO_WIDTH
-                )
-                if pixmap is not None:
-                    self.logo_label.setPixmap(pixmap)
-        self.mark_label.setVisible(self._compact and not show_logo)
+    def _update_toggle(self) -> None:
+        shrunk = self._target_width() == self.COMPACT_WIDTH
+        self.toggle_btn.set_icon_name("chevrons-right" if shrunk else "chevrons-left")
+        self.toggle_btn.set_label("Show menu" if shrunk else "Hide menu")
 
+    def _refresh_tooltips(self) -> None:
+        """In the narrow strip the names are hidden, so every button says its name (and what it does) in a tooltip."""
+        rail = self._target_width() == self.COMPACT_WIDTH
+        for btn, hint in self._hints.items():
+            if btn is self.toggle_btn:
+                hint = ("Show the full menu (Ctrl+\\)" if rail else "Hide the names to make more room (Ctrl+\\)")
+            btn.setToolTip(f"{btn.text()}  —  {hint}" if (rail and hint) else (btn.text() if rail else hint))
+
+    # ---- the rest ----------------------------------------------------------------------------------------------- #
     def refresh_for_screen(self) -> None:
         """Called when the window's device pixel ratio changes (it was moved to another monitor)."""
-        self._refresh_logo()
+        self.header.refresh_for_screen()
 
     def set_active(self, frame_name: str) -> None:
-        """Highlights the navigation button of the page being shown: solid for the active page, outlined for the rest."""
+        """Highlights the menu entry of the page being shown."""
         for name, btn in self._nav_btns.items():
-            set_role(btn, "primary" if name == frame_name else "secondary-outline")
+            btn.set_active(name == frame_name)
+        self.settings_btn.set_active(frame_name == "SettingsFrame")
 
 
 class ShortcutManager:
@@ -13385,11 +12256,11 @@ class ShortcutManager:
 
     def __init__(self, app: "InvoiceApp"):
         self.app = app
-        self._owner: Dict[str, str] = {}  # sequence -> "global" | "contextual"
+        self._owner: Dict[str, str] = {}                                # sequence -> "global" | "contextual"
         self._global_handlers: Dict[str, Callable[[], None]] = {}
         self._contextual_handlers: Dict[str, Dict[Type, Callable[[], None]]] = {}
         self._qshortcuts: Dict[str, QShortcut] = {}
-        self._reference: List[Dict[str, str]] = []  # feeds ShortcutsDialog
+        self._reference: List[Dict[str, str]] = []                      # feeds ShortcutsDialog
 
     @staticmethod
     def canonical(sequence: str) -> str:
@@ -13405,77 +12276,49 @@ class ShortcutManager:
         return tuple(cls.canonical(s) for s in seqs)
 
     # ---- registration --------------------------------------------------- #
-    def register_global(
-        self,
-        sequences,
-        handler: Callable[[], None],
-        description: str,
-        group: str,
-        display: Optional[str] = None,
-        auto_repeat: bool = False,
-    ):
+    def register_global(self, sequences, handler: Callable[[], None], description: str,
+                        group: str, display: Optional[str] = None, auto_repeat: bool = False):
         """Registers a shortcut whose action never changes, whichever page is showing. `sequences` is one key sequence
-        or a tuple of equivalent ones (they are one shortcut, so they share one reference-card entry).
-        """
+        or a tuple of equivalent ones (they are one shortcut, so they share one reference-card entry)."""
         seqs = self._sequences(sequences)
         for s in seqs:
             if s in self._owner:
-                raise ValueError(
-                    f"Shortcut conflict: {s} is already registered ({self._owner[s]})."
-                )
+                raise ValueError(f"Shortcut conflict: {s} is already registered ({self._owner[s]}).")
         for s in seqs:
             self._owner[s] = "global"
             self._global_handlers[s] = handler
             self._bind(s, auto_repeat)
-        self._reference.append(
-            {"keys": display or seqs[0], "description": description, "group": group}
-        )
+        self._reference.append({"keys": display or seqs[0], "description": description, "group": group})
 
-    def register_contextual(
-        self,
-        sequences,
-        frame_class: Type,
-        handler: Callable[[], None],
-        description: str,
-        group: str,
-        display: Optional[str] = None,
-        show_in_reference: bool = True,
-        auto_repeat: bool = False,
-    ):
+    #: What each page is called on the shortcut list (the list is for people, not programmers).
+    _PAGE_NAMES = {"DashboardFrame": "Invoices page", "ClientsFrame": "Clients page", "CatalogFrame": "Items page",
+                   "InvoiceFormFrame": "Invoice form", "SettingsFrame": "Settings"}
+
+    def register_contextual(self, sequences, frame_class: Type, handler: Callable[[], None],
+                            description: str, group: str, display: Optional[str] = None,
+                            show_in_reference: bool = True, auto_repeat: bool = False):
         """Registers a shortcut whose action depends on which page is showing. The same sequence can be registered for
         several page classes (that is the point), but not twice for the same one, and never mixed with a global
         registration of the same sequence."""
         seqs = self._sequences(sequences)
         for s in seqs:
             if self._owner.get(s, "contextual") != "contextual":
-                raise ValueError(
-                    f"Shortcut conflict: {s} is already registered ({self._owner[s]})."
-                )
+                raise ValueError(f"Shortcut conflict: {s} is already registered ({self._owner[s]}).")
             if frame_class in self._contextual_handlers.get(s, {}):
-                raise ValueError(
-                    f"Shortcut conflict: {s} is already registered for {frame_class.__name__}."
-                )
+                raise ValueError(f"Shortcut conflict: {s} is already registered for {frame_class.__name__}.")
         for s in seqs:
             self._owner[s] = "contextual"
             self._contextual_handlers.setdefault(s, {})[frame_class] = handler
             self._bind(s, auto_repeat)
         if show_in_reference:
-            page = frame_class.__name__.replace("Frame", "") or frame_class.__name__
-            self._reference.append(
-                {
-                    "keys": display or seqs[0],
-                    "description": f"{description} ({page})",
-                    "group": group,
-                }
-            )
+            page = self._PAGE_NAMES.get(frame_class.__name__) or frame_class.__name__.replace("Frame", "")
+            self._reference.append({"keys": display or seqs[0],
+                                    "description": f"{description} ({page})", "group": group})
 
     def register_info(self, display: str, description: str, group: str):
         """Documents a key that a widget handles natively (Tab order, per-field Enter-to-advance ...) rather than through
-        this registry -- purely so the reference card stays the one complete list of what the keyboard can do.
-        """
-        self._reference.append(
-            {"keys": display, "description": description, "group": group}
-        )
+        this registry -- purely so the reference card stays the one complete list of what the keyboard can do."""
+        self._reference.append({"keys": display, "description": description, "group": group})
 
     def _bind(self, sequence: str, auto_repeat: bool = False):
         existing = self._qshortcuts.get(sequence)
@@ -13501,39 +12344,40 @@ class ShortcutManager:
     # ---- introspection, used by ShortcutsDialog --------------------------- #
     def grouped_reference(self) -> Dict[str, List[Tuple[str, str]]]:
         """{group name: [(key label, description), ...]} built straight from the live registry, in registration order,
-        so the Shortcuts reference can never drift out of sync with what the keys actually do.
-        """
+        so the Shortcuts reference can never drift out of sync with what the keys actually do."""
         groups: Dict[str, List[Tuple[str, str]]] = {}
         for entry in self._reference:
-            groups.setdefault(entry["group"], []).append(
-                (entry["keys"], entry["description"])
-            )
+            groups.setdefault(entry["group"], []).append((entry["keys"], entry["description"]))
         return groups
 
 
 class InvoiceApp(QMainWindow):
-    SPLASH_DURATION_MS = 2500
+    SPLASH_DURATION_MS = 4000       # the longest the opening screen may stay once the app is ready (a safety limit)
     POLL_INTERVAL_MS = 200
     DEFAULT_SIZE = (1280, 800)
-    MIN_SIZE = (1080, 680)  # the smallest window the layout was designed for
-    FLOOR_SIZE = (
-        880,
-        540,
-    )  # the smallest it shrinks to on a screen that has no room for MIN_SIZE
-    COMPACT_BELOW = 1080  # a window narrower than this shows the icons-only sidebar
-    SHORT_BELOW = 760  # a window lower than this drops the logo from the sidebar
+    MIN_SIZE = (1080, 680)          # the smallest window the layout was designed for
+    FLOOR_SIZE = (880, 540)         # the smallest it shrinks to on a screen that has no room for MIN_SIZE
+    COMPACT_BELOW = 1080            # a window narrower than this shows the narrow (pictures only) menu
+    SHORT_BELOW = 760               # a window lower than this gets the slim menu header
+    LOW_BELOW = 560                 # ... and one lower than this has no room for the names either (with the slim header
+                                    # the full menu needs 550 px; the narrow one needs only 490)
 
     def __init__(self):
         super().__init__()
         cfg = load_config()
-        apply_app_style(QApplication.instance(), cfg.get("theme", DEFAULT_THEME))
+        theme = cfg.get("theme", DEFAULT_THEME)
+        set_animations_enabled(bool(cfg.get("animations", True)) and system_allows_animations())
+        activate_theme(theme)                       # the opening screen is drawn by hand: it needs the colours first
         configure_windows_app_identity()
         self._closing_for_good = False
+        self._handed_over = False
 
-        # 1. SHOW THE SPLASH SCREEN first (the main window stays hidden until start-up is done) and let it paint now.
-        self.splash: Optional[SplashScreen] = SplashScreen()
-        self.splash.show()
-        QApplication.processEvents()
+        # 1. SHOW THE OPENING SCREEN first (the main window stays hidden until start-up is done) and let it paint now.
+        self.splash: Optional[SplashScreen] = SplashScreen() if cfg.get("show_splash", True) else None
+        if self.splash is not None:
+            self.splash.show()
+        self._startup_step(0.02)
+        apply_app_style(QApplication.instance(), theme)
 
         self.setWindowTitle(f"{APP_NAME} • {APP_TAGLINE}")
         self._place_on_screen()
@@ -13541,10 +12385,13 @@ class InvoiceApp(QMainWindow):
 
         self.db_manager = DatabaseManager(DB_NAME)
         self.task_queue: queue.Queue = queue.Queue()
+        self._startup_step(0.20)
 
         self._current_frame_class: Optional[Type] = None
-        self._build_shell()
+        self._settings_return: Optional[Type] = None        # the page Settings was opened from (Back goes there)
+        self._build_shell(cfg, progress=self._startup_step)
         self._setup_keyboard_shortcuts()
+        self._startup_step(0.92)
         self.show_frame(DashboardFrame)
 
         # Worker threads hand results back through task_queue; this timer picks them up on the GUI thread. It is
@@ -13554,11 +12401,25 @@ class InvoiceApp(QMainWindow):
         self._poll_timer.timeout.connect(self._poll_queue)
         self._poll_timer.start(self.POLL_INTERVAL_MS)
 
-        # 2. SCHEDULE THE HAND-OVER from splash to main window.
+        # 2. HAND OVER from the opening screen to the main window the moment the opening animation has played out (it
+        #    always plays for a short while, however fast start-up was). The timer is only a safety net.
         self._splash_timer = QTimer(self)
         self._splash_timer.setSingleShot(True)
         self._splash_timer.timeout.connect(self._close_splash_and_show_main)
-        self._splash_timer.start(self.SPLASH_DURATION_MS)
+        if self.splash is not None:
+            self.splash.finished.connect(self._close_splash_and_show_main)
+            self._splash_timer.start(self.SPLASH_DURATION_MS)
+            self.splash.finish()
+        else:
+            QTimer.singleShot(0, self._close_splash_and_show_main)
+
+    def _startup_step(self, fraction: float) -> None:
+        """Tells the opening screen how far start-up has got and lets it repaint (clicks are held back until the window
+        exists)."""
+        splash = getattr(self, "splash", None)
+        if splash is not None:
+            splash.set_progress(fraction)
+            QApplication.processEvents(QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents)
 
     # ------------------------------------------------------------------ #
     #  Window set-up / start-up hand-over
@@ -13579,26 +12440,18 @@ class InvoiceApp(QMainWindow):
 
     def _frame_extra(self) -> Tuple[int, int]:
         """How much the window frame (borders and title bar) adds to the client size. The system only says how thick the
-        frame is once the native window exists, so it is created here (not shown) when it is not there yet.
-        """
+        frame is once the native window exists, so it is created here (not shown) when it is not there yet."""
         if self.windowHandle() is None:
             self.create()
         frame, client = self.frameGeometry(), self.geometry()
-        return max(0, frame.width() - client.width()), max(
-            0, frame.height() - client.height()
-        )
+        return max(0, frame.width() - client.width()), max(0, frame.height() - client.height())
 
     @staticmethod
     def _client_room(area: Optional[QRect], extra: Tuple[int, int]) -> Optional[QRect]:
         """The part of `area` the window's client size may use: what is left once the frame has taken its share."""
         if area is None:
             return None
-        return QRect(
-            area.x(),
-            area.y(),
-            max(1, area.width() - extra[0]),
-            max(1, area.height() - extra[1]),
-        )
+        return QRect(area.x(), area.y(), max(1, area.width() - extra[0]), max(1, area.height() - extra[1]))
 
     def _place_on_screen(self, area: Optional[QRect] = None) -> None:
         """1280 x 800, centred on the screen it opens on -- never larger than that screen's usable area (the title bar and
@@ -13610,16 +12463,11 @@ class InvoiceApp(QMainWindow):
         min_w, min_h = self._minimum_for(room)
         width, height = self.DEFAULT_SIZE
         if room is not None:
-            width, height = max(min_w, min(width, room.width())), max(
-                min_h, min(height, room.height())
-            )
+            width, height = max(min_w, min(width, room.width())), max(min_h, min(height, room.height()))
         self.setMinimumSize(min_w, min_h)
         self.resize(width, height)
         if area is not None:
-            self.move(
-                area.x() + (area.width() - (width + extra[0])) // 2,
-                area.y() + (area.height() - (height + extra[1])) // 2,
-            )
+            self.move(area.x() + (area.width() - (width + extra[0])) // 2, area.y() + (area.height() - (height + extra[1])) // 2)
         self._apply_density()
 
     def _fit_into(self, area: Optional[QRect]) -> None:
@@ -13644,13 +12492,12 @@ class InvoiceApp(QMainWindow):
             self.move(x, y)
 
     def _apply_density(self) -> None:
-        """The sidebar follows the window: icons only when the window is narrower than COMPACT_BELOW, no logo when it is
-        lower than SHORT_BELOW."""
+        """The sidebar follows the window: pictures only when the window is narrower than COMPACT_BELOW (or so low that
+        the names would not fit, LOW_BELOW), a slim header when it is lower than SHORT_BELOW."""
         sidebar = getattr(self, "sidebar", None)
         if sidebar is not None:
-            sidebar.set_density(
-                self.width() < self.COMPACT_BELOW, self.height() < self.SHORT_BELOW
-            )
+            sidebar.set_density(self.width() < self.COMPACT_BELOW or self.height() < self.LOW_BELOW,
+                                self.height() < self.SHORT_BELOW)
 
     def _on_screen_changed(self, screen) -> None:
         """The window was dragged to another monitor: fit the limits to its usable area and shrink the window into it if
@@ -13664,9 +12511,7 @@ class InvoiceApp(QMainWindow):
         if handle is not None and not getattr(self, "_screen_watch", False):
             self._screen_watch = True
             handle.screenChanged.connect(self._on_screen_changed)
-            QTimer.singleShot(
-                0, self._fit_shown_window
-            )  # now that the window is up, its real frame is known
+            QTimer.singleShot(0, self._fit_shown_window)         # now that the window is up, its real frame is known
 
     def _fit_shown_window(self) -> None:
         """Once, right after the first show: the frame measured before the window existed may have been an estimate."""
@@ -13678,16 +12523,12 @@ class InvoiceApp(QMainWindow):
         self._apply_density()
 
     def event(self, event):
-        if event.type() == QEvent.Type.DevicePixelRatioChange and hasattr(
-            self, "sidebar"
-        ):
+        if event.type() == QEvent.Type.DevicePixelRatioChange and hasattr(self, "sidebar"):
             self.sidebar.refresh_for_screen()
         return super().event(event)
 
     def _set_icon(self) -> None:
-        candidates = ([APP_LOGO_ICO] if sys.platform == "win32" else []) + [
-            APP_LOGO_PNG
-        ]
+        candidates = ([APP_LOGO_ICO] if sys.platform == "win32" else []) + [APP_LOGO_PNG]
         for path in candidates:
             try:
                 if path.exists():
@@ -13697,35 +12538,41 @@ class InvoiceApp(QMainWindow):
                         QApplication.setWindowIcon(icon)
                         return
             except Exception:
-                logger.warning(
-                    "Could not load the application icon %s", path, exc_info=True
-                )
+                logger.warning("Could not load the application icon %s", path, exc_info=True)
 
     def _close_splash_and_show_main(self) -> None:
+        if self._handed_over or self._closing_for_good:
+            return
+        self._handed_over = True
+        self._splash_timer.stop()
         # Show the main window BEFORE closing the splash: closing the last visible window would quit the application.
         self.show()
         self.raise_()
         self.activateWindow()
-        self._close_splash()
+        self._close_splash(fade=True)
         self._warn_if_fallback_font()
 
-    def _close_splash(self) -> None:
+    def _close_splash(self, fade: bool = False) -> None:
+        """Removes the opening screen: it fades away (fade=True) or is closed at once."""
         splash, self.splash = self.splash, None
         if splash is not None:
             try:
-                splash.close()
+                if fade:
+                    splash.fade_out_and_close()
+                else:
+                    splash.close()
             except RuntimeError:
-                pass  # Qt already closed and deleted it (QApplication.quit() closes every visible window first)
+                pass            # Qt already closed and deleted it (QApplication.quit() closes every visible window first)
 
     def _warn_if_fallback_font(self) -> None:
         if PDF_FONT == "Helvetica":
             Messagebox.show_warning(
-                "Font Files Missing",
-                "Vyaprix could not load its bundled font (NotoSans).\n\n"
-                "PDFs will still generate, but the currency symbol "
-                f"({CURRENCY_SYMBOL}) and any non-English characters may "
-                "not display correctly until this is fixed.\n\n"
-                "Try reinstalling Vyaprix. Details were written to the log:\n"
+                "Some files are missing",
+                "Vyaprix could not find its font files.\n\n"
+                "Your invoices will still be made, but the currency sign "
+                f"({CURRENCY_SYMBOL}) and letters from other languages may "
+                "not show correctly.\n\n"
+                "Try installing Vyaprix again. More details were saved in this file:\n"
                 f"{LOG_FILE}",
                 parent=self,
             )
@@ -13733,12 +12580,16 @@ class InvoiceApp(QMainWindow):
     # ------------------------------------------------------------------ #
     #  Shell: sidebar | divider | (page stack, progress strip)
     # ------------------------------------------------------------------ #
-    def _build_shell(self) -> None:
+    def _build_shell(self, cfg: Optional[Dict[str, Any]] = None,
+                     progress: Optional[Callable[[float], None]] = None) -> None:
+        cfg = cfg if cfg is not None else load_config()
         central = QWidget()
         outer = QHBoxLayout(central)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
         self.sidebar = Sidebar(central, self)
+        self.sidebar.set_collapsed(bool(cfg.get("sidebar_collapsed", False)), animate=False)
+        self.sidebar.collapsedChanged.connect(self._save_sidebar_choice)
         outer.addWidget(self.sidebar)
         outer.addWidget(vline())
         self._apply_density()
@@ -13759,9 +12610,7 @@ class InvoiceApp(QMainWindow):
         strip.setSpacing(2)
         self.progress_lbl = make_label("", "small")
         self.progress_bar = QProgressBar()
-        self.progress_bar.setRange(
-            0, 0
-        )  # indeterminate: animates by itself while visible
+        self.progress_bar.setRange(0, 0)            # indeterminate: animates by itself while visible
         self.progress_bar.setTextVisible(False)
         strip.addWidget(self.progress_lbl)
         strip.addWidget(self.progress_bar)
@@ -13769,16 +12618,22 @@ class InvoiceApp(QMainWindow):
         column.addWidget(self.progress_panel)
 
         self.frames: Dict[Type, QWidget] = {}
-        for FrameClass in (
-            DashboardFrame,
-            ClientsFrame,
-            CatalogFrame,
-            InvoiceFormFrame,
-        ):
+        for FrameClass, done in ((DashboardFrame, 0.45), (ClientsFrame, 0.58), (CatalogFrame, 0.70), (InvoiceFormFrame, 0.88)):
             frame = FrameClass(self.container, self)
             self.frames[FrameClass] = frame
             self.container.addWidget(frame)
+            if progress is not None:
+                progress(done)
         self.setCentralWidget(central)
+
+    def _save_sidebar_choice(self, collapsed: bool) -> None:
+        """Remembers whether the menu was left as the narrow strip, for the next time Vyaprix opens."""
+        try:
+            cfg = load_config()
+            cfg["sidebar_collapsed"] = bool(collapsed)
+            save_config(cfg)
+        except Exception:
+            logger.warning("Could not remember the menu width", exc_info=True)
 
     # ------------------------------------------------------------------ #
     #  Keyboard shortcuts
@@ -13793,204 +12648,59 @@ class InvoiceApp(QMainWindow):
         # Registered once per page, each with its own handler and reference-card line -- this is what makes one
         # physical key combo mean three different (correct) things depending on where you are, instead of an if/elif
         # chain buried in a handler.
-        sc.register_contextual(
-            "Ctrl+N",
-            DashboardFrame,
-            self._sc_new_invoice,
-            "New Invoice",
-            "Navigation",
-            display="Ctrl+N",
-        )
-        sc.register_contextual(
-            "Ctrl+N",
-            ClientsFrame,
-            self._sc_new_client,
-            "New Client",
-            "Navigation",
-            display="Ctrl+N",
-        )
-        sc.register_contextual(
-            "Ctrl+N",
-            CatalogFrame,
-            self._sc_new_catalog_item,
-            "New Catalog Item",
-            "Navigation",
-            display="Ctrl+N",
-        )
+        around, writing = "Getting around", "Writing an invoice"
+        sc.register_contextual("Ctrl+N", DashboardFrame,   self._sc_new_invoice,      "New Invoice", around, display="Ctrl+N")
+        sc.register_contextual("Ctrl+N", ClientsFrame,     self._sc_new_client,       "New Client",  around, display="Ctrl+N")
+        sc.register_contextual("Ctrl+N", CatalogFrame,     self._sc_new_catalog_item, "New Item",    around, display="Ctrl+N")
         # Also meaningful while already on the invoice form (start another blank one); kept out of the reference card
-        # to avoid a confusing near-duplicate line right under "New Invoice (Dashboard)".
-        sc.register_contextual(
-            "Ctrl+N",
-            InvoiceFormFrame,
-            self._sc_new_invoice,
-            "New Invoice",
-            "Navigation",
-            show_in_reference=False,
-        )
+        # to avoid a confusing near-duplicate line right under "New Invoice (Invoices page)".
+        sc.register_contextual("Ctrl+N", InvoiceFormFrame, self._sc_new_invoice,      "New Invoice", around, show_in_reference=False)
 
         # ---- Global: identical action wherever you are ----------------
-        sc.register_global(
-            "Ctrl+O",
-            self._sc_open_invoice,
-            "Open Invoice",
-            "Navigation",
-            display="Ctrl+O",
-        )
-        sc.register_global(
-            "Ctrl+Q", self._sc_quit, "Quit", "Navigation", display="Ctrl+Q"
-        )
-        sc.register_global(
-            "Ctrl+B",
-            self._sc_backup_database,
-            "Backup Database",
-            "Navigation",
-            display="Ctrl+B",
-        )
+        sc.register_global("Ctrl+O", self._sc_open_invoice,    "Find an Invoice",      around, display="Ctrl+O")
+        sc.register_global("Ctrl+Q", self._sc_quit,            "Close Vyaprix",        around, display="Ctrl+Q")
+        sc.register_global("Ctrl+B", self._sc_backup_database, "Save a Backup Copy",   around, display="Ctrl+B")
 
-        # ---- Contextual: Dashboard --------------------------------------
-        sc.register_contextual(
-            "Ctrl+F",
-            DashboardFrame,
-            lambda: self.frames[DashboardFrame].focus_search(),
-            "Search",
-            "Navigation",
-            display="Ctrl+F",
-        )
-        sc.register_contextual(
-            "Ctrl+D",
-            DashboardFrame,
-            self._sc_duplicate_invoice,
-            "Duplicate Invoice",
-            "Navigation",
-            display="Ctrl+D",
-        )
-        sc.register_contextual(
-            "Ctrl+P",
-            DashboardFrame,
-            self._sc_print_pdf,
-            "Print PDF",
-            "Navigation",
-            display="Ctrl+P",
-        )
-        sc.register_contextual(
-            "Ctrl+E",
-            DashboardFrame,
-            self._sc_export_pdf,
-            "Export PDF",
-            "Navigation",
-            display="Ctrl+E",
-        )
-        sc.register_contextual(
-            "Ctrl+R",
-            DashboardFrame,
-            self._sc_refresh_dashboard,
-            "Refresh List",
-            "Navigation",
-            display="Ctrl+R",
-        )
-        sc.register_contextual(
-            "Ctrl+A",
-            DashboardFrame,
-            self._sc_select_all_invoices,
-            "Select All",
-            "Navigation",
-            display="Ctrl+A",
-        )
+        # ---- Contextual: the invoice list ---------------------------------
+        sc.register_contextual("Ctrl+F", DashboardFrame, lambda: self.frames[DashboardFrame].focus_search(), "Search", around, display="Ctrl+F")
+        sc.register_contextual("Ctrl+D", DashboardFrame, self._sc_duplicate_invoice,   "Make a Copy of the Invoice",  around, display="Ctrl+D")
+        sc.register_contextual("Ctrl+P", DashboardFrame, self._sc_print_pdf,           "Print the Invoice",           around, display="Ctrl+P")
+        sc.register_contextual("Ctrl+E", DashboardFrame, self._sc_export_pdf,          "Save the Invoice as a PDF",   around, display="Ctrl+E")
+        sc.register_contextual("Ctrl+R", DashboardFrame, self._sc_refresh_dashboard,   "Show the Latest Invoices",    around, display="Ctrl+R")
+        sc.register_contextual("Ctrl+A", DashboardFrame, self._sc_select_all_invoices, "Select All Invoices",         around, display="Ctrl+A")
 
-        # ---- Contextual: Clients / Catalog search boxes ------------------
-        sc.register_contextual(
-            "Ctrl+F",
-            ClientsFrame,
-            lambda: self.frames[ClientsFrame].focus_search(),
-            "Search",
-            "Navigation",
-            display="Ctrl+F",
-        )
-        sc.register_contextual(
-            "Ctrl+F",
-            CatalogFrame,
-            lambda: self.frames[CatalogFrame].focus_search(),
-            "Search",
-            "Navigation",
-            display="Ctrl+F",
-        )
+        # ---- Contextual: Clients / Items search boxes -----------------------
+        sc.register_contextual("Ctrl+F", ClientsFrame, lambda: self.frames[ClientsFrame].focus_search(), "Search", around, display="Ctrl+F")
+        sc.register_contextual("Ctrl+F", CatalogFrame, lambda: self.frames[CatalogFrame].focus_search(), "Search", around, display="Ctrl+F")
 
         # ---- Contextual: Invoice Form -------------------------------------
-        sc.register_contextual(
-            "Ctrl+S",
-            InvoiceFormFrame,
-            self._sc_save_invoice,
-            "Save Invoice",
-            "Invoice Form",
-            display="Ctrl+S",
-        )
-        sc.register_contextual(
-            "Ctrl+Shift+A",
-            InvoiceFormFrame,
-            self._sc_add_item,
-            "Add Item",
-            "Invoice Form",
-            display="Ctrl+Shift+A",
-        )
-        sc.register_contextual(
-            (
-                "Ctrl+=",
-                "Ctrl++",
-            ),  # Ctrl+Plus: the physical =/+ key, with or without Shift, or the keypad's +
-            InvoiceFormFrame,
-            self._sc_add_item,
-            "Add Item (Row)",
-            "Invoice Form",
-            display="Ctrl+Plus",
-            auto_repeat=True,
-        )
-        sc.register_contextual(
-            "Ctrl+Shift+Del",
-            InvoiceFormFrame,
-            self._sc_remove_item,
-            "Delete Selected Item",
-            "Invoice Form",
-            display="Ctrl+Shift+Del",
-            auto_repeat=True,
-        )
-        sc.register_contextual(
-            "Ctrl+-",  # main-row minus and the keypad's -
-            InvoiceFormFrame,
-            self._sc_remove_item,
-            "Remove Item (Row)",
-            "Invoice Form",
-            display="Ctrl+Minus",
-            auto_repeat=True,
-        )
-        sc.register_contextual(
-            "F2",
-            InvoiceFormFrame,
-            self._sc_edit_item,
-            "Edit Selected Item",
-            "Invoice Form",
-            display="F2",
-        )
-        # Esc on the invoice form == clicking "Back to Dashboard": same method, same unsaved-changes confirmation.
-        sc.register_contextual(
-            "Esc",
-            InvoiceFormFrame,
-            self._sc_back_to_dashboard,
-            "Back to Dashboard",
-            "Invoice Form",
-            display="Esc",
-        )
+        sc.register_contextual("Ctrl+S", InvoiceFormFrame, self._sc_save_invoice, "Save the Invoice", writing, display="Ctrl+S")
+        sc.register_contextual("Ctrl+Shift+A", InvoiceFormFrame, self._sc_add_item, "Add an Item", writing, display="Ctrl+Shift+A")
+        sc.register_contextual(("Ctrl+=", "Ctrl++"),                    # Ctrl+Plus: the physical =/+ key, with or without Shift, or the keypad's +
+                               InvoiceFormFrame, self._sc_add_item, "Add Another Item", writing, display="Ctrl+Plus", auto_repeat=True)
+        sc.register_contextual("Ctrl+Shift+Del", InvoiceFormFrame, self._sc_remove_item, "Remove the Selected Item", writing,
+                               display="Ctrl+Shift+Del", auto_repeat=True)
+        sc.register_contextual("Ctrl+-",                                # main-row minus and the keypad's -
+                               InvoiceFormFrame, self._sc_remove_item, "Remove an Item", writing, display="Ctrl+Minus", auto_repeat=True)
+        sc.register_contextual("F2", InvoiceFormFrame, self._sc_edit_item, "Edit the Selected Item", writing, display="F2")
+        # Esc on the invoice form == clicking "Back to Invoices": same method, same unsaved-changes confirmation.
+        sc.register_contextual("Esc", InvoiceFormFrame, self._sc_back_to_dashboard, "Back to the Invoices Page", writing, display="Esc")
         # Native Qt field traversal / per-widget Enter handling, not a central registration -- documented here anyway
         # so the reference card stays the one complete list of shortcuts.
-        sc.register_info("Tab / Shift+Tab", "Move Between Fields", "Invoice Form")
-        sc.register_info("↑ / ↓  •  Page Up / Down", "Scroll the Form", "Invoice Form")
-        sc.register_info("Enter", "Next Field", "Invoice Form")
+        sc.register_info("Tab / Shift+Tab", "Move Between Fields", writing)
+        sc.register_info("↑ / ↓  •  Page Up / Down", "Scroll the Page", writing)
+        sc.register_info("Enter", "Go to the Next Field", writing)
+
+        # ---- Contextual: Settings ----------------------------------------
+        sc.register_contextual("Ctrl+S", SettingsFrame, self._sc_save_settings, "Save Your Changes", "Settings", display="Ctrl+S")
+        sc.register_contextual("Esc", SettingsFrame, self.close_settings, "Go Back", "Settings", display="Esc")
 
         # ---- Anywhere -------------------------------------------------------
-        sc.register_global(
-            "F1", self._sc_show_shortcuts, "Show This Help", "Anywhere", display="F1"
-        )
-        # Every dialog (Settings, About, PDF Viewer, Add Client, ...) handles its own Esc -> close/cancel.
-        sc.register_info("Esc", "Close Dialog / PDF Viewer", "Anywhere")
+        sc.register_global("F1", self.open_help, "Open Help", "Anywhere", display="F1")
+        sc.register_global("Ctrl+/", self.open_shortcuts, "See All Shortcuts", "Anywhere", display="Ctrl+/")
+        sc.register_global("Ctrl+\\", self._sc_toggle_menu, "Hide or Show the Menu", "Anywhere", display="Ctrl+\\")
+        # Every small window (About, the invoice viewer, Add Client, ...) handles its own Esc -> close/cancel.
+        sc.register_info("Esc", "Close a Window", "Anywhere")
 
     def active_frame_class(self) -> Optional[Type]:
         return self._current_frame_class
@@ -14051,40 +12761,87 @@ class InvoiceApp(QMainWindow):
     def _sc_edit_item(self):
         self.frames[InvoiceFormFrame].edit_selected_item()
 
+    def _sc_save_settings(self):
+        self.frames[SettingsFrame].save()
+
     def _sc_back_to_dashboard(self):
-        """Esc on the invoice form: identical to the "Back to Dashboard" button -- show_frame() already asks about
-        unsaved changes on its own when leaving the invoice form for a different page.
-        """
+        """Esc on the invoice form: identical to the "Back to Invoices" button -- show_frame() already asks about
+        unsaved changes on its own when leaving the invoice form for a different page."""
         self.show_frame(DashboardFrame)
 
     def _sc_show_shortcuts(self):
         self.open_shortcuts()
 
+    def _sc_toggle_menu(self):
+        """Ctrl+\\: hides the menu names (leaving just the pictures) or shows them again."""
+        if not self.sidebar.toggle_collapsed():
+            Toast.show_message(self, "This window is too small for the full menu. Make it bigger to see the names.", "info")
+
     # ------------------------------------------------------------------ #
     #  Navigation
     # ------------------------------------------------------------------ #
-    def show_frame(self, frame_class: Type, *args) -> None:
-        # Give the currently visible page a chance to block the switch (an invoice form with unsaved edits). That includes
-        # asking for the invoice form while it is already showing -- the sidebar's "New Invoice" button, Ctrl+N: opening
-        # it again re-initialises the form, which would silently throw the edits away. (The Tk build only guarded Ctrl+N.)
-        current_frame = self.frames.get(self._current_frame_class)
-        if current_frame is not None and hasattr(
-            current_frame, "confirm_navigate_away"
-        ):
-            if not current_frame.confirm_navigate_away():
-                return
+    #: Pages that are built when they are opened and thrown away when they are left: they are used now and then and hold
+    #: pictures and previews, so they should not sit in memory the rest of the time.
+    TRANSIENT_FRAMES: Tuple[Type, ...] = (SettingsFrame,)
 
-        frame = self.frames[frame_class]
+    def _may_leave_current_page(self, target: Type) -> bool:
+        """Asks the page on screen whether it may be left (a page with unsaved changes asks the user). That includes asking
+        for the invoice form while it is already showing -- the sidebar's "New Invoice" button, Ctrl+N: opening it again
+        re-initialises the form, which would silently throw the edits away. While Settings is open on top of an unfinished
+        invoice, leaving for anywhere but back to that invoice asks about the invoice too."""
+        current = self._current_frame_class
+        if target is current and current in self.TRANSIENT_FRAMES:
+            return True                                  # asking for the page already on screen just moves within it
+        pages = [self.frames.get(current)]
+        if current is SettingsFrame and self._settings_return is InvoiceFormFrame:
+            pages.append(self.frames.get(InvoiceFormFrame))
+        return all(page is None or not hasattr(page, "confirm_navigate_away") or page.confirm_navigate_away()
+                   for page in pages)
+
+    def show_frame(self, frame_class: Type, *args) -> None:
+        if not self._may_leave_current_page(frame_class):
+            return
+        self._activate(frame_class, *args)
+
+    def _activate(self, frame_class: Type, *args, refresh: bool = True) -> None:
+        """Brings a page to the front (building it first when it is one that is only made on demand). `refresh=False`
+        shows it exactly as it was left, without calling its on_show()."""
+        previous = self._current_frame_class
+        frame = self.frames.get(frame_class)
+        if frame is None and frame_class in self.TRANSIENT_FRAMES:
+            frame = frame_class(self.container, self)
+            self.frames[frame_class] = frame
+            self.container.addWidget(frame)
+        page_changed = frame_class is not previous
         self.container.setCurrentWidget(frame)
         # The invoice form belongs to the Dashboard in the menu: that button stays highlighted while it is open.
-        self.sidebar.set_active(
-            frame_class.__name__
-            if frame_class in (DashboardFrame, ClientsFrame, CatalogFrame)
-            else "DashboardFrame"
-        )
+        if frame_class is SettingsFrame:
+            active = SettingsFrame.__name__
+        else:
+            active = frame_class.__name__ if frame_class in (DashboardFrame, ClientsFrame, CatalogFrame) else "DashboardFrame"
+        self.sidebar.set_active(active)
         self._current_frame_class = frame_class
-        if hasattr(frame, "on_show"):
+        if refresh and hasattr(frame, "on_show"):
             frame.on_show(*args)
+        if page_changed and self.isVisible():
+            fade_in(frame)
+        if page_changed and previous in self.TRANSIENT_FRAMES:
+            self._drop_transient(previous)
+
+    def _drop_transient(self, frame_class: Type) -> None:
+        """Throws away a page that was built on demand, and gives its memory back."""
+        frame = self.frames.pop(frame_class, None)
+        if frame is None:
+            return
+        try:
+            if hasattr(frame, "release"):
+                frame.release()
+        finally:
+            self.container.removeWidget(frame)
+            frame.hide()
+            frame.setParent(None)
+            frame.deleteLater()
+        QTimer.singleShot(0, free_memory)
 
     def show_frame_by_name(self, name: str) -> None:
         mapping = {
@@ -14095,14 +12852,32 @@ class InvoiceApp(QMainWindow):
         }
         self.show_frame(mapping[name])
 
-    def open_settings(self) -> None:
-        run_dialog(SettingsDialog(self, self._on_settings_saved))
+    def open_settings(self, page: Optional[int] = None) -> None:
+        """Settings opens as a page of this window (`page` picks which Settings page). The page it was opened from stays
+        exactly as it is -- an invoice being written is not lost -- and Back (or Esc) returns to it."""
+        if self._current_frame_class is not SettingsFrame:
+            self._settings_return = self._current_frame_class or DashboardFrame
+        self._activate(SettingsFrame, page)
+
+    def close_settings(self) -> None:
+        """Back from Settings to the page it was opened from (asks first when there are unsaved changes)."""
+        settings = self.frames.get(SettingsFrame)
+        if settings is None or self._current_frame_class is not SettingsFrame or not settings.confirm_navigate_away():
+            return
+        target = self._settings_return or DashboardFrame
+        if target is InvoiceFormFrame:
+            self._activate(InvoiceFormFrame, refresh=False)          # the invoice is exactly as it was left
+        else:
+            self._activate(target)
 
     def open_about(self) -> None:
         run_dialog(AboutDialog(self))
 
     def open_shortcuts(self) -> None:
         run_dialog(ShortcutsDialog(self, self.shortcuts.grouped_reference()))
+
+    def open_help(self) -> None:
+        run_dialog(HelpDialog(self))
 
     def _on_settings_saved(self, new_theme: Optional[str] = None) -> None:
         # 1. LIVE THEME SWITCHING: one application-wide stylesheet + palette swap re-colours every widget that exists,
@@ -14114,11 +12889,14 @@ class InvoiceApp(QMainWindow):
         global CONFIG, CURRENCY_SYMBOL
         CONFIG = load_config()
         CURRENCY_SYMBOL = CONFIG.get("currency_symbol", "₹")
+        set_animations_enabled(bool(CONFIG.get("animations", True)) and system_allows_animations())
 
         # 3. Make every screen redraw with the new colours / symbol. The invoice form is special-cased: on_show()
         #    resets and reloads the whole form, which would silently wipe an in-progress invoice if the user opened
         #    Settings mid-edit. It gets a lightweight refresh that only updates currency/theme-dependent display.
-        for frame in self.frames.values():
+        for frame in list(self.frames.values()):
+            if isinstance(frame, SettingsFrame):
+                continue                                    # (the Settings page is the one that called: it refreshes itself)
             if isinstance(frame, InvoiceFormFrame):
                 frame.refresh_after_settings_change()
             elif hasattr(frame, "on_show"):
@@ -14141,16 +12919,10 @@ class InvoiceApp(QMainWindow):
                 msg = self.task_queue.get_nowait()
                 self.show_progress(False)
                 if msg["status"] == "success":
-                    PDFViewer(
-                        self, msg["path"], invoice_data=msg.get("invoice_data")
-                    ).show()
+                    PDFViewer(self, msg["path"], invoice_data=msg.get("invoice_data")).show()
                     self.frames[DashboardFrame].on_show()
                 else:
-                    Messagebox.show_error(
-                        "Error",
-                        msg.get("message", "An unknown error occurred."),
-                        parent=self,
-                    )
+                    Messagebox.show_error("Error", msg.get("message", "An unknown error occurred."), parent=self)
         except queue.Empty:
             pass
         finally:
@@ -14161,14 +12933,10 @@ class InvoiceApp(QMainWindow):
     #  Closing
     # ------------------------------------------------------------------ #
     def closeEvent(self, event) -> None:
-        if not self._closing_for_good:
-            frame = self._active_frame()
-            if (
-                isinstance(frame, InvoiceFormFrame)
-                and not frame.confirm_navigate_away()
-            ):
-                event.ignore()
-                return
+        if not self._closing_for_good and not self._may_leave_current_page(DashboardFrame):
+            event.ignore()                  # an invoice or the Settings page has changes that are not saved: the user said no
+            return
+        self._handed_over = True            # a hand-over from the opening card that is still on its way must not bring a closed window back
         self._poll_timer.stop()
         self._splash_timer.stop()
         self._close_splash()
@@ -14180,8 +12948,7 @@ class InvoiceApp(QMainWindow):
 # =============================================================================
 def startup_background_task(app_instance):
     """Put whatever heavy lifting you need at start-up here. It runs in a thread, so it never freezes the splash screen
-    or the GUI. If it needs to update the GUI it MUST go through the app's task_queue, never touch a widget itself.
-    """
+    or the GUI. If it needs to update the GUI it MUST go through the app's task_queue, never touch a widget itself."""
     logger.info("Background thread started successfully.")
 
 
@@ -14189,13 +12956,10 @@ def _orderly_shutdown(app: QApplication) -> None:
     """Closes and deletes every window in order, then flushes the pending deletions, BEFORE the interpreter exits.
     PySide6 can crash while it destroys widgets at interpreter shutdown that are only kept alive by a Python slot
     (lambda) connected to one of their own signals; tearing everything down here, while the event loop machinery is
-    still intact, avoids that. Qt-owned popups (completer lists, tooltips) are left alone: Qt frees those itself.
-    """
+    still intact, avoids that. Qt-owned popups (completer lists, tooltips) are left alone: Qt frees those itself."""
     for window in app.topLevelWidgets():
         if isinstance(window, InvoiceApp):
-            window._closing_for_good = (
-                True  # no "unsaved changes" prompt while the process is going away
-            )
+            window._closing_for_good = True         # no "unsaved changes" prompt while the process is going away
         if window.windowType() in (Qt.WindowType.Popup, Qt.WindowType.ToolTip):
             continue
         window.close()
@@ -14212,9 +12976,7 @@ def _log_unhandled_exception(exc_type, exc_value, exc_tb) -> None:
         sys.__excepthook__(exc_type, exc_value, exc_tb)
         return
     try:
-        logger.critical(
-            "Unhandled exception", exc_info=(exc_type, exc_value, exc_tb)
-        )  # file + console (stream handler)
+        logger.critical("Unhandled exception", exc_info=(exc_type, exc_value, exc_tb))   # file + console (stream handler)
     except Exception:
         sys.__excepthook__(exc_type, exc_value, exc_tb)
 
@@ -14224,11 +12986,8 @@ def _log_unhandled_thread_exception(args) -> None:
     if args.exc_type is SystemExit:
         return
     try:
-        logger.critical(
-            "Unhandled exception in thread %s",
-            getattr(args.thread, "name", "?"),
-            exc_info=(args.exc_type, args.exc_value, args.exc_traceback),
-        )
+        logger.critical("Unhandled exception in thread %s", getattr(args.thread, "name", "?"),
+                        exc_info=(args.exc_type, args.exc_value, args.exc_traceback))
     except Exception:
         pass
 
@@ -14245,7 +13004,6 @@ def configure_windows_app_identity() -> None:
         return
     try:
         import ctypes
-
         ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
             "EllowLabs.Vyaprix"
         )
@@ -14257,12 +13015,9 @@ def configure_high_dpi() -> None:
     """Per-monitor, exact-fraction scaling. Qt 6 already scales every window by the DPI of the screen it is on; this pins
     the rounding policy to "pass through", so a 125 % or 150 % Windows scale stays 125 % / 150 % instead of being rounded
     to 100 % / 200 % (which would make the whole window too small or too large), and asks Windows for per-monitor-v2
-    awareness, so the window re-scales as it is dragged between monitors. Must run before the QApplication exists.
-    """
+    awareness, so the window re-scales as it is dragged between monitors. Must run before the QApplication exists."""
     try:
-        QGuiApplication.setHighDpiScaleFactorRoundingPolicy(
-            Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
-        )
+        QGuiApplication.setHighDpiScaleFactorRoundingPolicy(Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
     except Exception:
         logger.warning("Could not set the high-DPI scale policy", exc_info=True)
     if sys.platform == "win32":
@@ -14276,14 +13031,13 @@ def main() -> int:
             configure_high_dpi()
         app = QApplication.instance() or QApplication(sys.argv)
         app.setApplicationName(APP_NAME)
+        tune_caches()
         sys.excepthook = _log_unhandled_exception
         threading.excepthook = _log_unhandled_thread_exception
         window = InvoiceApp()
 
         # Start the background task as a daemon thread before the event loop runs. The event loop stays on the main thread.
-        bg_thread = threading.Thread(
-            target=startup_background_task, args=(window,), daemon=True
-        )  # daemon: dies with the app
+        bg_thread = threading.Thread(target=startup_background_task, args=(window,), daemon=True)  # daemon: dies with the app
         bg_thread.start()
 
         exit_code = app.exec()
@@ -14293,12 +13047,11 @@ def main() -> int:
         logger.critical("Fatal error during application startup", exc_info=True)
         try:
             _close_splash_windows()
-            QMessageBox.critical(
-                None,
-                "Vyaprix — Fatal Error",
-                "Vyaprix could not start. See the log file for details:\n"
-                f"{LOG_FILE}",
-            )
+            QMessageBox.critical(None, "Vyaprix could not start",
+                                 "Sorry, Vyaprix could not open.\n\n"
+                                 "Try closing it and opening it again. If this keeps happening, send us this file "
+                                 "so we can help:\n"
+                                 f"{LOG_FILE}")
         except Exception:
             pass
         raise
