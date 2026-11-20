@@ -1,1 +1,0 @@
-Ideas for next time, best first: payment reminders for overdue invoices, customer statements, quotations that turn into invoices, recurring invoices, and a monthly sales and GST report.
