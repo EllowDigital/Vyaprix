@@ -11,7 +11,7 @@
 #           python-barcode is optional (invoices simply print without a barcode)
 #           NotoSans-Regular.ttf / NotoSans-Bold.ttf in a "fonts" folder and the
 #           logo images in an "assets" folder, next to this file (as before)
-#  Run:     python Vyaprix_PySide6.py
+#  Run:     python Vyaprix.py
 # =============================================================================
 
 # --- Standard Library: Eager Imports ---
