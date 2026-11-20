@@ -213,7 +213,7 @@ BASE_BUILD_VERSION: str = "1.5.2"
 CHANGELOG: Tuple[Release, ...] = (
     Release(
         "v2.4",
-        "15 November 2026",
+        "20 November 2026",
         "A friendlier Vyaprix: correct amounts, easier payments and plain wording",
         (
             "Every invoice line now shows its amount after the discount: Amount = Quantity x Rate - Discount. The invoice form, "
