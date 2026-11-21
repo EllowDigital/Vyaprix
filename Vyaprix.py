@@ -11,7 +11,7 @@
 #           python-barcode is optional (invoices simply print without a barcode)
 #           NotoSans-Regular.ttf / NotoSans-Bold.ttf in a "fonts" folder and the
 #           logo images in an "assets" folder, next to this file (as before)
-#  Run:     python Vyaprix.py
+#  Run:     python Vyaprix_PySide6.py
 # =============================================================================
 
 # --- Standard Library: Eager Imports ---
@@ -211,20 +211,94 @@ BASE_BUILD_VERSION: str = "1.5.2"
 # over. APP_VERSION, the build number, the release date and the "What's new" window all follow from this list, so they
 # can never disagree: the build number is "<version>.<number of changes made since the uploaded v1.5 / build 1.5.2>".
 # A release carries the day its newest build was handed over. Builds of v2.4 handed over so far:
+#   build 2.4.50 -- 14 November 2026      build 2.4.70 -- 20 November 2026      build 2.4.76 -- 21 November 2026
 CHANGELOG: Tuple[Release, ...] = (
     Release(
         "v2.4",
         "21 November 2026",
         "A friendlier Vyaprix: correct amounts, easier payments and plain wording",
         (
-            "Consistent invoice math across forms, previews, and PDFs: every line calculates Amount = Quantity x Rate - Discount, keeping subtotals, discounts, totals, paid amounts, balances, and words in sync.",
-            "Easier payment recording with a dedicated Record Payment window on Invoices, a method-aware Reference field (12-digit UPI UTR, cheque number, or bank/card reference), payment notes, and reference numbers printed in the invoice payment list.",
-            "Better due-date tracking on Invoices with an Overdue filter, a Due On column (highlighted in red when overdue), clear summary card labels, and animated summary totals.",
-            'Flexible invoice controls: complimentary invoices default to "No payment required" (restoring your default terms when switched back), a "Print on the invoice" selector for notes and terms, and per-invoice or global status watermark toggles.',
-            "Redesigned status watermarks (PAID, BALANCE DUE, etc.) render cleanly on top of the page with true transparency so text stays legible and shaded rows or totals never clip them.",
-            "Redesigned Settings in a standalone window (Esc to close, Ctrl+S to save, F11 for full screen) with six clear sections—General, Your Details, Payment, Invoice Design, Logo & Signature, and Backup & Restore—live theme and sample invoice previews, drag-and-drop image uploads, auto-capitalized GSTINs, inline field validation, unsaved-change prompts, and quick backup folder actions.",
-            'Smoother navigation and plain everyday wording throughout—including "Invoices", "Items", and "Restore from a backup"—plus a collapsible left menu (Ctrl+\\), a new Help window (F1), a faster welcome screen with click-to-skip, subtle animations (with a toggle and Windows reduced-motion support), and auto-dismissing notifications.',
-            "Sustained performance over long sessions by releasing unused memory when windows, previews, or images close or when the app is minimized, while automatically upgrading older data and backups.",
+            "Vyaprix stays light for days on end: a moment after a window or a picture is closed it is cleared from memory, "
+            "and when Vyaprix is minimized or left in the background it gives back the memory it is not using, so Task "
+            "Manager shows a much smaller number.",
+            'Windows fade in as they open, an error message eases in under its box, and the "working" strip and the '
+            '"nothing here yet" note appear softly instead of popping up. All the movement follows the "Smooth movement" '
+            "switch and the Windows setting for reduced animation.",
+            "The highlight in the menu glides to the page you choose and brightens under the mouse, and on/off switches "
+            "slide instead of jumping.",
+            "The four figures on the Invoices page run up from zero when Vyaprix opens, and run up or down to the new "
+            "numbers whenever an invoice changes them.",
+            "Pick a colour theme in Settings and the whole of Vyaprix changes at once, with the old colours melting into "
+            "the new ones, so you can see how every page looks before you save. Closing Settings without saving puts the "
+            "saved colours back.",
+            "The Settings window has minimize, maximize and full-screen buttons (F11 for full screen, Esc to leave it). It "
+            "opens in the middle of Vyaprix and remembers the size you gave it.",
+            "Every invoice line now shows its amount after the discount: Amount = Quantity x Rate - Discount. The invoice form, "
+            "the preview and the PDF all show the same figures, and the subtotal, the discount, the total, the amount paid, "
+            "the balance due and the total in words always agree with the Amount column.",
+            "Recording a payment now has a Reference box that changes with the payment method: the 12-digit UPI transaction "
+            "ID (UTR), the cheque number, or the reference / authorization number for a bank transfer or a card. The Note "
+            'box is still there for anything else, such as "Received from my brother".',
+            "The payment reference is saved with the payment and printed in the payment list on the invoice.",
+            'A new "Record Payment" window on the Invoices page: add a payment to any invoice without opening it.',
+            'The Invoices page has an "Overdue" filter for unpaid invoices whose due date has passed, a "Due On" column '
+            "(shown in red when late) and a short line on each summary card that says what it adds up.",
+            "Settings opens in a window of its own, with its own button on the taskbar, so it can sit beside Vyaprix while "
+            "you work. Esc closes it, Ctrl+S saves, and the invoice you were writing is kept exactly as it was while you "
+            "look at Settings.",
+            "Vyaprix lets go of what it no longer needs: closed pages, finished previews and old pictures are cleared from "
+            "memory, so it stays quick and light even after a long day of use.",
+            'A free (complimentary) invoice starts with the payment terms "No payment required"; switching it back to a normal '
+            "invoice brings your own terms back.",
+            'A new "Print on the invoice" box on the New Invoice page: print the notes and the terms, only the terms, '
+            "only the notes, or neither.",
+            "The invoice list, the invoice form and Settings fit the window, from a small laptop screen to a large monitor.",
+            'The menu on the left can be folded away: press "Hide menu" (or Ctrl+\\) and it slides in to a narrow strip '
+            'of pictures; press "Show menu" and it slides back out. Vyaprix remembers how you left it.',
+            "A new welcome screen: a rounded card with a soft shadow, an invoice that writes itself while Vyaprix gets ready "
+            "and a green READY stamp at the end. It fits any screen size, and a click skips the wait.",
+            "Vyaprix opens faster: the welcome screen follows what the app is really doing and gives way as soon as "
+            "everything is ready, instead of always waiting two and a half seconds.",
+            'Everything on screen is written in plain words. "Dashboard" is now "Invoices", "Catalog" is "Items", '
+            '"Import Database" is "Restore from a backup", and no message uses technical terms.',
+            "A new Help window (F1, or Help in the menu): short answers to the questions people ask most, each with a "
+            "button that takes you straight to the right place, such as starting an invoice or saving a backup.",
+            'Pages fade in gently, and good news such as "Invoice saved" appears as a small message that slides up and '
+            "goes away by itself, so nobody has to click OK.",
+            "Two new switches in Settings > General: smooth movement and the welcome screen. Vyaprix also follows the "
+            "Windows setting for reduced animation.",
+            "Tips and clearer wording in Settings, on the invoice form, in the keyboard shortcuts list and in every message.",
+            "The version, the build number and the release date are the same everywhere they appear: About, What's New and "
+            "the details stored inside every PDF invoice.",
+            "What's New shows the date of every release next to its notes, and marks the release you are running.",
+            "The status watermark (PAID, BALANCE DUE ...) is fixed: it is no longer half hidden and half shown. It is now "
+            "drawn last, on top of the page, with real transparency and sized to the page, so shaded rows, total boxes and "
+            "colour bands can no longer cover part of it, and the text under it stays readable.",
+            'The status watermark can be switched off for every invoice: "Show the status watermark" in Settings > '
+            "Invoice Design.",
+            'It can also be shown or hidden for a single invoice: the new "Status Watermark" box on the invoice form '
+            "(Default, On or Off) is remembered with the invoice.",
+            "Payment and Invoice Design are now two separate pages in Settings. Payment: currency, bank account, UPI ID and "
+            "QR code, payment terms and notes, and when the payment details are printed. Invoice Design: template and "
+            "brand colour, status watermark, total in words, footer note and default terms.",
+            "Settings is redesigned: a side menu of six pages -- General, Your Details, Payment, Invoice Design, Logo & "
+            "Signature and Backup & Restore -- each made of cards that say what their settings do.",
+            "Settings fits every window size: the menu shrinks to pictures in a narrow window and two-column cards flow "
+            "into one column.",
+            "Mistakes are explained next to the box (email, phone number, GSTIN, custom currency symbol). A page that has "
+            "one is marked in the menu, and Save takes you straight to it instead of showing a pop-up.",
+            "Settings tells you whether there is anything to save, Ctrl+S saves, and leaving Settings with unsaved changes "
+            "asks first.",
+            '"Preview sample invoice" prints from what is on the screen, so a template, colour or watermark setting can be '
+            "tried before it is saved.",
+            "Logo, signature and UPI QR code: drop a picture onto its row, a file that is not a readable picture is "
+            "refused, and going Back without saving puts back the pictures you replaced.",
+            "The UPI QR code is now set up beside the UPI ID on the Payment page; Logo & Signature keeps the logo and the "
+            "signature.",
+            "The GSTIN is written in capitals for you when you leave the box.",
+            'Backup & Restore shows where your data is kept, with "Copy path" and "Show in folder" buttons.',
+            "Data and backups made by earlier versions are upgraded automatically to remember each invoice's watermark "
+            "choice; older invoices follow the Settings switch.",
         ),
     ),
     Release(
@@ -232,9 +306,28 @@ CHANGELOG: Tuple[Release, ...] = (
         "12 November 2026",
         "One GST line, professional A4 invoices, sharp and responsive on every screen",
         (
-            "Single combined CGST/SGST or IGST lines on forms and PDFs with hover rate-split details and a multi-rate GST summary table on PDFs.",
-            'Refined A4 invoice PDFs across all templates with balanced margins, repeating item headers on multi-page invoices, page numbering ("Page x of y"), smart auto-fit for near-overflow pages, and no split rows.',
-            "Responsive layouts and crisp visuals across window sizes, screen resolutions, and Windows display scaling (such as 125% or 150%), backed by unified release and build numbering.",
+            "CGST and SGST (or IGST) appear once on the invoice form and on the PDF -- one combined line each, however many "
+            "GST rates the items use. Hover the line on the form to see the split by rate.",
+            'A "GST summary" on the PDF shows the taxable value and the tax at each rate whenever an invoice uses more than '
+            "one rate.",
+            "The invoice PDF is redesigned for A4: header, bill-to and invoice details, items, totals, payment box and "
+            "signature on even margins, in all four templates.",
+            "Long invoices run on to as many A4 pages as they need: the item headings repeat on every page, no line is "
+            'ever cut in two, and each page carries the invoice number and "Page x of y".',
+            "Auto-fit: an invoice that runs only a few lines onto an extra page is fitted onto fewer pages -- the gaps "
+            "tighten a little, the type stays the same size.",
+            "The item columns size themselves to what is in them -- quantity, unit, rate, HSN / SAC, GST % and amounts never "
+            "wrap or get cut, and long descriptions wrap inside their cell.",
+            "Very large amounts and very long names, addresses and notes still fit inside the page.",
+            "The small previews of each invoice template in Settings are redrawn to match the new layouts.",
+            "Vyaprix follows your Windows display scale: 125 % or 150 % is followed exactly, the logo, icons and template "
+            "previews stay sharp, and the invoice preview and Settings sharpen again when you move them to another monitor.",
+            "The main window opens at a size that fits your screen, cannot be made too small to use, and fits itself again "
+            "when you move it to a smaller monitor.",
+            "The menu on the left shrinks to pictures in a narrow window and drops the logo in a short one, so every "
+            "screen stays usable as you resize.",
+            'The version, the build number and the "What\'s New" list all come from one list of changes: the build number '
+            "counts every change made since v1.5 (build 1.5.2).",
         ),
     ),
     Release(
@@ -242,8 +335,10 @@ CHANGELOG: Tuple[Release, ...] = (
         "10 November 2026",
         "Invoice templates",
         (
-            "Four invoice templates—Classic, Modern, Minimal, and Corporate—with visual previews and sample invoice printing in Settings > Invoice Design.",
-            "Ten preset brand colours plus custom colour selection, with per-invoice template selection saved alongside each invoice.",
+            "Four invoice templates -- Classic, Modern, Minimal and Corporate -- picked in Settings > Invoice Design, with a "
+            'small preview of each and a "Preview sample invoice" button.',
+            "A brand colour for Modern, Minimal and Corporate: ten ready colours, or any colour of your own.",
+            'A template can be chosen for a single invoice ("Invoice Look" on the invoice form) and is remembered with it.',
         ),
     ),
     Release(
@@ -251,9 +346,22 @@ CHANGELOG: Tuple[Release, ...] = (
         "9 November 2026",
         "Professional invoicing",
         (
-            "Quantity, unit, and rate per line item with automatic calculation, saved unit-specific item rates, HSN/SAC codes, and item-level or invoice-level discounts.",
-            "Automatic CGST + SGST or IGST selection based on place of supply and customer GSTIN, plus due dates, PO/reference numbers, reverse charge, rounding off, total in words, and customer notes or terms.",
-            "Faster item entry by pressing Enter at the end of a line, inline editing on the Items page, and seamless upgrade of existing data and invoice totals.",
+            "Every invoice line has a quantity, a unit and a rate (250 Nos x Rs. 50); the line amount is worked out for you.",
+            "One saved item can be sold in several units, each with its own rate, and Vyaprix remembers the rate per unit.",
+            "GST for the whole invoice or a different GST rate for every item, chosen per invoice.",
+            "HSN / SAC code on every item, saved with the item.",
+            "Item discounts as an amount or a percentage, besides the overall discount.",
+            "The place of supply decides CGST + SGST or IGST (a customer's GSTIN fills it in).",
+            "Due date (on receipt, 7, 15, 30 ... days, or a date you pick), customer PO / reference number and a "
+            "reverse-charge flag.",
+            "Optional round off of the invoice total to the nearest rupee.",
+            "Notes for the customer and Terms & Conditions printed on the invoice, with default terms set in Settings.",
+            "The invoice total in words (Rupees ... Only), switched on in Settings.",
+            "The Items page shows and edits unit, HSN / SAC, GST % and the other units an item is sold in.",
+            "The PDF prints quantity, unit, rate, discount and GST columns whenever an invoice uses them; older invoices "
+            "print as before.",
+            "Data and backups made by earlier versions are upgraded automatically; saved invoices keep exactly their totals.",
+            "Faster entry: Enter in the last field of the last line adds a new line.",
         ),
     ),
     Release(
@@ -261,8 +369,14 @@ CHANGELOG: Tuple[Release, ...] = (
         "6 November 2026",
         "Rebuilt for a sharper, faster app",
         (
-            "Rebuilt from the ground up for faster startup, on-demand loading, responsive screen-fitting windows, and eight colour themes including dark options.",
-            "Built-in invoice preview with zoom, page navigation, printing, and sharing, plus multi-invoice batch printing while preserving all familiar app sections.",
+            "The whole app is rebuilt from the ground up, so it looks sharper and responds faster.",
+            "Vyaprix starts faster, because each part is only loaded when it is first needed.",
+            "The invoice preview is built in: zoom, page navigation, print and share.",
+            "Several invoices can be joined into one file for printing in a single step.",
+            "Eight colour themes, including dark ones.",
+            "Every screen of the earlier version is kept: the invoice list, the invoice form, Clients, Items, Settings, "
+            "About, Keyboard Shortcuts and the welcome screen.",
+            "Windows and dialogs never open larger than the screen they are on.",
         ),
     ),
 )
