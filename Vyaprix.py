@@ -11,7 +11,7 @@
 #           python-barcode is optional (invoices simply print without a barcode)
 #           NotoSans-Regular.ttf / NotoSans-Bold.ttf in a "fonts" folder and the
 #           logo images in an "assets" folder, next to this file (as before)
-#  Run:     python Vyaprix.py
+#  Run:     python Vyaprix_PySide6.py
 # =============================================================================
 
 # --- Standard Library: Eager Imports ---
@@ -210,12 +210,29 @@ BASE_BUILD_VERSION: str = "1.5.2"
 # Newest first. EVERY change made to the application adds a line below -- and a new Release whenever a new build is handed
 # over. APP_VERSION, the build number, the release date and the "What's new" window all follow from this list, so they
 # can never disagree: the build number is "<version>.<number of changes made since the uploaded v1.5 / build 1.5.2>".
+# A release carries the day its newest build was handed over. Builds of v2.4 handed over so far:
+#   build 2.4.50 -- 14 November 2026      build 2.4.70 -- 20 November 2026      build 2.4.76 -- 21 November 2026
 CHANGELOG: Tuple[Release, ...] = (
     Release(
         "v2.4",
-        "20 November 2026",
+        "21 November 2026",
         "A friendlier Vyaprix: correct amounts, easier payments and plain wording",
         (
+            "Vyaprix stays light for days on end: a moment after a window or a picture is closed it is cleared from memory, "
+            "and when Vyaprix is minimized or left in the background it gives back the memory it is not using, so Task "
+            "Manager shows a much smaller number.",
+            'Windows fade in as they open, an error message eases in under its box, and the "working" strip and the '
+            '"nothing here yet" note appear softly instead of popping up. All the movement follows the "Smooth movement" '
+            "switch and the Windows setting for reduced animation.",
+            "The highlight in the menu glides to the page you choose and brightens under the mouse, and on/off switches "
+            "slide instead of jumping.",
+            "The four figures on the Invoices page run up from zero when Vyaprix opens, and run up or down to the new "
+            "numbers whenever an invoice changes them.",
+            "Pick a colour theme in Settings and the whole of Vyaprix changes at once, with the old colours melting into "
+            "the new ones, so you can see how every page looks before you save. Closing Settings without saving puts the "
+            "saved colours back.",
+            "The Settings window has minimize, maximize and full-screen buttons (F11 for full screen, Esc to leave it). It "
+            "opens in the middle of Vyaprix and remembers the size you gave it.",
             "Every invoice line now shows its amount after the discount: Amount = Quantity x Rate - Discount. The invoice form, "
             "the preview and the PDF all show the same figures, and the subtotal, the discount, the total, the amount paid, "
             "the balance due and the total in words always agree with the Amount column.",
@@ -226,8 +243,9 @@ CHANGELOG: Tuple[Release, ...] = (
             'A new "Record Payment" window on the Invoices page: add a payment to any invoice without opening it.',
             'The Invoices page has an "Overdue" filter for unpaid invoices whose due date has passed, a "Due On" column '
             "(shown in red when late) and a short line on each summary card that says what it adds up.",
-            "Settings now opens inside the main window as a page with a Back button, instead of in a window of its own. "
-            "Esc goes back, Ctrl+S saves, and the invoice you were writing is kept exactly as it was while you look at Settings.",
+            "Settings opens in a window of its own, with its own button on the taskbar, so it can sit beside Vyaprix while "
+            "you work. Esc closes it, Ctrl+S saves, and the invoice you were writing is kept exactly as it was while you "
+            "look at Settings.",
             "Vyaprix lets go of what it no longer needs: closed pages, finished previews and old pictures are cleared from "
             "memory, so it stays quick and light even after a long day of use.",
             'A free (complimentary) invoice starts with the payment terms "No payment required"; switching it back to a normal '
@@ -4904,6 +4922,37 @@ def theme_is_dark() -> bool:
     return theme_color("is_dark") == "1"
 
 
+def theme_swatch_icon(name: str, width: int = 38, height: int = 20) -> QIcon:
+    """A tiny picture of a colour theme -- its window colour, a card and its main colour -- for the colour list in
+    Settings, so the themes can be told apart before one is picked. Drawn once per theme, sharp on every screen.
+    """
+    theme = THEMES[normalize_theme_name(name)]
+    scale = 2
+    pixmap = QPixmap(width * scale, height * scale)
+    pixmap.setDevicePixelRatio(scale)
+    pixmap.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pixmap)
+    try:
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        outline = QRectF(0.5, 0.5, width - 1.0, height - 1.0)
+        shape = QPainterPath()
+        shape.addRoundedRect(outline, 5, 5)
+        painter.setClipPath(shape)
+        painter.fillRect(QRectF(0, 0, width, height), QColor(theme["bg"]))
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(theme["surface"]))
+        painter.drawRoundedRect(QRectF(width * 0.30, 4, width * 0.62, height - 8), 3, 3)
+        painter.setBrush(QColor(theme["primary"]))
+        painter.drawRect(QRectF(0, 0, width * 0.22, height))
+        painter.setClipping(False)
+        painter.setPen(QPen(QColor(_mix(theme["border"], theme["fg"], 0.35)), 1.0))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawRoundedRect(outline, 5, 5)
+    finally:
+        painter.end()
+    return QIcon(pixmap)
+
+
 def _icon_dir() -> Path:
     for base in (DATA_DIR, Path(tempfile.gettempdir())):
         try:
@@ -5789,9 +5838,7 @@ def fade_in(widget: QWidget, ms: int = 160) -> Optional[QPropertyAnimation]:
     widget is not on screen."""
     if not animations_enabled() or not widget.isVisible():
         return None
-    old = getattr(widget, "_fade_animation", None)
-    if old is not None:
-        old.stop()  # its finished() removes the old effect
+    _end_fade(widget)
     effect = QGraphicsOpacityEffect(widget)
     effect.setOpacity(0.0)
     widget.setGraphicsEffect(effect)
@@ -5805,11 +5852,263 @@ def fade_in(widget: QWidget, ms: int = 160) -> Optional[QPropertyAnimation]:
         if getattr(widget, "_fade_animation", None) is anim:
             widget._fade_animation = None
             widget.setGraphicsEffect(None)
+            anim.deleteLater()  # a finished fade must not stay behind as a child of the page
 
     anim.finished.connect(done)
     widget._fade_animation = anim
     anim.start()
     return anim
+
+
+def _end_fade(widget: QWidget) -> None:
+    """Stops a fade that is still running on `widget` and lets go of it (the old one is replaced by a new fade, or the
+    page is being drawn plainly again)."""
+    old = getattr(widget, "_fade_animation", None)
+    if old is None:
+        return
+    widget._fade_animation = None
+    try:
+        old.stop()
+        old.deleteLater()
+    except RuntimeError:
+        pass  # it went away together with the widget
+
+
+class _Glide(QObject):
+    """One number that slides smoothly between 0 and 1: the part of a hover highlight, a menu choice or a switch that
+    moves. `to(1)` sets off towards 1 and `value` is what to draw at this moment; the owner is repainted at every step.
+    While movement is off -- or the owner is not on screen -- it jumps to its goal at once.
+    """
+
+    def __init__(self, owner: QWidget, ms: int = 150, start: float = 0.0):
+        super().__init__(owner)
+        self._owner = owner
+        self._ms = int(ms)
+        self.value = float(start)
+        self._goal = float(start)
+        self._anim = QVariantAnimation(self)
+        self._anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self._anim.valueChanged.connect(self._on_step)
+
+    @property
+    def goal(self) -> float:
+        return self._goal
+
+    @property
+    def moving(self) -> bool:
+        return self._anim.state() == QAbstractAnimation.State.Running
+
+    def to(self, goal: float) -> None:
+        goal = _clamp01(float(goal))
+        if goal == self._goal and (self.value == goal or self.moving):
+            return
+        self._goal = goal
+        distance = abs(goal - self.value)
+        if not animations_enabled() or not self._owner.isVisible() or distance < 0.001:
+            self.snap()
+            return
+        self._anim.stop()
+        self._anim.blockSignals(
+            True
+        )  # (changing the end points of a finished animation would report a value)
+        self._anim.setDuration(max(40, int(self._ms * distance)))
+        self._anim.setStartValue(self.value)
+        self._anim.setEndValue(goal)
+        self._anim.blockSignals(False)
+        self._anim.start()
+
+    def snap(self, goal: Optional[float] = None, repaint: bool = True) -> None:
+        """Jumps to `goal` (or to the goal it was heading for) without moving."""
+        self._anim.stop()
+        if goal is not None:
+            self._goal = _clamp01(float(goal))
+        self.value = self._goal
+        if repaint:
+            self._owner.update()
+
+    def _on_step(self, value) -> None:
+        self.value = float(value)
+        self._owner.update()
+
+
+def _count_text(value: float) -> str:
+    """A counted-up whole number as the text a figure shows ("12", never "11.6")."""
+    return str(int(round(value)))
+
+
+class _CountUp(QObject):
+    """Makes the number in a label run up (or down) to its new value instead of jumping -- the figures on the Invoices
+    page when it opens or when an invoice changes them. The text it ends on is always exactly `format(target)`.
+    """
+
+    def __init__(self, label: QLabel):
+        super().__init__(label)
+        self._label = label
+        self._format: Callable[[float], str] = _count_text
+        self.target = 0.0  # the number the label shows once it has finished
+        self.shown = 0.0  # the number it shows right now
+        self._anim = QVariantAnimation(self)
+        self._anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self._anim.valueChanged.connect(self._on_step)
+        self._anim.finished.connect(self._settle)
+
+    @property
+    def running(self) -> bool:
+        return self._anim.state() == QAbstractAnimation.State.Running
+
+    def go(
+        self,
+        target: float,
+        fmt: Callable[[float], str],
+        ms: int = 520,
+        start: Optional[float] = None,
+    ) -> None:
+        self._format = fmt
+        self.target = float(target)
+        origin = self.shown if start is None else float(start)
+        self._anim.stop()
+        if (
+            not animations_enabled()
+            or not self._label.isVisible()
+            or origin == self.target
+            or ms <= 0
+        ):
+            self._settle()
+            return
+        self.shown = origin
+        self._label.setText(fmt(origin))
+        self._anim.blockSignals(
+            True
+        )  # (changing the end points of a finished animation would report a value)
+        self._anim.setDuration(int(ms))
+        self._anim.setStartValue(origin)
+        self._anim.setEndValue(self.target)
+        self._anim.blockSignals(False)
+        self._anim.start()
+
+    def _on_step(self, value) -> None:
+        self.shown = float(value)
+        self._label.setText(self._format(self.shown))
+
+    def _settle(self) -> None:
+        self._anim.stop()
+        self.shown = self.target
+        self._label.setText(self._format(self.target))
+
+
+def count_to(
+    label: QLabel,
+    target: float,
+    fmt: Callable[[float], str] = _count_text,
+    ms: int = 520,
+    start: Optional[float] = None,
+) -> None:
+    """Shows `target` in `label`. While movement is on and the label is on screen the figure runs up (or down) from
+    what it showed before; otherwise the text is simply set at once. Either way it ends on exactly `fmt(target)`.
+    """
+    counter = getattr(label, "_counter", None)
+    if counter is None:
+        counter = label._counter = _CountUp(label)
+    counter.go(target, fmt, ms, start)
+
+
+def replay_count(label: QLabel, ms: int = 850) -> None:
+    """Runs the figure in `label` up from zero to the number it is showing (the opening moment of the Invoices page)."""
+    counter = getattr(label, "_counter", None)
+    if counter is not None:
+        counter.go(counter.target, counter._format, ms, 0.0)
+
+
+class _ThemeVeil(QWidget):
+    """A picture of a window as it looked a moment ago, laid over the window and faded away, so that when the colours
+    change the old ones melt into the new ones instead of jumping. Clicks and keys go straight through it, and it removes
+    itself when it has faded (or when the window is resized, because the picture would no longer fit).
+    """
+
+    def __init__(self, window: QWidget, ms: int):
+        super().__init__(window)
+        self._window = window
+        self._pixmap = window.grab()
+        self._alpha = 1.0
+        self._done = False
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.setGeometry(window.rect())
+        self._anim = QVariantAnimation(self)
+        self._anim.setDuration(ms)
+        self._anim.setStartValue(1.0)
+        self._anim.setEndValue(0.0)
+        self._anim.setEasingCurve(QEasingCurve.Type.InOutQuad)
+        self._anim.valueChanged.connect(self._on_step)
+        self._anim.finished.connect(self.remove)
+        for older in window.findChildren(_ThemeVeil):
+            if older is not self:
+                older.remove()  # (the new picture already shows how far the old fade had got)
+        window.installEventFilter(self)
+        self.show()
+        self.raise_()
+
+    def begin(self) -> None:
+        if not self._done:
+            self._anim.start()
+
+    def _on_step(self, value) -> None:
+        self._alpha = float(value)
+        self.update()
+
+    def eventFilter(self, obj, event):
+        if obj is self._window and event.type() == QEvent.Type.Resize:
+            self.remove()
+        return False
+
+    def remove(self) -> None:
+        if self._done:
+            return
+        self._done = True
+        self._anim.stop()
+        self._pixmap = (
+            QPixmap()
+        )  # (a picture as big as the window: do not wait for deleteLater to free it)
+        try:
+            self._window.removeEventFilter(self)
+        except RuntimeError:
+            pass  # the window is already gone
+        self.hide()
+        self.deleteLater()
+
+    def paintEvent(self, _event) -> None:
+        if self._done:
+            return
+        painter = QPainter(self)
+        painter.setOpacity(self._alpha)
+        painter.drawPixmap(self.rect(), self._pixmap)
+
+
+def switch_look(apply: Callable[[], None], ms: int = 260) -> None:
+    """Runs `apply` (which changes how the whole application looks) and, while movement is on, melts every open
+    window from its old look into the new one. With movement off it simply runs `apply`.
+    """
+    veils: List[_ThemeVeil] = []
+    if animations_enabled():
+        for window in QApplication.topLevelWidgets():
+            if (
+                isinstance(window, QMainWindow)
+                and window.isVisible()
+                and not window.isMinimized()
+                and window.width() > 0
+            ):
+                try:
+                    veils.append(_ThemeVeil(window, ms))
+                except (
+                    Exception
+                ):  # a nicety: if the picture cannot be made the colours just change at once
+                    logger.debug("Could not prepare the colour change", exc_info=True)
+    try:
+        apply()
+    finally:
+        for veil in veils:
+            veil.begin()
 
 
 # =============================================================================
@@ -6191,6 +6490,152 @@ def free_memory() -> None:
         logger.debug("free_memory failed", exc_info=True)
 
 
+def trim_working_set() -> bool:
+    """Tells Windows that the memory this program is not using at the moment may be taken back (it is read in again, a
+    little at a time, when it is needed). Task Manager then shows a much smaller figure for a program that is minimized.
+    Does nothing on other systems. Returns whether Windows was asked; it can never raise.
+    """
+    if sys.platform != "win32":
+        return False
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+        psapi = ctypes.WinDLL("psapi", use_last_error=True)
+        psapi.EmptyWorkingSet.argtypes = [wintypes.HANDLE]
+        psapi.EmptyWorkingSet.restype = wintypes.BOOL
+        return bool(psapi.EmptyWorkingSet(kernel32.GetCurrentProcess()))
+    except Exception:
+        logger.debug("Could not hand back unused memory to Windows", exc_info=True)
+        return False
+
+
+_MEMORY: Optional["MemoryManager"] = (
+    None  # the one manager of the running program (see MemoryManager)
+)
+
+
+def free_memory_soon() -> None:
+    """Asks for the same clean-up as `free_memory()`, but a moment from now and only once however often it is asked:
+    used when something that held pictures or windows has just closed, so the tidy-up never lands in the middle of
+    someone's work."""
+    manager = _MEMORY
+    if manager is not None:
+        try:
+            manager.request_cleanup()
+        except RuntimeError:  # the window that owned it is already gone
+            pass
+
+
+class MemoryManager(QObject):
+    """Looks after the memory the program holds only for show -- Qt's cache of small pictures and the windows, pictures
+    and loose objects that closed dialogs leave behind -- so Vyaprix stays light however long it is left open.
+
+    * `request_cleanup()` is asked for whenever something that held pictures has closed. Requests that come close
+      together become one tidy-up, QUIET_MS after the last one, so it never happens while someone is busy.
+    * When Vyaprix is minimized, or another program is in front, for AWAY_MS the same tidy-up runs and -- on Windows --
+      the system is told it may take back the memory that is not in use right now.
+
+    Every step is guarded: nothing in here can fail the program."""
+
+    QUIET_MS = 1500
+    AWAY_MS = 20000
+
+    def __init__(self, parent: Optional[QObject] = None):
+        global _MEMORY
+        super().__init__(parent)
+        self.tidy_ups = 0  # how many times the picture cache was emptied and loose objects collected
+        self.away_trims = (
+            0  # ... and how many of those happened while Vyaprix was in the background
+        )
+        self._quiet = QTimer(self)
+        self._quiet.setSingleShot(True)
+        self._quiet.setInterval(self.QUIET_MS)
+        self._quiet.timeout.connect(self.tidy_up)
+        self._away = QTimer(self)
+        self._away.setSingleShot(True)
+        self._away.setInterval(self.AWAY_MS)
+        self._away.timeout.connect(self._trim_away)
+        app = QGuiApplication.instance()
+        if app is not None:
+            app.applicationStateChanged.connect(self._on_state)
+        _MEMORY = self
+
+    def request_cleanup(self) -> None:
+        self._quiet.start()  # (starting a running timer restarts it: many requests become one)
+
+    def tidy_up(self) -> None:
+        """Empties Qt's picture cache and collects the objects nothing uses any more -- right now."""
+        self._quiet.stop()
+        self.tidy_ups += 1
+        free_memory()
+
+    def _on_state(self, state) -> None:
+        if state == Qt.ApplicationState.ApplicationActive:
+            self._away.stop()
+        else:
+            self._away.start()
+
+    def _trim_away(self) -> None:
+        if QGuiApplication.applicationState() == Qt.ApplicationState.ApplicationActive:
+            return  # it came back to the front in the meantime
+        self.away_trims += 1
+        self.tidy_up()
+        trim_working_set()
+
+    def stop(self) -> None:
+        """No more tidy-ups (the program is closing)."""
+        global _MEMORY
+        self._quiet.stop()
+        self._away.stop()
+        if _MEMORY is self:
+            _MEMORY = None
+
+
+class _OpenFade(QObject):
+    """Fades a window in as it appears. The window is fully see-through from before it is first shown, so there is no flash
+    of the finished window, and its opacity is back to normal when the fade is over. The system does the blending, so
+    nothing is redrawn by the program while it runs."""
+
+    def __init__(self, window: QWidget, ms: int = 150):
+        super().__init__(window)
+        self._window = window
+        self._anim = QVariantAnimation(self)
+        self._anim.setDuration(int(ms))
+        self._anim.setStartValue(0.0)
+        self._anim.setEndValue(1.0)
+        self._anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self._anim.valueChanged.connect(self._on_step)
+        self._anim.finished.connect(self._finish)
+        window.setWindowOpacity(0.0)
+        window.installEventFilter(self)
+
+    def eventFilter(self, obj, event):
+        if obj is self._window and event.type() == QEvent.Type.Show:
+            self._window.removeEventFilter(self)
+            self._anim.start()
+        return False
+
+    def _on_step(self, value) -> None:
+        self._window.setWindowOpacity(float(value))
+
+    def _finish(self) -> None:
+        self._window.setWindowOpacity(1.0)
+        self.deleteLater()
+
+    def cancel(self) -> None:
+        """Ends the fade at once, leaving the window fully visible (used when the window closes before the fade is over)."""
+        try:
+            self._anim.stop()
+            self._window.removeEventFilter(self)
+            self._window.setWindowOpacity(1.0)
+            self.deleteLater()
+        except RuntimeError:
+            pass  # the fade is over (and has removed itself), or the window is gone
+
+
 def run_dialog(dialog: QDialog) -> int:
     """Run a modal dialog to completion, then release it. Always use this instead of a bare
     `dialog.exec()` in the application.
@@ -6204,10 +6649,19 @@ def run_dialog(dialog: QDialog) -> int:
 
     Read anything you need from the dialog (e.g. `dialog.job_result`) straight after this returns;
     the C++ object is deleted when control is back in the event loop."""
+    fade: Optional[_OpenFade] = None
+    if animations_enabled():
+        try:
+            fade = _OpenFade(dialog)
+        except Exception:  # a nicety: without it the dialog simply appears
+            logger.debug("Could not prepare the dialog fade", exc_info=True)
     try:
         return dialog.exec()
     finally:
+        if fade is not None:
+            fade.cancel()
         dialog.deleteLater()
+        free_memory_soon()
 
 
 def screen_area(widget: Optional[QWidget] = None) -> Optional[QRect]:
@@ -6337,10 +6791,13 @@ class EmptyState(QLabel):
         if not text:
             self.hide()
             return
+        newly = not self.isVisible()
         self.setText(text)
         self._place()
         self.show()
         self.raise_()
+        if newly:
+            fade_in(self, 220)  # the message eases in when a list becomes empty
 
     def _place(self) -> None:
         width = max(160, min(self.MAX_WIDTH, self._area.width() - 48))
@@ -8411,6 +8868,13 @@ class HelpDialog(QDialog):
             "settings",
         ),
         (
+            "Try a different look",
+            "In Settings, pick a colour theme. The whole of Vyaprix changes at once, so you can see how it looks before you "
+            "press Save Changes. If you close Settings without saving, your old colours come back.",
+            "",
+            "",
+        ),
+        (
             "Save time with Clients and Items",
             "The Clients page remembers the people you bill and the Items page remembers what you sell and its price. When "
             "you make an invoice, pick them from the list instead of typing them again.",
@@ -8704,9 +9168,14 @@ class _Field(QWidget):
         return bool(self.error.text())
 
     def set_error(self, message: str = "") -> None:
-        changed = message != self.error.text()
+        before = self.error.text()
+        changed = message != before
         self.error.setText(message)
         self.error.setVisible(bool(message))
+        if message and not before:
+            fade_in(
+                self.error, 170
+            )  # a new error eases in rather than popping up (nothing while movement is off)
         set_flag(self.widget, "invalid", bool(message))
         self.widget.setAccessibleDescription(message)
         if changed:
@@ -9221,12 +9690,17 @@ class _TemplateCard(QFrame):
 
 
 class SettingsFrame(QWidget):
-    """Settings, as a page inside the main window (not a window of its own): a menu of pages on the left (General, Your
-    Details, Payment, Invoice Design, Logo & Signature, Backup & Restore) and the chosen page on the right, made of titled
-    cards. Nothing is applied until "Save Changes"; the footer says whether there is anything unsaved, a mistake in a
-    field is explained right under the field, and leaving with unsaved changes asks first. The menu shrinks to icons when
-    the window is narrow. The page is built when Settings is opened and released again when it is left, so its pictures
-    and previews do not stay in memory."""
+    """The contents of the Settings window (SettingsWindow): a menu of pages on the left (General, Your Details, Payment,
+    Invoice Design, Logo & Signature, Backup & Restore) and the chosen page on the right, made of titled cards. Nothing is
+    saved until "Save Changes"; the footer says whether there is anything unsaved, a mistake in a field is explained right
+    under the field, and closing with unsaved changes asks first. The colour theme is the one thing shown before it is
+    saved: picking a theme puts the whole app in those colours at once, and the old colours come back if Settings is
+    closed without saving. The menu shrinks to icons when the window is narrow. The page is built when Settings is opened
+    and released when its window closes, so its pictures and previews do not stay in memory.
+    """
+
+    #: The "Full screen" button was pressed: the window around the page switches to (or back from) full screen.
+    fullScreenRequested = Signal()
 
     CURRENCY_OPTIONS: List[Tuple[str, str, str]] = [
         ("₹", "INR", "Indian Rupee"),
@@ -9319,13 +9793,13 @@ class SettingsFrame(QWidget):
         self.nav.setFocus()
 
     def confirm_navigate_away(self) -> bool:
-        """Asked before the page is left (Back, another entry of the menu, closing the window). With unsaved changes the
-        user is asked; leaving anyway puts back any logo or signature picture that was already copied in.
-        """
+        """Asked before the Settings window is closed (its Close button, Esc, closing the window, or closing Vyaprix). With
+        unsaved changes the user is asked; leaving anyway puts back any logo or signature picture that was already
+        copied in."""
         if self._is_dirty() and not Messagebox.yesno(
             "Leave without saving?",
-            "You have changes that are not saved.\n\nLeave Settings and discard them?",
-            parent=self.controller,
+            "You have changes that are not saved.\n\nClose Settings and discard them?",
+            parent=self.window(),
         ):
             return False
         for row in self._asset_rows.values():
@@ -9343,6 +9817,15 @@ class SettingsFrame(QWidget):
 
     def _go_back(self) -> None:
         self.controller.close_settings()
+
+    def set_full_screen(self, on: bool) -> None:
+        """The window says whether it fills the screen, so the button names what pressing it would do."""
+        self.fullscreen_btn.setText("Exit full screen" if on else "Full screen")
+        self.fullscreen_btn.setToolTip(
+            "Go back to a window (F11 or Esc)."
+            if on
+            else "Fill the whole screen with Settings (F11)."
+        )
 
     def save(self) -> None:
         """Ctrl+S: save the changes, exactly like the Save Changes button."""
@@ -9496,11 +9979,17 @@ class SettingsFrame(QWidget):
         foot.setSpacing(10)
         self.status_label = make_label("", "small", tone="muted")
         foot.addWidget(self.status_label, 1)
+        self.fullscreen_btn = make_button(
+            "Full screen",
+            "secondary-outline",
+            self.fullScreenRequested.emit,
+            tooltip="Fill the whole screen with Settings (F11).",
+        )
         self.cancel_btn = make_button(
-            "←  Back",
+            "Close",
             "secondary-outline",
             self._go_back,
-            tooltip="Go back to where you were (Esc). If you have unsaved changes you are asked first.",
+            tooltip="Close Settings (Esc). If you have unsaved changes you are asked first.",
         )
         self.save_btn = make_button(
             "💾  Save Changes",
@@ -9508,7 +9997,8 @@ class SettingsFrame(QWidget):
             self._save,
             tooltip="Save your changes (Ctrl+S). Settings stays open so you can carry on.",
         )
-        _no_default_button(self.cancel_btn, self.save_btn)
+        _no_default_button(self.fullscreen_btn, self.cancel_btn, self.save_btn)
+        foot.addWidget(self.fullscreen_btn)
         foot.addWidget(self.cancel_btn)
         foot.addWidget(self.save_btn)
         root.addWidget(footer)
@@ -9525,7 +10015,10 @@ class SettingsFrame(QWidget):
 
     def _on_nav_row(self, row: int) -> None:
         if row >= 0:
+            changed = row != self.stack.currentIndex()
             self.stack.setCurrentIndex(row)
+            if changed and self.isVisible():
+                fade_in(self.stack.widget(row), 150)
 
     def _apply_nav_mode(self) -> None:
         """Icons only in a narrow dialog, icons and names in a wide one."""
@@ -9569,11 +10062,17 @@ class SettingsFrame(QWidget):
     # ---- General ---------------------------------------------------------------------------------------------------- #
     def _build_general_page(self, page: _SettingsPage):
         card = _SettingsCard(
-            "Colours", "Pick the colours Vyaprix uses. They change when you save."
+            "Colours",
+            "Pick a colour theme and the whole of Vyaprix changes at once, so you can see how "
+            "it looks. Press Save Changes to keep it. If you close Settings without saving, "
+            "the old colours come back.",
         )
         self.theme_combo = self._combo()
         for name in THEME_NAMES:
-            self.theme_combo.addItem(THEME_LABELS.get(name, name.title()), name)
+            self.theme_combo.addItem(
+                theme_swatch_icon(name), THEME_LABELS.get(name, name.title()), name
+            )
+        self.theme_combo.currentIndexChanged.connect(self._on_theme_picked)
         card.add(self._field("Colour theme", self.theme_combo))
         page.add(card)
 
@@ -9589,8 +10088,8 @@ class SettingsFrame(QWidget):
         card.add(
             self._toggle_row(
                 self.animations_check,
-                "The menu slides in and out, pages fade in and small messages glide up. Turn this off to make "
-                "everything change at once.",
+                "The menu slides in and out, pages and windows fade in, the figures on the Invoices page count up and "
+                "small messages glide up. Turn this off to make everything change at once.",
             )
         )
         card.add(
@@ -10081,6 +10580,14 @@ class SettingsFrame(QWidget):
         card.body.addLayout(row)
         page.add(card)
 
+    def _on_theme_picked(self, *_args) -> None:
+        """The colour list changed: the whole app shows the colours picked, right away. (They are only kept by Save
+        Changes; closing Settings without saving puts the saved colours back.)"""
+        preview = getattr(self.controller, "preview_theme", None)
+        if preview is not None:
+            preview(self.theme_combo.currentData() or DEFAULT_THEME)
+        self._apply_nav_text()  # the menu's red markers are drawn in the theme's colours
+
     def _copy_db_path(self):
         QGuiApplication.clipboard().setText(str(DB_NAME))
         self.copy_path_btn.setText("Copied ✓")
@@ -10396,7 +10903,194 @@ class SettingsFrame(QWidget):
             self._cfg = load_config()
             self._load()  # what is shown is now exactly what was saved: nothing is "unsaved"
             self._refresh_status()
-        notify(self.controller, "Your settings were saved.")
+        notify(self, "Your settings were saved.")
+
+
+def window_frame_extra(window: QWidget) -> Tuple[int, int]:
+    """How much a window's frame (title bar and borders) adds to the size of what is inside it. The system only says how
+    thick the frame is once the native window exists, so it is created here (not shown) when it is not there yet.
+    """
+    if window.windowHandle() is None:
+        window.create()
+    frame, client = window.frameGeometry(), window.geometry()
+    return max(0, frame.width() - client.width()), max(
+        0, frame.height() - client.height()
+    )
+
+
+class SettingsWindow(QMainWindow):
+    """Settings in a window of its own, with its own button on the taskbar: it can be moved, made bigger, maximised,
+    put away, or shown full screen (F11, or the Full screen button), and it remembers the size it was left at. Only one
+    is ever open -- asking for Settings again brings the open one to the front. Ctrl+S saves; Esc leaves full screen first
+    and then closes the window; closing with something unsaved asks first, and the colours that were being tried out go
+    back to the saved ones."""
+
+    DEFAULT_SIZE = (1100, 760)
+    MIN_SIZE = (720, 540)
+
+    def __init__(self, controller, page: Optional[int] = None):
+        super().__init__(
+            None
+        )  # no parent: a window of its own, not one that stays on top of the main window
+        self.controller = controller
+        self._closing_for_good = (
+            False  # set while the program shuts down: nothing is asked then
+        )
+        self._was_maximized = False  # what to go back to when full screen ends
+        self.setObjectName("settingsWindow")
+        self.setWindowTitle(f"Settings • {APP_NAME}")
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+        icon = controller.windowIcon()
+        if not icon.isNull():
+            self.setWindowIcon(icon)
+        self.page = SettingsFrame(self, controller)
+        self.setCentralWidget(self.page)
+        self.page.fullScreenRequested.connect(self.toggle_full_screen)
+        for keys, handler in (
+            ("Ctrl+S", self.page.save),
+            ("Esc", self._on_escape),
+            ("F11", self.toggle_full_screen),
+        ):
+            shortcut = QShortcut(QKeySequence(keys), self)
+            shortcut.setContext(Qt.ShortcutContext.WindowShortcut)
+            shortcut.setAutoRepeat(False)
+            shortcut.activated.connect(handler)
+        if page is not None:
+            self.page.show_page(int(page))
+        self._first_placement()
+
+    # ---- size and place ---------------------------------------------------------------------------------------- #
+    @staticmethod
+    def _remembered() -> Dict[str, Any]:
+        """The size the window was closed at last time (and whether it was maximised), when that is on record."""
+        try:
+            saved = load_config().get("settings_window") or {}
+            out: Dict[str, Any] = {"maximized": bool(saved.get("maximized", False))}
+            width, height = int(saved.get("width", 0)), int(saved.get("height", 0))
+            if 400 <= width <= 10000 and 300 <= height <= 10000:
+                out["size"] = (width, height)
+            return out
+        except Exception:
+            return {}
+
+    def _first_placement(self) -> None:
+        """Before the window first shows: the size it had last time (or the usual one), never larger than the usable part
+        of the screen, and centred over the main window."""
+        area = screen_area(self.controller)
+        remembered = self._remembered()
+        width, height = remembered.get("size") or self.DEFAULT_SIZE
+        min_w, min_h = self.MIN_SIZE
+        extra_w, extra_h = window_frame_extra(self)
+        if area is not None:
+            room_w, room_h = max(1, area.width() - extra_w), max(
+                1, area.height() - extra_h
+            )
+            min_w, min_h = min(min_w, room_w), min(min_h, room_h)
+            width, height = min(width, room_w), min(height, room_h)
+        self.setMinimumSize(min_w, min_h)
+        self.resize(max(min_w, width), max(min_h, height))
+        if area is not None:
+            anchor = (
+                self.controller.frameGeometry()
+                if self.controller.isVisible() and not self.controller.isMinimized()
+                else area
+            )
+            frame_w, frame_h = self.width() + extra_w, self.height() + extra_h
+            self.move(
+                max(
+                    area.x(),
+                    min(
+                        anchor.center().x() - frame_w // 2,
+                        area.x() + area.width() - frame_w,
+                    ),
+                ),
+                max(
+                    area.y(),
+                    min(
+                        anchor.center().y() - frame_h // 2,
+                        area.y() + area.height() - frame_h,
+                    ),
+                ),
+            )
+        if remembered.get("maximized"):
+            self.setWindowState(self.windowState() | Qt.WindowState.WindowMaximized)
+
+    def _remember_size(self) -> None:
+        """Writes down the size to open at next time (the size of the window itself, even if it is maximised now)."""
+        try:
+            away = self.isMaximized() or self.isFullScreen() or self.isMinimized()
+            normal = self.normalGeometry() if away else self.geometry()
+            config = load_config()
+            config["settings_window"] = {
+                "width": int(normal.width()),
+                "height": int(normal.height()),
+                "maximized": bool(
+                    self.isMaximized() or (self.isFullScreen() and self._was_maximized)
+                ),
+            }
+            save_config(config)
+        except Exception:
+            logger.warning(
+                "Could not remember the size of the Settings window", exc_info=True
+            )
+
+    # ---- full screen and coming to the front --------------------------------------------------------------------- #
+    def set_full_screen(self, on: bool) -> None:
+        """Fills the whole screen, or goes back to what the window was before (maximised or an ordinary window)."""
+        if bool(on) == self.isFullScreen():
+            return
+        if on:
+            self._was_maximized = self.isMaximized()
+            self.showFullScreen()
+        elif self._was_maximized:
+            self.showMaximized()
+        else:
+            self.showNormal()
+
+    def toggle_full_screen(self) -> None:
+        self.set_full_screen(not self.isFullScreen())
+
+    def _on_escape(self) -> None:
+        if self.isFullScreen():
+            self.set_full_screen(False)  # the first Esc only leaves full screen ...
+        else:
+            self.close()  # ... the next one closes the window (asking first if needed)
+
+    def bring_to_front(self, page: Optional[int] = None) -> None:
+        """Shows the window again if it was put away or is behind another window, optionally on one of its pages."""
+        if page is not None:
+            self.page.show_page(int(page))
+        if self.isMinimized():
+            self.setWindowState(
+                (self.windowState() & ~Qt.WindowState.WindowMinimized)
+                | Qt.WindowState.WindowActive
+            )
+        self.show()
+        self.raise_()
+        self.activateWindow()
+
+    def changeEvent(self, event) -> None:
+        if event.type() == QEvent.Type.WindowStateChange:
+            self.page.set_full_screen(self.isFullScreen())
+        super().changeEvent(event)
+
+    def showEvent(self, event) -> None:
+        first = not getattr(self, "_shown_once", False)
+        self._shown_once = True
+        super().showEvent(event)
+        if first:
+            fade_in(self.page, 200)
+
+    # ---- closing ------------------------------------------------------------------------------------------------- #
+    def closeEvent(self, event) -> None:
+        if not self._closing_for_good and not self.page.confirm_navigate_away():
+            event.ignore()  # unsaved changes, and the answer was "no": stay
+            return
+        if not self._closing_for_good:
+            self._remember_size()
+        self.page.release()
+        self.controller._settings_window_closed(self)
+        super().closeEvent(event)
 
 
 # =============================================================================
@@ -11500,12 +12194,19 @@ class DashboardFrame(QWidget):
         self.prev_page_btn.setEnabled(self._page > 1)
         self.next_page_btn.setEnabled(self._page < self._total_pages)
 
+    def play_intro(self) -> None:
+        """The moment the program opens: the four figures run up from zero to what they show (while movement is on)."""
+        for label in (self.s_billed, self.s_received, self.s_due, self.s_count):
+            replay_count(label)
+
     def _update_stats(self):
         s = self.db_manager.get_dashboard_stats()
-        self.s_billed.setText(fmt_money(s["total_billed"]))
-        self.s_received.setText(fmt_money(s["total_paid"]))
-        self.s_due.setText(fmt_money(s["balance_due"]))
-        self.s_count.setText(str(s["total"]))
+        count_to(
+            self.s_billed, s["total_billed"], fmt_money
+        )  # a figure that changed runs up (or down) to its new value
+        count_to(self.s_received, s["total_paid"], fmt_money)
+        count_to(self.s_due, s["balance_due"], fmt_money)
+        count_to(self.s_count, s["total"])
         late = self.db_manager.get_overdue_summary()
         self.s_due.note_label.setText(
             f"{fmt_money(late['amount'])} is overdue"
@@ -12113,6 +12814,13 @@ class ToggleSwitch(QCheckBox):
     def __init__(self, text: str = "", parent: Optional[QWidget] = None):
         super().__init__(text, parent)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._slide = _Glide(
+            self, 150, start=1.0 if self.isChecked() else 0.0
+        )  # 0 = off ... 1 = on
+        self.toggled.connect(self._on_toggled)
+
+    def _on_toggled(self, checked: bool) -> None:
+        self._slide.to(1.0 if checked else 0.0)
 
     def sizeHint(self) -> QSize:
         self.ensurePolished()
@@ -12129,22 +12837,25 @@ class ToggleSwitch(QCheckBox):
     def paintEvent(self, _event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        on, enabled = self.isChecked(), self.isEnabled()
+        enabled = self.isEnabled()
+        goal = 1.0 if self.isChecked() else 0.0
+        if (
+            self._slide.goal != goal
+        ):  # changed while its signals were blocked: show it as it is, without sliding
+            self._slide.snap(goal, repaint=False)
+        t = self._slide.value  # 0 = off ... 1 = on (in between while the knob slides)
         if not enabled:
             track, knob, text = (
                 theme_color("border"),
                 theme_color("surface"),
                 theme_color("disabled_fg"),
             )
-        elif on:
-            track, knob, text = (
-                theme_color("primary"),
-                "#FFFFFF",
-                theme_color("fg"),
-            )  # a switch knob is white on every theme
         else:
-            track = theme_color("border_strong")
-            knob = theme_color("fg") if theme_is_dark() else theme_color("surface")
+            off_knob = theme_color("fg") if theme_is_dark() else theme_color("surface")
+            track = _mix(theme_color("border_strong"), theme_color("primary"), t)
+            knob = _mix(
+                off_knob, "#FFFFFF", t
+            )  # a switch knob is white on every theme once the switch is on
             text = theme_color("fg")
         w, h = self.TRACK_W, self.TRACK_H
         top = (self.height() - h) / 2
@@ -12152,8 +12863,11 @@ class ToggleSwitch(QCheckBox):
         painter.setBrush(QColor(track))
         painter.drawRoundedRect(QRectF(2, top, w, h), h / 2, h / 2)
         d = h - 6
+        stretch = (
+            3.0 * 4.0 * t * (1.0 - t)
+        )  # the knob is a little longer while it travels
         painter.setBrush(QColor(knob))
-        painter.drawEllipse(QRectF(2 + (w - d - 3 if on else 3), top + 3, d, d))
+        painter.drawEllipse(QRectF(2 + 3 + (w - d - 6) * t, top + 3, d + stretch, d))
         if self.hasFocus() and enabled:
             painter.setPen(QPen(QColor(theme_color("primary")), 1.5))
             painter.setBrush(Qt.BrushStyle.NoBrush)
@@ -15198,6 +15912,22 @@ class NavButton(QPushButton):
         self._key_focus = (
             False  # the outline is for people using the keyboard, not for a mouse click
         )
+        self._hover = _Glide(self, 130)  # 0 -> 1 while the mouse rests on the button
+        self._lit = _Glide(self, 220)  # 0 -> 1 while it is the page being shown
+
+    def enterEvent(self, event):
+        self._hover.to(1.0)
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self._hover.to(0.0)
+        super().leaveEvent(event)
+
+    def hideEvent(self, event):
+        self._hover.snap(
+            0.0, repaint=False
+        )  # a hidden button gets no "mouse left" -- start clean when it comes back
+        super().hideEvent(event)
 
     def focusInEvent(self, event):
         self._key_focus = event.reason() in (
@@ -15227,6 +15957,7 @@ class NavButton(QPushButton):
         if on != self._active:
             self._active = on
             self.setProperty("role", "nav-active" if on else "nav")
+            self._lit.to(1.0 if on else 0.0)
             self.update()
 
     def set_icon_name(self, name: str) -> None:
@@ -15263,41 +15994,67 @@ class NavButton(QPushButton):
             max(self.CELL, min(self.width(), self._menu_width - 2 * self.SIDE))
         )
         pill = QRectF(0, 0, pill_w, h)
-        enabled, hot, down = self.isEnabled(), self.underMouse(), self.isDown()
+        enabled, down = self.isEnabled(), self.isDown()
+        hot = (
+            self._hover.value if enabled else 0.0
+        )  # 0..1: how far the mouse highlight has come
+        lit = (
+            self._lit.value
+        )  # 0..1: how far this entry has become "the page you are on"
+        layers: List[QColor] = []  # background shapes, painted in this order
         if self._kind == "action":
-            back = theme_color(
-                "success_pressed" if down else ("success_hover" if hot else "success")
+            layers.append(
+                QColor(
+                    theme_color("success_pressed")
+                    if down
+                    else _mix(theme_color("success"), theme_color("success_hover"), hot)
+                )
             )
             text_c = icon_c = QColor(theme_color("success_on"))
         else:
-            back = None
-            if self._active:
-                back = theme_color("primary_soft")
             if down:
-                back = _mix(theme_color("alt"), theme_color("border"), 0.5)
-            elif hot and not self._active:
-                back = theme_color("alt")
-            text_c = QColor(theme_color("nav_sel_fg" if self._active else "fg"))
+                layers.append(
+                    QColor(_mix(theme_color("alt"), theme_color("border"), 0.5))
+                )
+            else:
+                if hot * (1.0 - lit) > 0.004:
+                    layers.append(_with_alpha(theme_color("alt"), hot * (1.0 - lit)))
+                if lit > 0.004:
+                    layers.append(_with_alpha(theme_color("primary_soft"), lit))
+            text_c = QColor(_mix(theme_color("fg"), theme_color("nav_sel_fg"), lit))
             icon_c = QColor(
-                theme_color(
-                    "primary_text" if self._active else ("fg" if hot else "muted_text")
+                _mix(
+                    _mix(theme_color("muted_text"), theme_color("fg"), hot),
+                    theme_color("primary_text"),
+                    lit,
                 )
             )
         if not enabled:
             text_c = icon_c = QColor(theme_color("disabled_fg"))
         p.setPen(Qt.PenStyle.NoPen)
-        if back is not None:
-            p.setBrush(QColor(back))
+        for colour in layers:
+            p.setBrush(colour)
             p.drawRoundedRect(pill, 12, 12)
-        if self._active and self._kind != "action":
-            p.setBrush(QColor(theme_color("primary")))
-            p.drawRoundedRect(QRectF(0, h / 2 - 11, 3.4, 22), 1.7, 1.7)
+        if (
+            lit > 0.004 and self._kind != "action"
+        ):  # the little bar grows out of the middle as the entry is chosen
+            p.setBrush(_with_alpha(theme_color("primary"), lit))
+            bar = 22.0 * lit
+            p.drawRoundedRect(QRectF(0, (h - bar) / 2, 3.4, bar), 1.7, 1.7)
+        icon_size = 22.0 * (
+            1.0 + 0.07 * hot
+        )  # the picture swells a little under the mouse
         draw_icon(
             p,
             self._icon,
-            QRectF((self.CELL - 22) / 2.0, (h - 22) / 2.0, 22, 22),
+            QRectF(
+                (self.CELL - icon_size) / 2.0,
+                (h - icon_size) / 2.0,
+                icon_size,
+                icon_size,
+            ),
             icon_c,
-            1.9 if self._active else 1.7,
+            1.7 + 0.2 * lit,
         )
         alpha = self.label_alpha()
         if alpha > 0.01 and self.text():
@@ -15305,7 +16062,7 @@ class NavButton(QPushButton):
             font.setPixelSize(14)
             font.setWeight(
                 QFont.Weight.DemiBold
-                if (self._active or self._kind == "action")
+                if (lit > 0.5 or self._kind == "action")
                 else QFont.Weight.Medium
             )
             p.setFont(font)
@@ -15946,7 +16703,6 @@ class Sidebar(QFrame):
         """Highlights the menu entry of the page being shown."""
         for name, btn in self._nav_btns.items():
             btn.set_active(name == frame_name)
-        self.settings_btn.set_active(frame_name == "SettingsFrame")
 
 
 class ShortcutManager:
@@ -16139,6 +16895,9 @@ class InvoiceApp(QMainWindow):
         configure_windows_app_identity()
         self._closing_for_good = False
         self._handed_over = False
+        self.memory = MemoryManager(
+            self
+        )  # keeps the program light: tidies up after windows close and when it is minimized
 
         # 1. SHOW THE OPENING SCREEN first (the main window stays hidden until start-up is done) and let it paint now.
         self.splash: Optional[SplashScreen] = (
@@ -16158,9 +16917,14 @@ class InvoiceApp(QMainWindow):
         self._startup_step(0.20)
 
         self._current_frame_class: Optional[Type] = None
-        self._settings_return: Optional[Type] = (
-            None  # the page Settings was opened from (Back goes there)
+        self._settings_window: Optional[SettingsWindow] = (
+            None  # the Settings window while it is open (only ever one)
         )
+        # Colours tried out in Settings redraw the pages once, however many are tried in a row.
+        self._theme_refresh = QTimer(self)
+        self._theme_refresh.setSingleShot(True)
+        self._theme_refresh.setInterval(90)
+        self._theme_refresh.timeout.connect(self._refresh_pages)
         self._build_shell(cfg, progress=self._startup_step)
         self._setup_keyboard_shortcuts()
         self._startup_step(0.92)
@@ -16348,6 +17112,12 @@ class InvoiceApp(QMainWindow):
         self.raise_()
         self.activateWindow()
         self._close_splash(fade=True)
+        try:
+            self.frames[DashboardFrame].play_intro()
+        except (
+            Exception
+        ):  # the figures running up is a nicety; the program is open either way
+            logger.debug("Could not play the opening movement", exc_info=True)
         self._warn_if_fallback_font()
 
     def _close_splash(self, fade: bool = False) -> None:
@@ -16647,22 +17417,11 @@ class InvoiceApp(QMainWindow):
         sc.register_info("↑ / ↓  •  Page Up / Down", "Scroll the Page", writing)
         sc.register_info("Enter", "Go to the Next Field", writing)
 
-        # ---- Contextual: Settings ----------------------------------------
-        sc.register_contextual(
-            "Ctrl+S",
-            SettingsFrame,
-            self._sc_save_settings,
-            "Save Your Changes",
-            "Settings",
-            display="Ctrl+S",
-        )
-        sc.register_contextual(
-            "Esc",
-            SettingsFrame,
-            self.close_settings,
-            "Go Back",
-            "Settings",
-            display="Esc",
+        # ---- Settings: a window of its own, which has its own keys (SettingsWindow) -- listed here for the reference card ---
+        sc.register_info("Ctrl+S", "Save Your Changes (Settings)", "Settings")
+        sc.register_info("F11", "Full Screen On or Off (Settings)", "Settings")
+        sc.register_info(
+            "Esc", "Leave Full Screen, Then Close Settings (Settings)", "Settings"
         )
 
         # ---- Anywhere -------------------------------------------------------
@@ -16743,9 +17502,6 @@ class InvoiceApp(QMainWindow):
     def _sc_edit_item(self):
         self.frames[InvoiceFormFrame].edit_selected_item()
 
-    def _sc_save_settings(self):
-        self.frames[SettingsFrame].save()
-
     def _sc_back_to_dashboard(self):
         """Esc on the invoice form: identical to the "Back to Invoices" button -- show_frame() already asks about
         unsaved changes on its own when leaving the invoice form for a different page.
@@ -16767,27 +17523,15 @@ class InvoiceApp(QMainWindow):
     # ------------------------------------------------------------------ #
     #  Navigation
     # ------------------------------------------------------------------ #
-    #: Pages that are built when they are opened and thrown away when they are left: they are used now and then and hold
-    #: pictures and previews, so they should not sit in memory the rest of the time.
-    TRANSIENT_FRAMES: Tuple[Type, ...] = (SettingsFrame,)
-
     def _may_leave_current_page(self, target: Type) -> bool:
         """Asks the page on screen whether it may be left (a page with unsaved changes asks the user). That includes asking
         for the invoice form while it is already showing -- the sidebar's "New Invoice" button, Ctrl+N: opening it again
-        re-initialises the form, which would silently throw the edits away. While Settings is open on top of an unfinished
-        invoice, leaving for anywhere but back to that invoice asks about the invoice too.
-        """
-        current = self._current_frame_class
-        if target is current and current in self.TRANSIENT_FRAMES:
-            return True  # asking for the page already on screen just moves within it
-        pages = [self.frames.get(current)]
-        if current is SettingsFrame and self._settings_return is InvoiceFormFrame:
-            pages.append(self.frames.get(InvoiceFormFrame))
-        return all(
+        re-initialises the form, which would silently throw the edits away."""
+        page = self.frames.get(self._current_frame_class)
+        return (
             page is None
             or not hasattr(page, "confirm_navigate_away")
             or page.confirm_navigate_away()
-            for page in pages
         )
 
     def show_frame(self, frame_class: Type, *args) -> None:
@@ -16796,48 +17540,23 @@ class InvoiceApp(QMainWindow):
         self._activate(frame_class, *args)
 
     def _activate(self, frame_class: Type, *args, refresh: bool = True) -> None:
-        """Brings a page to the front (building it first when it is one that is only made on demand). `refresh=False`
-        shows it exactly as it was left, without calling its on_show()."""
+        """Brings a page to the front. `refresh=False` shows it exactly as it was left, without calling its on_show()."""
         previous = self._current_frame_class
-        frame = self.frames.get(frame_class)
-        if frame is None and frame_class in self.TRANSIENT_FRAMES:
-            frame = frame_class(self.container, self)
-            self.frames[frame_class] = frame
-            self.container.addWidget(frame)
+        frame = self.frames[frame_class]
         page_changed = frame_class is not previous
         self.container.setCurrentWidget(frame)
-        # The invoice form belongs to the Dashboard in the menu: that button stays highlighted while it is open.
-        if frame_class is SettingsFrame:
-            active = SettingsFrame.__name__
-        else:
-            active = (
-                frame_class.__name__
-                if frame_class in (DashboardFrame, ClientsFrame, CatalogFrame)
-                else "DashboardFrame"
-            )
+        # The invoice form belongs to the Invoices page in the menu: that button stays highlighted while it is open.
+        active = (
+            frame_class.__name__
+            if frame_class in (DashboardFrame, ClientsFrame, CatalogFrame)
+            else "DashboardFrame"
+        )
         self.sidebar.set_active(active)
         self._current_frame_class = frame_class
         if refresh and hasattr(frame, "on_show"):
             frame.on_show(*args)
         if page_changed and self.isVisible():
             fade_in(frame)
-        if page_changed and previous in self.TRANSIENT_FRAMES:
-            self._drop_transient(previous)
-
-    def _drop_transient(self, frame_class: Type) -> None:
-        """Throws away a page that was built on demand, and gives its memory back."""
-        frame = self.frames.pop(frame_class, None)
-        if frame is None:
-            return
-        try:
-            if hasattr(frame, "release"):
-                frame.release()
-        finally:
-            self.container.removeWidget(frame)
-            frame.hide()
-            frame.setParent(None)
-            frame.deleteLater()
-        QTimer.singleShot(0, free_memory)
 
     def show_frame_by_name(self, name: str) -> None:
         mapping = {
@@ -16849,29 +17568,54 @@ class InvoiceApp(QMainWindow):
         self.show_frame(mapping[name])
 
     def open_settings(self, page: Optional[int] = None) -> None:
-        """Settings opens as a page of this window (`page` picks which Settings page). The page it was opened from stays
-        exactly as it is -- an invoice being written is not lost -- and Back (or Esc) returns to it.
+        """Opens Settings in its own window (`page` picks which Settings page). Only one is ever open: asking again brings
+        the open one to the front. What is on this window stays exactly as it is -- an invoice being written is not lost.
         """
-        if self._current_frame_class is not SettingsFrame:
-            self._settings_return = self._current_frame_class or DashboardFrame
-        self._activate(SettingsFrame, page)
-
-    def close_settings(self) -> None:
-        """Back from Settings to the page it was opened from (asks first when there are unsaved changes)."""
-        settings = self.frames.get(SettingsFrame)
-        if (
-            settings is None
-            or self._current_frame_class is not SettingsFrame
-            or not settings.confirm_navigate_away()
-        ):
+        window = self._settings_window
+        if window is not None:
+            window.bring_to_front(page)
             return
-        target = self._settings_return or DashboardFrame
-        if target is InvoiceFormFrame:
-            self._activate(
-                InvoiceFormFrame, refresh=False
-            )  # the invoice is exactly as it was left
-        else:
-            self._activate(target)
+        window = SettingsWindow(self, page)
+        self._settings_window = window
+        window.show()
+        window.raise_()
+        window.activateWindow()
+
+    def close_settings(self) -> bool:
+        """Closes the Settings window (it asks first when something is not saved). True when it is gone -- or was not open."""
+        window = self._settings_window
+        return True if window is None else bool(window.close())
+
+    def _settings_window_closed(self, window: "SettingsWindow") -> None:
+        """The Settings window is closing: forget it, and once it is gone put back the saved colours (the ones tried out
+        in Settings are dropped) and give back the memory it held."""
+        if self._settings_window is window:
+            self._settings_window = None
+        if not window._closing_for_good:
+            QTimer.singleShot(0, self, self._after_settings_closed)
+
+    def _after_settings_closed(self) -> None:
+        if self._closing_for_good or self._settings_window is not None:
+            return
+        self.restore_saved_theme()
+        free_memory()
+
+    # ------------------------------------------------------------------ #
+    #  Colours: tried out live in Settings, kept only by Save
+    # ------------------------------------------------------------------ #
+    def preview_theme(self, theme: Optional[str]) -> bool:
+        """The whole app shows `theme` right now, before anything is saved (closing Settings without saving puts the saved
+        colours back). Returns whether the colours changed."""
+        key = normalize_theme_name(theme)
+        if key == active_theme_name():
+            return False
+        switch_look(lambda: apply_app_style(QApplication.instance(), key))
+        self._theme_refresh.start()
+        return True
+
+    def restore_saved_theme(self) -> None:
+        """Puts back the colours that are saved."""
+        self.preview_theme(load_config().get("theme"))
 
     def open_about(self) -> None:
         run_dialog(AboutDialog(self))
@@ -16884,9 +17628,11 @@ class InvoiceApp(QMainWindow):
 
     def _on_settings_saved(self, new_theme: Optional[str] = None) -> None:
         # 1. LIVE THEME SWITCHING: one application-wide stylesheet + palette swap re-colours every widget that exists,
-        #    including the multi-line boxes the Tk build had to walk and re-theme by hand (_retheme_text_widgets).
+        #    including the multi-line boxes the Tk build had to walk and re-theme by hand (_retheme_text_widgets). (Colours
+        #    picked in Settings are normally on screen already -- preview_theme -- and then nothing changes here.)
         if new_theme and normalize_theme_name(new_theme) != active_theme_name():
-            apply_app_style(QApplication.instance(), new_theme)
+            switch_look(lambda: apply_app_style(QApplication.instance(), new_theme))
+        self._theme_refresh.stop()
 
         # 2. Refresh the globals so the currency symbol updates live.
         global CONFIG, CURRENCY_SYMBOL
@@ -16896,12 +17642,14 @@ class InvoiceApp(QMainWindow):
             bool(CONFIG.get("animations", True)) and system_allows_animations()
         )
 
-        # 3. Make every screen redraw with the new colours / symbol. The invoice form is special-cased: on_show()
-        #    resets and reloads the whole form, which would silently wipe an in-progress invoice if the user opened
-        #    Settings mid-edit. It gets a lightweight refresh that only updates currency/theme-dependent display.
+        # 3. Make every screen redraw with the new colours / symbol.
+        self._refresh_pages()
+
+    def _refresh_pages(self) -> None:
+        """Makes every page redraw with the current colours, currency symbol and settings. The invoice form is special-
+        cased: on_show() resets and reloads the whole form, which would silently wipe an invoice in progress, so it gets a
+        lightweight refresh that only updates what depends on the settings."""
         for frame in list(self.frames.values()):
-            if isinstance(frame, SettingsFrame):
-                continue  # (the Settings page is the one that called: it refreshes itself)
             if isinstance(frame, InvoiceFormFrame):
                 frame.refresh_after_settings_change()
             elif hasattr(frame, "on_show"):
@@ -16916,7 +17664,10 @@ class InvoiceApp(QMainWindow):
     def show_progress(self, active: bool, message: str = "") -> None:
         if active:
             self.progress_lbl.setText(message)
+        was_hidden = self.progress_panel.isHidden()
         self.progress_panel.setVisible(bool(active))
+        if active and was_hidden:
+            fade_in(self.progress_panel, 180)  # the "working..." strip eases in
 
     def _poll_queue(self) -> None:
         try:
@@ -16943,15 +17694,26 @@ class InvoiceApp(QMainWindow):
     # ------------------------------------------------------------------ #
     #  Closing
     # ------------------------------------------------------------------ #
+    def _close_settings_window(self) -> bool:
+        """Before Vyaprix closes: the Settings window goes first (it comes to the front to ask about unsaved changes).
+        False when the person chose to stay."""
+        window = self._settings_window
+        if window is None:
+            return True
+        window.bring_to_front()
+        return bool(window.close())
+
     def closeEvent(self, event) -> None:
-        if not self._closing_for_good and not self._may_leave_current_page(
-            DashboardFrame
+        if not self._closing_for_good and not (
+            self._may_leave_current_page(DashboardFrame)
+            and self._close_settings_window()
         ):
-            event.ignore()  # an invoice or the Settings page has changes that are not saved: the user said no
+            event.ignore()  # an invoice or the Settings window has changes that are not saved: the user said no
             return
         self._handed_over = True  # a hand-over from the opening card that is still on its way must not bring a closed window back
         self._poll_timer.stop()
         self._splash_timer.stop()
+        self.memory.stop()
         self._close_splash()
         super().closeEvent(event)
 
@@ -16973,7 +17735,7 @@ def _orderly_shutdown(app: QApplication) -> None:
     still intact, avoids that. Qt-owned popups (completer lists, tooltips) are left alone: Qt frees those itself.
     """
     for window in app.topLevelWidgets():
-        if isinstance(window, InvoiceApp):
+        if isinstance(window, (InvoiceApp, SettingsWindow)):
             window._closing_for_good = (
                 True  # no "unsaved changes" prompt while the process is going away
             )
