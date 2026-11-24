@@ -5,8 +5,8 @@
 #  Single-file desktop invoicing application: PySide6 (Qt 6) user interface,
 #  SQLite storage, ReportLab PDF generation, Qt's own PDF viewer and printing.
 #
-#  Version: the version, the build number and the release notes all come from
-#           the CHANGELOG below (About -> What's new shows the same list).
+#  Version: the version, the build number and the release date are set once, in section 1 below.
+#           The record of every version and build is kept in the separate changelog text file, not in this program.
 #  Needs:   Python 3.15+, PySide6 (with QtPdf + QtPrintSupport), reportlab, pypdf
 #           python-barcode is optional (invoices simply print without a barcode)
 #           NotoSans-Regular.ttf / NotoSans-Bold.ttf in a "fonts" folder and the
@@ -119,173 +119,14 @@ else:
 # =============================================================================
 #  1. APPLICATION METADATA
 # =============================================================================
-@dataclass(frozen=True)
-class Release:
-    """One release of Vyaprix: its version, the day it was handed over, a headline and every change made in it."""
-    version: str
-    date: str
-    title: str
-    changes: Tuple[str, ...]
-
-
-# The file this project started from: Vyaprix v1.5, build 1.5.2 (the Tkinter build of 22 October 2026).
-BASE_VERSION: str       = "v1.5"
-BASE_BUILD_VERSION: str = "1.5.2"
-
-# Newest first. EVERY change made to the application adds a line below -- and a new Release whenever a new build is handed
-# over. APP_VERSION, the build number, the release date and the "What's new" window all follow from this list, so they
-# can never disagree: the build number is "<version>.<number of changes made since the uploaded v1.5 / build 1.5.2>".
-# A release carries the day its newest build was handed over. Builds of v2.4 handed over so far:
-#   build 2.4.50 -- 14 November 2026      build 2.4.70 -- 20 November 2026      build 2.4.76 -- 21 November 2026
-CHANGELOG: Tuple[Release, ...] = (
-    Release("v2.4", "21 November 2026", "A friendlier Vyaprix: correct amounts, easier payments and plain wording", (
-        "Vyaprix stays light for days on end: a moment after a window or a picture is closed it is cleared from memory, "
-        "and when Vyaprix is minimized or left in the background it gives back the memory it is not using, so Task "
-        "Manager shows a much smaller number.",
-        "Windows fade in as they open, an error message eases in under its box, and the \"working\" strip and the "
-        "\"nothing here yet\" note appear softly instead of popping up. All the movement follows the \"Smooth movement\" "
-        "switch and the Windows setting for reduced animation.",
-        "The highlight in the menu glides to the page you choose and brightens under the mouse, and on/off switches "
-        "slide instead of jumping.",
-        "The four figures on the Invoices page run up from zero when Vyaprix opens, and run up or down to the new "
-        "numbers whenever an invoice changes them.",
-        "Pick a colour theme in Settings and the whole of Vyaprix changes at once, with the old colours melting into "
-        "the new ones, so you can see how every page looks before you save. Closing Settings without saving puts the "
-        "saved colours back.",
-        "The Settings window has minimize, maximize and full-screen buttons (F11 for full screen, Esc to leave it). It "
-        "opens in the middle of Vyaprix and remembers the size you gave it.",
-        "Every invoice line now shows its amount after the discount: Amount = Quantity x Rate - Discount. The invoice form, "
-        "the preview and the PDF all show the same figures, and the subtotal, the discount, the total, the amount paid, "
-        "the balance due and the total in words always agree with the Amount column.",
-        "Recording a payment now has a Reference box that changes with the payment method: the 12-digit UPI transaction "
-        "ID (UTR), the cheque number, or the reference / authorization number for a bank transfer or a card. The Note "
-        "box is still there for anything else, such as \"Received from my brother\".",
-        "The payment reference is saved with the payment and printed in the payment list on the invoice.",
-        "A new \"Record Payment\" window on the Invoices page: add a payment to any invoice without opening it.",
-        "The Invoices page has an \"Overdue\" filter for unpaid invoices whose due date has passed, a \"Due On\" column "
-        "(shown in red when late) and a short line on each summary card that says what it adds up.",
-        "Settings opens in a window of its own, with its own button on the taskbar, so it can sit beside Vyaprix while "
-        "you work. Esc closes it, Ctrl+S saves, and the invoice you were writing is kept exactly as it was while you "
-        "look at Settings.",
-        "Vyaprix lets go of what it no longer needs: closed pages, finished previews and old pictures are cleared from "
-        "memory, so it stays quick and light even after a long day of use.",
-        "A free (complimentary) invoice starts with the payment terms \"No payment required\"; switching it back to a normal "
-        "invoice brings your own terms back.",
-        "A new \"Print on the invoice\" box on the New Invoice page: print the notes and the terms, only the terms, "
-        "only the notes, or neither.",
-        "The invoice list, the invoice form and Settings fit the window, from a small laptop screen to a large monitor.",
-        "The menu on the left can be folded away: press \"Hide menu\" (or Ctrl+\\) and it slides in to a narrow strip "
-        "of pictures; press \"Show menu\" and it slides back out. Vyaprix remembers how you left it.",
-        "A new welcome screen: a rounded card with a soft shadow, an invoice that writes itself while Vyaprix gets ready "
-        "and a green READY stamp at the end. It fits any screen size, and a click skips the wait.",
-        "Vyaprix opens faster: the welcome screen follows what the app is really doing and gives way as soon as "
-        "everything is ready, instead of always waiting two and a half seconds.",
-        "Everything on screen is written in plain words. \"Dashboard\" is now \"Invoices\", \"Catalog\" is \"Items\", "
-        "\"Import Database\" is \"Restore from a backup\", and no message uses technical terms.",
-        "A new Help window (F1, or Help in the menu): short answers to the questions people ask most, each with a "
-        "button that takes you straight to the right place, such as starting an invoice or saving a backup.",
-        "Pages fade in gently, and good news such as \"Invoice saved\" appears as a small message that slides up and "
-        "goes away by itself, so nobody has to click OK.",
-        "Two new switches in Settings > General: smooth movement and the welcome screen. Vyaprix also follows the "
-        "Windows setting for reduced animation.",
-        "Tips and clearer wording in Settings, on the invoice form, in the keyboard shortcuts list and in every message.",
-        "The version, the build number and the release date are the same everywhere they appear: About, What's New and "
-        "the details stored inside every PDF invoice.",
-        "What's New shows the date of every release next to its notes, and marks the release you are running.",
-        "The status watermark (PAID, BALANCE DUE ...) is fixed: it is no longer half hidden and half shown. It is now "
-        "drawn last, on top of the page, with real transparency and sized to the page, so shaded rows, total boxes and "
-        "colour bands can no longer cover part of it, and the text under it stays readable.",
-        "The status watermark can be switched off for every invoice: \"Show the status watermark\" in Settings > "
-        "Invoice Design.",
-        "It can also be shown or hidden for a single invoice: the new \"Status Watermark\" box on the invoice form "
-        "(Default, On or Off) is remembered with the invoice.",
-        "Payment and Invoice Design are now two separate pages in Settings. Payment: currency, bank account, UPI ID and "
-        "QR code, payment terms and notes, and when the payment details are printed. Invoice Design: template and "
-        "brand colour, status watermark, total in words, footer note and default terms.",
-        "Settings is redesigned: a side menu of six pages -- General, Your Details, Payment, Invoice Design, Logo & "
-        "Signature and Backup & Restore -- each made of cards that say what their settings do.",
-        "Settings fits every window size: the menu shrinks to pictures in a narrow window and two-column cards flow "
-        "into one column.",
-        "Mistakes are explained next to the box (email, phone number, GSTIN, custom currency symbol). A page that has "
-        "one is marked in the menu, and Save takes you straight to it instead of showing a pop-up.",
-        "Settings tells you whether there is anything to save, Ctrl+S saves, and leaving Settings with unsaved changes "
-        "asks first.",
-        "\"Preview sample invoice\" prints from what is on the screen, so a template, colour or watermark setting can be "
-        "tried before it is saved.",
-        "Logo, signature and UPI QR code: drop a picture onto its row, a file that is not a readable picture is "
-        "refused, and going Back without saving puts back the pictures you replaced.",
-        "The UPI QR code is now set up beside the UPI ID on the Payment page; Logo & Signature keeps the logo and the "
-        "signature.",
-        "The GSTIN is written in capitals for you when you leave the box.",
-        "Backup & Restore shows where your data is kept, with \"Copy path\" and \"Show in folder\" buttons.",
-        "Data and backups made by earlier versions are upgraded automatically to remember each invoice's watermark "
-        "choice; older invoices follow the Settings switch.",
-    )),
-    Release("v2.3", "12 November 2026", "One GST line, professional A4 invoices, sharp and responsive on every screen", (
-        "CGST and SGST (or IGST) appear once on the invoice form and on the PDF -- one combined line each, however many "
-        "GST rates the items use. Hover the line on the form to see the split by rate.",
-        "A \"GST summary\" on the PDF shows the taxable value and the tax at each rate whenever an invoice uses more than "
-        "one rate.",
-        "The invoice PDF is redesigned for A4: header, bill-to and invoice details, items, totals, payment box and "
-        "signature on even margins, in all four templates.",
-        "Long invoices run on to as many A4 pages as they need: the item headings repeat on every page, no line is "
-        "ever cut in two, and each page carries the invoice number and \"Page x of y\".",
-        "Auto-fit: an invoice that runs only a few lines onto an extra page is fitted onto fewer pages -- the gaps "
-        "tighten a little, the type stays the same size.",
-        "The item columns size themselves to what is in them -- quantity, unit, rate, HSN / SAC, GST % and amounts never "
-        "wrap or get cut, and long descriptions wrap inside their cell.",
-        "Very large amounts and very long names, addresses and notes still fit inside the page.",
-        "The small previews of each invoice template in Settings are redrawn to match the new layouts.",
-        "Vyaprix follows your Windows display scale: 125 % or 150 % is followed exactly, the logo, icons and template "
-        "previews stay sharp, and the invoice preview and Settings sharpen again when you move them to another monitor.",
-        "The main window opens at a size that fits your screen, cannot be made too small to use, and fits itself again "
-        "when you move it to a smaller monitor.",
-        "The menu on the left shrinks to pictures in a narrow window and drops the logo in a short one, so every "
-        "screen stays usable as you resize.",
-        "The version, the build number and the \"What's New\" list all come from one list of changes: the build number "
-        "counts every change made since v1.5 (build 1.5.2).",
-    )),
-    Release("v2.2", "10 November 2026", "Invoice templates", (
-        "Four invoice templates -- Classic, Modern, Minimal and Corporate -- picked in Settings > Invoice Design, with a "
-        "small preview of each and a \"Preview sample invoice\" button.",
-        "A brand colour for Modern, Minimal and Corporate: ten ready colours, or any colour of your own.",
-        "A template can be chosen for a single invoice (\"Invoice Look\" on the invoice form) and is remembered with it.",
-    )),
-    Release("v2.1", "9 November 2026", "Professional invoicing", (
-        "Every invoice line has a quantity, a unit and a rate (250 Nos x Rs. 50); the line amount is worked out for you.",
-        "One saved item can be sold in several units, each with its own rate, and Vyaprix remembers the rate per unit.",
-        "GST for the whole invoice or a different GST rate for every item, chosen per invoice.",
-        "HSN / SAC code on every item, saved with the item.",
-        "Item discounts as an amount or a percentage, besides the overall discount.",
-        "The place of supply decides CGST + SGST or IGST (a customer's GSTIN fills it in).",
-        "Due date (on receipt, 7, 15, 30 ... days, or a date you pick), customer PO / reference number and a "
-        "reverse-charge flag.",
-        "Optional round off of the invoice total to the nearest rupee.",
-        "Notes for the customer and Terms & Conditions printed on the invoice, with default terms set in Settings.",
-        "The invoice total in words (Rupees ... Only), switched on in Settings.",
-        "The Items page shows and edits unit, HSN / SAC, GST % and the other units an item is sold in.",
-        "The PDF prints quantity, unit, rate, discount and GST columns whenever an invoice uses them; older invoices "
-        "print as before.",
-        "Data and backups made by earlier versions are upgraded automatically; saved invoices keep exactly their totals.",
-        "Faster entry: Enter in the last field of the last line adds a new line.",
-    )),
-    Release("v2.0", "6 November 2026", "Rebuilt for a sharper, faster app", (
-        "The whole app is rebuilt from the ground up, so it looks sharper and responds faster.",
-        "Vyaprix starts faster, because each part is only loaded when it is first needed.",
-        "The invoice preview is built in: zoom, page navigation, print and share.",
-        "Several invoices can be joined into one file for printing in a single step.",
-        "Eight colour themes, including dark ones.",
-        "Every screen of the earlier version is kept: the invoice list, the invoice form, Clients, Items, Settings, "
-        "About, Keyboard Shortcuts and the welcome screen.",
-        "Windows and dialogs never open larger than the screen they are on.",
-    )),
-)
-CHANGE_COUNT: int = sum(len(release.changes) for release in CHANGELOG)
-
+# The version, the build number and the release date shown in About, on the opening screen, in the menu and inside
+# every PDF invoice. The record of every version and build is kept in the separate changelog text file that goes
+# with this program, not in this file: when a new build is handed over, change the three values below and add the
+# build to that file.
 APP_NAME: str          = "Vyaprix"
-APP_VERSION: str       = CHANGELOG[0].version
-APP_BUILD_VERSION: str = f"{APP_VERSION.lstrip('v')}.{CHANGE_COUNT}"
-APP_RELEASE_DATE: str  = CHANGELOG[0].date
+APP_VERSION: str       = "v2.4"
+APP_BUILD_VERSION: str = "2.4.82"
+APP_RELEASE_DATE: str  = "23 November 2026"
 APP_TAGLINE: str       = "Business Made Smarter."
 
 APP_ATTRIBUTION: str = (
@@ -1892,7 +1733,8 @@ class DatabaseManager:
                 rows = self.get_all_invoices()
             if not rows:
                 return False, "No invoices to export."
-            with open(file_path, "w", newline="", encoding="utf-8") as fh:
+            # "utf-8-sig" puts a small marker at the start of the file so that Excel shows every name and symbol correctly.
+            with open(file_path, "w", newline="", encoding="utf-8-sig") as fh:
                 writer = csv.writer(fh)
                 writer.writerow(rows[0].keys())
                 writer.writerows(rows)
@@ -3235,7 +3077,8 @@ def merge_pdfs(paths: List[Path], out_path: Path) -> Path:
     this app at all once the PDF viewer (next stage) moves to Qt's own
     PySide6.QtPdf module."""
     if not PYPDF_AVAILABLE:
-        raise RuntimeError("pypdf is required for bulk printing (pip install pypdf).")
+        raise RuntimeError("Vyaprix cannot join invoices into one file because a part of it is missing from this "
+                           "computer. Please reinstall Vyaprix.")
     writer = PdfWriter()
     try:
         for p in paths:
@@ -6517,55 +6360,6 @@ class BulkProgressDialog(QDialog):
                 logger.error(f"Bulk operation on_done callback failed: {exc}", exc_info=True)
 
 
-class ChangelogDialog(QDialog):
-    """"What's new": every release since the file this project started from, with all of its changes."""
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle(f"What's New in {APP_NAME}")
-        self.setModal(True)
-        _fit_to_screen(self, 560, 640, 420, 420)
-        root = QVBoxLayout(self)
-        root.setContentsMargins(20, 20, 20, 20)
-        root.setSpacing(12)
-        root.addWidget(make_label(f"{CHANGE_COUNT} improvements since {BASE_VERSION}", "h2"))
-        self.summary_lbl = make_label(f"You are using version {APP_VERSION.lstrip('v')} (build {APP_BUILD_VERSION}).", "muted")
-        root.addWidget(self.summary_lbl)
-        area = QScrollArea()
-        area.setWidgetResizable(True)
-        area.setFrameShape(QFrame.Shape.NoFrame)
-        area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        body = QWidget()
-        col = QVBoxLayout(body)
-        col.setContentsMargins(0, 0, 10, 0)
-        col.setSpacing(4)
-        self.release_labels: List[QLabel] = []
-        self.change_labels: List[QLabel] = []
-        for release in CHANGELOG:
-            head = make_label(f"{release.version}  —  {release.title}", "h3")
-            self.release_labels.append(head)
-            col.addSpacing(8)
-            col.addWidget(head)
-            running = "  ·  ● the version you are using" if release.version == APP_VERSION else ""
-            col.addWidget(make_label(f"{release.date}  ·  {len(release.changes)} improvements{running}", "muted"))
-            col.addSpacing(4)
-            for change in release.changes:
-                lbl = make_label(f"•  {change}", wrap=True)
-                lbl.setMinimumWidth(120)
-                self.change_labels.append(lbl)
-                col.addWidget(lbl)
-        col.addStretch(1)
-        area.setWidget(body)
-        root.addWidget(area, 1)
-        row = QHBoxLayout()
-        row.addStretch(1)
-        self.close_btn = make_button("Close", "primary", self.accept)
-        self.close_btn.setFixedWidth(130)
-        self.close_btn.setDefault(True)
-        row.addWidget(self.close_btn)
-        root.addLayout(row)
-
-
 class AboutDialog(QDialog):
     WIDTH = 400
 
@@ -6575,7 +6369,7 @@ class AboutDialog(QDialog):
         self.setModal(True)
         self.setFixedWidth(self.WIDTH)
         self._build()
-        self.setFixedHeight(max(420, self.sizeHint().height()))
+        self.setFixedHeight(max(340, self.sizeHint().height()))
 
     def _build(self):
         root = QVBoxLayout(self)
@@ -6598,12 +6392,6 @@ class AboutDialog(QDialog):
         self.build_label = make_label(f"Build {APP_BUILD_VERSION}", "muted", align=Qt.AlignmentFlag.AlignCenter)
         root.addWidget(self.build_label)
         root.addWidget(make_label(f"Released on {APP_RELEASE_DATE}", "muted", align=Qt.AlignmentFlag.AlignCenter))
-        root.addSpacing(6)
-        self.headline_label = make_label(CHANGELOG[0].title, "small", align=Qt.AlignmentFlag.AlignCenter, wrap=True)
-        root.addWidget(self.headline_label)
-        self.changes_label = make_label(f"{CHANGE_COUNT} improvements since {BASE_VERSION}",
-                                        "small", align=Qt.AlignmentFlag.AlignCenter)
-        root.addWidget(self.changes_label)
         root.addSpacing(15)
         root.addWidget(hline())
         root.addSpacing(15)
@@ -6618,19 +6406,12 @@ class AboutDialog(QDialog):
         root.addSpacing(20)
         row = QHBoxLayout()
         row.addStretch(1)
-        self.whats_new_btn = make_button("What's New", "secondary-outline", self._show_changelog)
-        self.whats_new_btn.setFixedWidth(130)
-        row.addWidget(self.whats_new_btn)
-        row.addSpacing(8)
         self.close_btn = make_button("Close", "primary", self.accept)
         self.close_btn.setFixedWidth(130)
         self.close_btn.setDefault(True)
         row.addWidget(self.close_btn)
         row.addStretch(1)
         root.addLayout(row)
-
-    def _show_changelog(self):
-        run_dialog(ChangelogDialog(self))
 
 
 class ShortcutsDialog(QDialog):
@@ -9566,7 +9347,8 @@ class DashboardFrame(QWidget):
             total = len(items)
             written = 0
             try:
-                with open(file_path, "w", newline="", encoding="utf-8") as fh:
+                # "utf-8-sig" puts a small marker at the start of the file so that Excel shows every name and symbol correctly.
+                with open(file_path, "w", newline="", encoding="utf-8-sig") as fh:
                     writer = None
                     if ids is not None:
                         CHUNK = 500
@@ -11648,10 +11430,10 @@ class InvoiceFormFrame(QWidget):
         bill_to = self.client_edit.text().strip()
         your_name = self.your_name_entry.text().strip()
         if not inv_num or not bill_to or not your_name:
-            return self._error("Validation", "Invoice Number, Client Name, and Your Name are all required.")
+            return self._error("Please Check", "Invoice Number, Client Name, and Your Name are all required.")
         if INVALID_FILENAME_CHARS.search(inv_num):
             return self._error(
-                "Validation",
+                "Please Check",
                 'Invoice Number cannot contain any of:  \\  /  :  * ?  "  <  >  |\n'
                 "(these characters break the PDF file that gets generated from it).",
             )
@@ -11679,42 +11461,42 @@ class InvoiceFormFrame(QWidget):
         if not no_charge and self.gst_toggle.isChecked():
             tax_rate = safe_float(self.tax_rate_entry.text())
             if not (0 <= tax_rate <= 100):
-                return self._error("Validation", "GST / Tax Rate must be between 0 and 100.")
+                return self._error("Please Check", "GST / Tax Rate must be between 0 and 100.")
 
         g_disc = safe_float(self.global_discount_entry.text())
         if g_disc < 0:
-            return self._error("Validation", "Overall discount cannot be negative.")
+            return self._error("Please Check", "Overall discount cannot be negative.")
         if self.disc_type_combo.currentText() == "%" and g_disc > 100:
-            return self._error("Validation", "A percentage discount cannot exceed 100%.")
+            return self._error("Please Check", "A percentage discount cannot exceed 100%.")
 
         due_date: Optional[str] = None
         if self._due_on() and not no_charge:
             due_date = date_edit_db(self.due_date_edit)
             if due_date < inv_date:
-                return self._error("Validation", "The due date cannot be earlier than the invoice date.")
+                return self._error("Please Check", "The due date cannot be earlier than the invoice date.")
 
         items = self._filled_items()
         if not no_charge and not items:
-            return self._error("Validation", "Add at least one item to the invoice.")
+            return self._error("Please Check", "Add at least one item to the invoice.")
         per_item = self._per_item_active()
         for i in items:
             name = i["title"] or "an item"
             if i["amount"] < 0 or i["discount"] < 0:
-                return self._error("Validation", "Item amounts and discounts cannot be negative.")
+                return self._error("Please Check", "Item amounts and discounts cannot be negative.")
             if i.get("qty", 1.0) <= 0:
-                return self._error("Validation", f'The quantity of "{name}" must be greater than zero.')
+                return self._error("Please Check", f'The quantity of "{name}" must be greater than zero.')
             if i["discount"] > i["amount"]:
                 return self._error(
-                    "Validation",
+                    "Please Check",
                     f'The discount on "{name}" cannot be larger than its amount.',
                 )
         for i in items:
             if i.get("hsn") and not 2 <= len(i["hsn"]) <= 8:
-                return self._error("Validation", f'The HSN / SAC code of "{i["title"] or "an item"}" must be 2 to 8 digits.')
+                return self._error("Please Check", f'The HSN / SAC code of "{i["title"] or "an item"}" must be 2 to 8 digits.')
         if per_item:
             for row in self.item_rows:
                 if row.is_filled() and not 0 <= row.raw_gst() <= 100:
-                    return self._error("Validation", f'The GST rate of "{row.title_edit.text().strip() or "an item"}" '
+                    return self._error("Please Check", f'The GST rate of "{row.title_edit.text().strip() or "an item"}" '
                                                      "must be between 0 and 100.")
 
         payments = []
@@ -12755,7 +12537,7 @@ class Sidebar(QFrame):
                                              lambda: self.controller.open_settings())
         self.help_btn = self._add_button(bottom, "help", "Help", "Quick answers and a step-by-step start (F1)",
                                          lambda: self.controller.open_help())
-        self.about_btn = self._add_button(bottom, "info", "About", "Version and what is new",
+        self.about_btn = self._add_button(bottom, "info", "About", "Which version you are using, and who made Vyaprix",
                                           lambda: self.controller.open_about())
         self.toggle_btn = self._add_button(bottom, "chevrons-left", "Hide menu", "", self.toggle_collapsed)
         self.version_label = SidebarLabel(f"Version {APP_VERSION.lstrip('v')}", rail_text=APP_VERSION, centered=True)
