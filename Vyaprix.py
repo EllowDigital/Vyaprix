@@ -124,9 +124,9 @@ else:
 # with this program, not in this file: when a new build is handed over, change the three values below and add the
 # build to that file.
 APP_NAME: str          = "Vyaprix"
-APP_VERSION: str       = "v2.4"
-APP_BUILD_VERSION: str = "2.4.82"
-APP_RELEASE_DATE: str  = "23 November 2026"
+APP_VERSION: str       = "v2.5"
+APP_BUILD_VERSION: str = "2.5.87"
+APP_RELEASE_DATE: str  = "24 November 2026"
 APP_TAGLINE: str       = "Business Made Smarter."
 
 APP_ATTRIBUTION: str = (
