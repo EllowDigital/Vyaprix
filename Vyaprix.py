@@ -941,6 +941,9 @@ class DatabaseManager:
                     "pdf_template":         "TEXT DEFAULT ''",            # this invoice's own look ('' = the Settings default)
                     "pdf_watermark":        "TEXT DEFAULT ''",            # its status stamp: '' = as Settings says | 'show' | 'hide'
                     "print_extras":         "TEXT DEFAULT 'both'",        # printed under the totals: 'both' | 'terms' | 'notes' | 'none'
+                    # --- payment reminders: the day the client was last reminded about this invoice, and how many times ---
+                    "last_reminder":        "TEXT",                       # 'YYYY-MM-DD'; NULL = never reminded
+                    "reminder_count":       "INTEGER DEFAULT 0",
                 }.items():
                     if col not in existing:
                         c.execute(f"ALTER TABLE invoices ADD COLUMN {col} {ctype}")
@@ -1502,6 +1505,37 @@ class DatabaseManager:
                 [today_db()],
             ).fetchone()
         return {"count": int(row["n"]), "amount": float(row["amount"])}
+
+    def get_overdue_invoices(self) -> List[Dict[str, Any]]:
+        """Every overdue invoice (unpaid or part-paid, past its due date), the one that is most overdue first."""
+        with closing(self._conn()) as c:
+            rows = c.execute(
+                f"SELECT * FROM invoices WHERE {self._OVERDUE_SQL} ORDER BY due_date, invoice_number",
+                [today_db()],
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def record_reminder(self, invoice_numbers: List[str], day: Optional[str] = None) -> int:
+        """Writes down that the client was reminded about these invoices (today, unless `day` is given): the day is kept
+        and the number of reminders goes up by one. Returns how many invoices were updated."""
+        numbers = [n for n in invoice_numbers if n]
+        if not numbers:
+            return 0
+        day = day or today_db()
+        with closing(self._conn()) as c:
+            with c:
+                cur = c.executemany(
+                    "UPDATE invoices SET last_reminder=?, reminder_count=COALESCE(reminder_count, 0) + 1 "
+                    "WHERE invoice_number=?",
+                    [(day, n) for n in numbers],
+                )
+                return int(cur.rowcount)
+
+    def get_client_contact(self, name: str) -> str:
+        """The contact details saved for a client on the Clients page ("" when there are none)."""
+        with closing(self._conn()) as c:
+            row = c.execute("SELECT contact FROM clients WHERE name = ? COLLATE NOCASE", (str(name).strip(),)).fetchone()
+        return str(row["contact"] or "") if row else ""
 
     def get_all_invoices(self, search_query: str = "", status_filter: str = "All") -> List[sqlite3.Row]:
         clauses, params = [], []
@@ -6135,6 +6169,372 @@ class RecordPaymentDialog(_EditDialog):
         self.on_saved(payment)
 
 
+# -----------------------------------------------------------------------------
+#  Payment reminders
+# -----------------------------------------------------------------------------
+REMINDER_MAX_LISTED = 15            # a reminder names at most this many invoices; the rest are counted in its total
+
+
+def client_key(name: Any) -> str:
+    """One client, however the name was typed: capitals and extra spaces make no difference."""
+    return " ".join(str(name or "").split()).casefold()
+
+
+def contact_details(text: Any) -> Tuple[str, str]:
+    """(phone number, email address) found in a client's free-text contact box -- either may be ""."""
+    text = str(text or "")
+    phone = email = ""
+    if match := re.search(r"[\w.-]+@[\w.-]+", text):
+        email = match.group(0).rstrip(".-")
+        text = text.replace(match.group(0), " ")             # an email address must not be read as a phone number
+    if match := re.search(r"\+?\d[\d\s-]{8,}\d", text):
+        phone = re.sub(r"[^\d+]", "", match.group(0))        # digits and a leading + only
+    return phone, email
+
+
+def whatsapp_number(text: Any) -> str:
+    """The digits WhatsApp needs, from a number written the way people write it. A 10-digit Indian mobile number (or one
+    with a leading 0) gets the country code 91; a number that already has a country code is left as it is."""
+    digits = re.sub(r"\D", "", str(text or ""))
+    if len(digits) == 11 and digits.startswith("0"):
+        digits = digits[1:]
+    if len(digits) == 10 and digits[0] in "6789":
+        digits = "91" + digits
+    return digits
+
+
+def days_overdue(invoice: Dict[str, Any], today: Optional[datetime.date] = None) -> int:
+    """How many days past its due date an invoice is (0 when it is not late, or has no readable due date)."""
+    try:
+        due = datetime.datetime.strptime(str(invoice.get("due_date") or ""), DB_DATE_FORMAT).date()
+    except ValueError:
+        return 0
+    return max(0, ((today or datetime.date.today()) - due).days)
+
+
+def _days_text(days: int) -> str:
+    return f"{days} day{'s' if days != 1 else ''}"
+
+
+def group_overdue_by_client(invoices: List[Dict[str, Any]], today: Optional[datetime.date] = None) -> List[Dict[str, Any]]:
+    """The overdue invoices grouped by client, the client who is most overdue first. Every group holds: name, key,
+    invoices (the most overdue first), count, amount (still to pay on all of them), days_late (of the oldest one),
+    last_reminder ('YYYY-MM-DD', or "" when the client was never reminded) and reminder_count (how many reminders the
+    most reminded invoice has had)."""
+    today = today or datetime.date.today()
+    groups: Dict[str, Dict[str, Any]] = {}
+    for inv in invoices:
+        key = client_key(inv.get("bill_to"))
+        group = groups.setdefault(key, {"name": " ".join(str(inv.get("bill_to") or "").split()), "key": key,
+                                        "invoices": []})
+        group["invoices"].append(inv)
+    result = []
+    for group in groups.values():
+        items = sorted(group["invoices"], key=lambda i: (str(i.get("due_date") or ""), str(i.get("invoice_number") or "")))
+        group["invoices"] = items
+        group["count"] = len(items)
+        group["amount"] = sum(max(0.0, safe_float(i.get("balance_due"))) for i in items)
+        group["days_late"] = max((days_overdue(i, today) for i in items), default=0)
+        group["last_reminder"] = max((str(i.get("last_reminder") or "") for i in items), default="")
+        group["reminder_count"] = max((int(safe_float(i.get("reminder_count"))) for i in items), default=0)
+        result.append(group)
+    result.sort(key=lambda g: (-g["days_late"], g["key"]))
+    return result
+
+
+def _reminder_payment_lines(config: Dict[str, Any]) -> List[str]:
+    """How the client can pay, from Settings (the same UPI ID and bank details every invoice carries)."""
+    pay = config.get("payment_details", {}) or {}
+    lines = []
+    if upi := _real_value(pay.get("upi_id"), _SAMPLE_UPI_ID):
+        lines.append(f"UPI: {upi}")
+    account = str(pay.get("account_number") or "").strip()
+    if account:
+        parts = [str(pay.get(k) or "").strip() for k in ("account_holder_name", "bank_name")]
+        parts = [p for p in parts if p] + [f"A/c {account}"]
+        if ifsc := str(pay.get("ifsc_code") or "").strip():
+            parts.append(f"IFSC {ifsc}")
+        lines.append("Bank transfer: " + ", ".join(parts))
+    return lines
+
+
+def build_reminder_message(client: Dict[str, Any], config: Dict[str, Any],
+                           today: Optional[datetime.date] = None) -> Tuple[str, str]:
+    """(email subject, message) that reminds a client of their overdue invoices -- friendly and short: which invoices,
+    how much, since when and how to pay. `client` is one group from group_overdue_by_client()."""
+    today = today or datetime.date.today()
+    invoices = list(client["invoices"])
+    total = sum(max(0.0, safe_float(i.get("balance_due"))) for i in invoices)
+    business = compose_your_name(config)
+    business = "" if business == "Your Name/Company" else business      # nothing set up yet: no name to sign with
+
+    def when(inv: Dict[str, Any]) -> str:
+        return (f"due on {parse_date(inv.get('due_date'), DB_DATE_FORMAT, DISPLAY_DATE_FORMAT)} "
+                f"({_days_text(days_overdue(inv, today))} ago)")
+
+    lines = [f"Hello {client['name']},", ""]
+    if len(invoices) == 1:
+        inv = invoices[0]
+        lines.append(f"This is a friendly reminder that {fmt_money(inv.get('balance_due'))} is still to pay on Invoice "
+                     f"{inv['invoice_number']}, which was {when(inv)}.")
+        what = f"Invoice {inv['invoice_number']}"
+    else:
+        lines += ["This is a friendly reminder that these invoices are overdue:", ""]
+        for inv in invoices[:REMINDER_MAX_LISTED]:
+            lines.append(f"- Invoice {inv['invoice_number']}: {fmt_money(inv.get('balance_due'))} still to pay, {when(inv)}")
+        if len(invoices) > REMINDER_MAX_LISTED:
+            lines.append(f"- ...and {len(invoices) - REMINDER_MAX_LISTED} more")
+        lines += ["", f"Total still to pay: {fmt_money(total)}"]
+        what = f"{len(invoices)} overdue invoices"
+    if pay_lines := _reminder_payment_lines(config):
+        lines += ["", "You can pay by:"] + [f"- {p}" for p in pay_lines]
+    lines += ["", "If you have already paid, please ignore this message and accept our thanks.", "", "Thank you,"]
+    if business:
+        lines.append(business)
+    subject = f"Payment reminder{' from ' + business if business else ''}: {what} ({fmt_money(total)})"
+    return subject, "\n".join(lines)
+
+
+class PaymentReminderDialog(_EditDialog):
+    """Reminds one client about everything of theirs that is overdue: a ready-to-send message (it can be changed first)
+    that goes out by WhatsApp or email, or is copied. Once it is used the day is written down against those invoices, so
+    the Invoices page can show when the client was last reminded. `client` is one group from group_overdue_by_client();
+    afterwards `sent` says whether a reminder went out."""
+
+    def __init__(self, parent, db_manager: "DatabaseManager", client: Dict[str, Any]):
+        name = client["name"]
+        super().__init__(parent, f"Payment Reminder  —  {name}", f"Remind {name} to pay", width=540)
+        self.db_manager = db_manager
+        self.client = client
+        self.sent = False
+        count = int(client["count"])
+        self._root.insertWidget(1, make_label(
+            f"{count} overdue invoice{'s' if count != 1 else ''}  •  {fmt_money(client['amount'])} still to collect",
+            "muted", wrap=True))
+        last = client.get("last_reminder") or ""
+        times = int(client.get("reminder_count") or 0)
+        self._root.insertWidget(2, make_label(
+            f"Last reminded on {parse_date(last, DB_DATE_FORMAT, DISPLAY_DATE_FORMAT)}  •  "
+            f"{times} reminder{'s' if times != 1 else ''} sent so far" if last
+            else "No reminder has been sent for these invoices yet.", "small", wrap=True))
+
+        phone, email = self._contact()
+        self.phone_edit = QLineEdit(whatsapp_number(phone) and ("+" + whatsapp_number(phone)))
+        self.phone_edit.setPlaceholderText("e.g. +91 98765 43210")
+        self._add_field("WhatsApp number (with country code)", self.phone_edit, space_after=10)
+        self.email_edit = QLineEdit(email)
+        self.email_edit.setPlaceholderText("e.g. accounts@client.com")
+        self._add_field("Client's email address", self.email_edit, space_after=10)
+
+        self.subject, body = build_reminder_message(client, load_config())
+        self.message_edit = self._multiline("", 9)
+        self.message_edit.setPlainText(body)
+        self._add_field("Message  (you can change it before sending)", self.message_edit, space_after=6)
+        self.status_lbl = make_label("", "small", "success", wrap=True)
+        self._root.addWidget(self.status_lbl)
+        self._root.addSpacing(8)
+
+        self._root.addWidget(hline())
+        self._root.addSpacing(10)
+        row = QHBoxLayout()
+        row.setSpacing(8)
+        self.whatsapp_btn = make_button("💬  WhatsApp", "success", self._send_whatsapp, min_height=34,
+                                        tooltip="Open WhatsApp with this message, ready to send")
+        self.email_btn = make_button("✉️  Email", "primary", self._send_email, min_height=34,
+                                     tooltip="Open your email program with this message, ready to send")
+        self.copy_btn = make_button("📋  Copy Message", "secondary-outline", self._copy_message, min_height=34,
+                                    tooltip="Copy the message, to paste into any app or text message")
+        self.close_btn = make_button("Close", "secondary-outline", self.reject, min_height=34)
+        for btn in (self.whatsapp_btn, self.email_btn, self.copy_btn):
+            row.addWidget(btn, 1)
+        row.addSpacing(8)
+        row.addWidget(self.close_btn)
+        self._root.addLayout(row)
+        _no_default_button(self.whatsapp_btn, self.email_btn, self.copy_btn, self.close_btn)
+        (self.phone_edit if not self.phone_edit.text() else self.email_edit if not email else self.phone_edit).setFocus()
+
+    def _contact(self) -> Tuple[str, str]:
+        """The client's phone number and email address: from the newest invoice that has them, else from the Clients page."""
+        phone = email = ""
+        newest_first = sorted(self.client["invoices"], key=lambda i: str(i.get("invoice_date") or ""), reverse=True)
+        for text in [i.get("client_contact") for i in newest_first] + [self.db_manager.get_client_contact(self.client["name"])]:
+            found_phone, found_email = contact_details(text)
+            phone, email = phone or found_phone, email or found_email
+        return phone, email
+
+    def _message(self) -> str:
+        return self.message_edit.toPlainText().strip()
+
+    def _note_sent(self) -> None:
+        """Writes down, once per window, that the client was reminded about these invoices."""
+        if not self.sent:
+            self.db_manager.record_reminder([i["invoice_number"] for i in self.client["invoices"]])
+            self.sent = True
+
+    def _send_whatsapp(self) -> None:
+        number = whatsapp_number(self.phone_edit.text())
+        if not number:
+            Messagebox.show_warning("Missing Info", "Please enter a WhatsApp number, with the country code.", parent=self)
+            self.phone_edit.setFocus()
+            return
+        if not self._message():
+            Messagebox.show_warning("Missing Info", "The message is empty. Please write something to send.", parent=self)
+            return
+        self._open_link(f"https://wa.me/{number}?text={urllib.parse.quote(self._message())}")
+
+    def _send_email(self) -> None:
+        email = self.email_edit.text().strip()
+        if not email:
+            Messagebox.show_warning("Missing Info", "Please enter an email address.", parent=self)
+            self.email_edit.setFocus()
+            return
+        if not is_valid_email(email):
+            Messagebox.show_warning("Check the email address", f"“{email}” does not look like an email address.", parent=self)
+            self.email_edit.setFocus()
+            return
+        if not self._message():
+            Messagebox.show_warning("Missing Info", "The message is empty. Please write something to send.", parent=self)
+            return
+        self._open_link(f"mailto:{email}?subject={urllib.parse.quote(self.subject)}&body={urllib.parse.quote(self._message())}")
+
+    def _open_link(self, url: str) -> None:
+        if webbrowser.open(url):
+            self._note_sent()
+            self.accept()                          # the message is on its way: the job is done
+        else:
+            Messagebox.show_warning(
+                "Send Reminder", "Vyaprix could not open WhatsApp or your email program.\n"
+                "You can still press Copy Message and paste it into any app.", parent=self)
+
+    def _copy_message(self) -> None:
+        if not self._message():
+            return
+        QGuiApplication.clipboard().setText(self._message())
+        self._note_sent()
+        self.status_lbl.setText("✓  The message is copied. Paste it into WhatsApp, an email or a text message.")
+
+
+class OverdueRemindersDialog(QDialog):
+    """Every client who has overdue invoices, in one list -- the client who is most overdue first. Pick a client and press
+    Send Reminder to write to them about everything that is overdue."""
+    HEADERS = ["Client", "Invoices", "Still to pay", "Late by", "Last reminded"]
+    _L, _C, _R = Qt.AlignmentFlag.AlignLeft, Qt.AlignmentFlag.AlignHCenter, Qt.AlignmentFlag.AlignRight
+    ALIGNS = [_L, _C, _R, _C, _C]
+
+    def __init__(self, parent, db_manager: "DatabaseManager", on_changed: Callable[[], None]):
+        super().__init__(parent)
+        self.db_manager = db_manager
+        self.on_changed = on_changed
+        self.groups: List[Dict[str, Any]] = []
+        self.setWindowTitle("Overdue Payments")
+        self.setModal(True)
+        _fit_to_screen(self, 780, 500, 600, 380)
+        root = QVBoxLayout(self)
+        root.setContentsMargins(20, 20, 20, 20)
+        root.setSpacing(0)
+        root.addWidget(make_label("🔔  Overdue Payments", "h2"))
+        root.addSpacing(4)
+        root.addWidget(make_label("These clients have invoices that are past their due date. Pick a client and press "
+                                  "Send Reminder.", "muted", wrap=True))
+        root.addSpacing(12)
+
+        self.table = KeyTable(0, len(self.HEADERS))
+        t = self.table
+        t.setHorizontalHeaderLabels(self.HEADERS)
+        t.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        t.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        t.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        t.setAlternatingRowColors(True)
+        t.setShowGrid(False)
+        t.setWordWrap(False)
+        t.verticalHeader().setVisible(False)
+        t.verticalHeader().setDefaultSectionSize(34)
+        header = t.horizontalHeader()
+        header.setHighlightSections(False)
+        header.setMinimumSectionSize(40)
+        for i, width in enumerate((0, 80, 120, 90, 130)):
+            header.setSectionResizeMode(i, QHeaderView.ResizeMode.Stretch if i == 0 else QHeaderView.ResizeMode.Interactive)
+            if width:
+                t.setColumnWidth(i, width)
+            t.horizontalHeaderItem(i).setTextAlignment(self.ALIGNS[i] | Qt.AlignmentFlag.AlignVCenter)
+        t.itemSelectionChanged.connect(self._on_select)
+        t.itemDoubleClicked.connect(lambda _item: self._send())
+        t.enter_pressed.connect(self._send)
+        root.addWidget(t, 1)
+        self.empty_state = EmptyState(t)
+
+        root.addSpacing(8)
+        self.status_lbl = make_label("", "small", "success", wrap=True)
+        root.addWidget(self.status_lbl)
+        root.addSpacing(8)
+        root.addWidget(hline())
+        root.addSpacing(10)
+        row = QHBoxLayout()
+        row.addStretch(1)
+        self.remind_btn = make_button("🔔  Send Reminder", "primary", self._send,
+                                      tooltip="Write to the selected client about everything that is overdue")
+        self.remind_btn.setDefault(True)
+        self.close_btn = make_button("Close", "secondary-outline", self.accept)
+        self.close_btn.setAutoDefault(False)
+        row.addWidget(self.remind_btn)
+        row.addSpacing(8)
+        row.addWidget(self.close_btn)
+        root.addLayout(row)
+        self._refresh()
+
+    def _current_group(self) -> Optional[Dict[str, Any]]:
+        rows = sorted({i.row() for i in self.table.selectedIndexes()})
+        return self.groups[rows[0]] if rows and rows[0] < len(self.groups) else None
+
+    def _on_select(self) -> None:
+        self.remind_btn.setEnabled(self._current_group() is not None)
+
+    def _refresh(self) -> None:
+        """Loads the list again (a reminder just sent changes its 'Last reminded' column, a payment can empty it)."""
+        keep = (self._current_group() or {}).get("key")
+        self.groups = group_overdue_by_client(self.db_manager.get_overdue_invoices())
+        t = self.table
+        t.blockSignals(True)
+        t.setRowCount(len(self.groups))
+        late_brush = QBrush(QColor(STATUS_BADGE["DUE"]["foreground"]))
+        for r, group in enumerate(self.groups):
+            last = group["last_reminder"]
+            values = (group["name"], str(group["count"]), fmt_money(group["amount"]), _days_text(group["days_late"]),
+                      parse_date(last, DB_DATE_FORMAT, DISPLAY_DATE_FORMAT) if last else "Not yet")
+            for c, text in enumerate(values):
+                item = QTableWidgetItem(text)
+                item.setTextAlignment(self.ALIGNS[c] | Qt.AlignmentFlag.AlignVCenter)
+                if c == 0:
+                    item.setToolTip(text)
+                if c == 3:                                 # how late: in the "unpaid" red, as the Due On column is
+                    item.setForeground(late_brush)
+                if c == 4 and last:
+                    times = group["reminder_count"]
+                    item.setToolTip(f"{times} reminder{'s' if times != 1 else ''} sent so far")
+                t.setItem(r, c, item)
+        t.blockSignals(False)
+        t.fit_columns({1: ["000"], 2: [fmt_money(group["amount"]) for group in self.groups], 3: ["000 days"],
+                       4: ["00 Mmm 0000"]})
+        if self.groups:
+            row = next((r for r, g in enumerate(self.groups) if g["key"] == keep), 0)
+            t.select_only_row(row)
+            self.empty_state.show_message("")
+        else:
+            self.empty_state.show_message("Nothing is overdue.\nEvery client is up to date.")
+        self._on_select()
+
+    def _send(self) -> None:
+        group = self._current_group()
+        if group is None:
+            return
+        dialog = PaymentReminderDialog(self, self.db_manager, group)
+        run_dialog(dialog)
+        if dialog.sent:
+            self.status_lbl.setText(f"✓  Reminder noted for {group['name']}.")
+            self.on_changed()                       # the Invoices page behind shows the new "last reminded" day
+        self._refresh()
+
+
 class BulkProgressDialog(QDialog):
     """Modal progress window for long bulk jobs (delete / export / print / PDF generation).
 
@@ -9220,7 +9620,7 @@ class DashboardFrame(QWidget):
             return
 
         new_data = {k: row[k] for k in row.keys() if k not in
-                    ("grand_total", "total_paid", "balance_due", "created_ts")}
+                    ("grand_total", "total_paid", "balance_due", "created_ts", "last_reminder", "reminder_count")}
         new_data["invoice_number"] = self.db_manager.get_next_invoice_number()
         new_data["invoice_date"]   = datetime.date.today().strftime(DB_DATE_FORMAT)
         new_data["status"]         = InvoiceStatus.DUE.value
