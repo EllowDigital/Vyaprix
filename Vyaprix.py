@@ -6173,6 +6173,7 @@ class RecordPaymentDialog(_EditDialog):
 #  Payment reminders
 # -----------------------------------------------------------------------------
 REMINDER_MAX_LISTED = 15            # a reminder names at most this many invoices; the rest are counted in its total
+REMINDER_MAILTO_LIMIT = 1800        # an email link longer than this is cut short by many mail programs (see _send_email)
 
 
 def client_key(name: Any) -> str:
@@ -6266,7 +6267,8 @@ def build_reminder_message(client: Dict[str, Any], config: Dict[str, Any],
     invoices = list(client["invoices"])
     total = sum(max(0.0, safe_float(i.get("balance_due"))) for i in invoices)
     business = compose_your_name(config)
-    business = "" if business == "Your Name/Company" else business      # nothing set up yet: no name to sign with
+    if business in ("Your Name/Company", APP_NAME):        # nothing set up yet (the program's own name is no business): no name to sign with
+        business = ""
 
     def when(inv: Dict[str, Any]) -> str:
         return (f"due on {parse_date(inv.get('due_date'), DB_DATE_FORMAT, DISPLAY_DATE_FORMAT)} "
@@ -6304,6 +6306,7 @@ class PaymentReminderDialog(_EditDialog):
     def __init__(self, parent, db_manager: "DatabaseManager", client: Dict[str, Any]):
         name = client["name"]
         super().__init__(parent, f"Payment Reminder  —  {name}", f"Remind {name} to pay", width=540)
+        self._root.itemAt(0).widget().setWordWrap(True)                 # a long client name wraps instead of widening the window
         self.db_manager = db_manager
         self.client = client
         self.sent = False
@@ -6327,7 +6330,7 @@ class PaymentReminderDialog(_EditDialog):
         self._add_field("Client's email address", self.email_edit, space_after=10)
 
         self.subject, body = build_reminder_message(client, load_config())
-        self.message_edit = self._multiline("", 9)
+        self.message_edit = self._multiline("", 11)
         self.message_edit.setPlainText(body)
         self._add_field("Message  (you can change it before sending)", self.message_edit, space_after=6)
         self.status_lbl = make_label("", "small", "success", wrap=True)
@@ -6351,7 +6354,8 @@ class PaymentReminderDialog(_EditDialog):
         row.addWidget(self.close_btn)
         self._root.addLayout(row)
         _no_default_button(self.whatsapp_btn, self.email_btn, self.copy_btn, self.close_btn)
-        (self.phone_edit if not self.phone_edit.text() else self.email_edit if not email else self.phone_edit).setFocus()
+        missing = [w for w in (self.phone_edit, self.email_edit) if not w.text().strip()]
+        (missing[0] if missing else self.message_edit).setFocus()       # type what is missing, else read the message
 
     def _contact(self) -> Tuple[str, str]:
         """The client's phone number and email address: from the newest invoice that has them, else from the Clients page."""
@@ -6395,7 +6399,18 @@ class PaymentReminderDialog(_EditDialog):
         if not self._message():
             Messagebox.show_warning("Missing Info", "The message is empty. Please write something to send.", parent=self)
             return
-        self._open_link(f"mailto:{email}?subject={urllib.parse.quote(self.subject)}&body={urllib.parse.quote(self._message())}")
+        subject = urllib.parse.quote(self.subject)
+        link = f"mailto:{email}?subject={subject}&body={urllib.parse.quote(self._message())}"
+        if len(link) <= REMINDER_MAILTO_LIMIT:
+            self._open_link(link)
+            return
+        # Email programs cut a very long link short, so the message would arrive unfinished: open the email with the
+        # subject only and put the whole message on the clipboard to paste.
+        QGuiApplication.clipboard().setText(self._message())
+        Messagebox.show_info(
+            "Paste the message", "This message is too long to pass to your email program by itself.\n"
+            "It is copied: when the email opens, click in it and press Ctrl+V to paste the message.", parent=self)
+        self._open_link(f"mailto:{email}?subject={subject}")
 
     def _open_link(self, url: str) -> None:
         if webbrowser.open(url):
@@ -6911,6 +6926,13 @@ class HelpDialog(QDialog):
          "were paid. For UPI, a bank transfer, a card or a cheque you can also add the reference (such as the UPI "
          "transaction ID or the cheque number) so the payment is easy to find later. The invoice changes to Paid or "
          "Partly Paid by itself.",
+         "", ""),
+        ("Remind a customer to pay",
+         "When an invoice is past its due date, a red bar appears above your Invoices list. Press Send Reminders, pick a "
+         "client and press Send Reminder. Vyaprix writes a friendly message with their overdue invoices, the amount and "
+         "how to pay. Read it, change it if you like, then press WhatsApp or Email: Vyaprix opens it with the message "
+         "ready and you press Send there. Vyaprix remembers when each client was last reminded. You can also "
+         "right-click an overdue invoice and choose Send Payment Reminder.",
          "", ""),
         ("Print, save or send an invoice",
          "Select an invoice in the list and press View Invoice. From there you can print it, save a copy, or send it by "
@@ -9064,6 +9086,7 @@ class DashboardFrame(QWidget):
         outer.setSpacing(0)
         self._header(outer)
         self._stat_cards(outer)
+        self._reminder_bar(outer)
         self._filter_bar(outer)
         self._table(outer)
         self._pagination_bar(outer)
@@ -9127,6 +9150,33 @@ class DashboardFrame(QWidget):
         lbl.note_label = note_lbl            # reachable from the figure it belongs to
         row.addWidget(card, 1)               # equal stretch: the four cards share the row evenly
         return lbl
+
+    def _reminder_bar(self, outer: QVBoxLayout):
+        """A slim red bar under the four figures while something is overdue: how many invoices and how much money, and the
+        button that opens the list of clients to remind. It is hidden (and takes no room) when nothing is overdue."""
+        self.reminder_bar = QWidget()
+        wrap = QVBoxLayout(self.reminder_bar)
+        wrap.setContentsMargins(0, 0, 0, 10)
+        bar = QFrame()
+        set_role(bar, "stat", "danger")
+        row = QHBoxLayout(bar)
+        row.setContentsMargins(14, 6, 8, 6)
+        row.setSpacing(10)
+        self.reminder_lbl = make_elided_label("", "h3")
+        row.addWidget(self.reminder_lbl, 1)
+        self.reminder_btn = make_button("🔔  Send Reminders", "danger-outline", self._act_open_reminders,
+                                        tooltip="See which clients are overdue and remind them to pay")
+        row.addWidget(self.reminder_btn)
+        wrap.addWidget(bar)
+        self.reminder_bar.setVisible(False)
+        outer.addWidget(self.reminder_bar)
+
+    def _update_reminder_bar(self, late: Dict[str, Any]) -> None:
+        count = int(late["count"])
+        self.reminder_bar.setVisible(count > 0)
+        if count:
+            self.reminder_lbl.setText(f"🔔  {count} overdue invoice{'s' if count != 1 else ''}  •  "
+                                      f"{fmt_money(late['amount'])} still to collect")
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -9226,6 +9276,8 @@ class DashboardFrame(QWidget):
         self._ctx_single.addAction("📄  View Invoice",    self._act_view_pdf)
         self._ctx_single.addAction("✏️  Edit",            self._act_edit)
         self._ctx_single.addAction("💵  Record Payment",  self._act_record_payment)
+        self._remind_action = self._ctx_single.addAction("🔔  Send Payment Reminder", self._act_remind)
+        self._ctx_single.setToolTipsVisible(True)
         self._ctx_single.addAction("📋  Make a Copy",     self._act_duplicate)
         self._ctx_single.addAction("🗒  Add or Edit Note", self._act_edit_note)
         self._ctx_single.addSeparator()
@@ -9543,10 +9595,20 @@ class DashboardFrame(QWidget):
             return text, "Nothing is left to pay on this invoice.", False
         days = (due - today).days
         if days < 0:
-            return text, f"Overdue by {-days} day{'s' if days != -1 else ''}", True
+            tip = f"Overdue by {-days} day{'s' if days != -1 else ''}"
+            if last := str(row.get("last_reminder") or ""):        # when the client was last asked to pay
+                times = int(safe_float(row.get("reminder_count")))
+                tip += (f"\nLast reminded on {parse_date(last, DB_DATE_FORMAT, DISPLAY_DATE_FORMAT)}"
+                        + (f"  ({times} reminders sent)" if times > 1 else ""))
+            return text, tip, True
         if days == 0:
             return text, "Due today", False
         return text, f"Due in {days} day{'s' if days != 1 else ''}", False
+
+    @classmethod
+    def _is_overdue(cls, row: Optional[Dict[str, Any]]) -> bool:
+        """True for an invoice that still has money to pay and is past its due date (the test the Due On column uses)."""
+        return bool(row) and cls._due_cell(row, bool(row.get("is_complimentary")), datetime.date.today())[2]
 
     def _update_pagination_controls(self, total: int, start: int, shown: int):
         if total == 0:
@@ -9572,6 +9634,7 @@ class DashboardFrame(QWidget):
         count_to(self.s_count,    s["total"])
         late = self.db_manager.get_overdue_summary()
         self.s_due.note_label.setText(f"{fmt_money(late['amount'])} is overdue" if late["count"] else "Nothing is overdue")
+        self._update_reminder_bar(late)
         unpaid = int(s.get("due", 0)) + int(s.get("partial", 0))
         self.s_count.note_label.setText(f"{int(s.get('paid', 0))} paid  ·  {unpaid} unpaid" if s["total"] else "None yet")
         self._filter_btns["Overdue"].setText(f"Overdue ({late['count']})" if late["count"] else "Overdue")
@@ -9663,6 +9726,28 @@ class DashboardFrame(QWidget):
             notify(self.controller, f"Recorded {fmt_money(payment['amount'])} for Invoice {inv_id}.")
 
         run_dialog(RecordPaymentDialog(self.controller, self.db_manager, row, saved))
+
+    def _act_remind(self):
+        """Remind the selected invoice's client about everything of theirs that is overdue (one message for all of it)."""
+        row = self._row_index.get(self._selected_id() or "")
+        if not row:
+            return
+        key = client_key(row.get("bill_to"))
+        group = next((g for g in group_overdue_by_client(self.db_manager.get_overdue_invoices()) if g["key"] == key), None)
+        if group is None:                             # paid, or its date was changed, since the list was drawn
+            Messagebox.show_info("Nothing overdue", "This client has nothing overdue, so there is nothing to remind about.",
+                                 parent=self.controller)
+            self.on_show()
+            return
+        dialog = PaymentReminderDialog(self.controller, self.db_manager, group)
+        run_dialog(dialog)
+        if dialog.sent:
+            self.on_show()
+            notify(self.controller, f"Reminder noted for {group['name']}.")
+
+    def _act_open_reminders(self):
+        """The "Send Reminders" bar: the list of every client who is overdue, to remind one after another."""
+        run_dialog(OverdueRemindersDialog(self.controller, self.db_manager, self._populate))
 
     # ------------------------------------------------------------------ #
     #  Bulk operation concurrency guard
@@ -9904,6 +9989,10 @@ class DashboardFrame(QWidget):
         if len(self._selected_ids()) >= 2:
             self._ctx_bulk.exec(global_pos)
         elif item is not None:
+            late = self._is_overdue(self._row_index.get(self._selected_id() or ""))
+            self._remind_action.setEnabled(late)         # only an invoice that is past its due date can be reminded
+            self._remind_action.setToolTip("Remind this client about everything of theirs that is overdue" if late
+                                           else "This invoice is not overdue, so there is nothing to remind about")
             self._ctx_single.exec(global_pos)
 
     def _export_csv(self):
