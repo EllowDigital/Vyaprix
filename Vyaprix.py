@@ -2202,6 +2202,8 @@ class PDFGenerator:
     # (never smaller type) and kept when that saves a page. "A little" = the last page is filled less than this share.
     TIGHT_SCALE = 0.55
     TIGHT_WHEN_LAST_PAGE_BELOW = 0.30
+    FILE_PREFIX  = "Invoice"          # what the name of the PDF file starts with (a statement says "Statement")
+    CLIENT_LABEL = "BILL TO"          # the small heading above the customer's name
 
     def __init__(self, data: Dict[str, Any], config: Dict[str, Any],
                  payments: Optional[List[Dict]] = None, out_dir: Optional[Path] = None):
@@ -2219,7 +2221,7 @@ class PDFGenerator:
         # unsafe characters, so never trust it blindly as a path component.
         raw_number    = str(data.get('invoice_number') or 'NA').strip()
         safe_number   = INVALID_FILENAME_CHARS.sub('_', raw_number).strip('. ') or "NA"
-        base_filename = f"Invoice-{safe_number}"
+        base_filename = f"{self.FILE_PREFIX}-{safe_number}"
         target_dir    = out_dir or INVOICES_DIR
         self.filename = target_dir / f"{base_filename}.pdf"
 
@@ -2307,15 +2309,23 @@ class PDFGenerator:
     # ------------------------------------------------------------------ #
     #  Letterhead, parties, reference details
     # ------------------------------------------------------------------ #
+    def _document_title(self) -> str:
+        """The big word at the top right of the first page: INVOICE, RECEIPT (paid in full) or COMPLIMENTARY (free)."""
+        status = self.data.get("status")
+        return ("RECEIPT"       if status in (InvoiceStatus.PAID.value, InvoiceStatus.OVERPAID.value) else
+                "COMPLIMENTARY" if status == InvoiceStatus.COMPLIMENTARY.value else "INVOICE")
+
+    def _barcode_text(self) -> Optional[str]:
+        """What the small barcode under the letterhead holds -- the invoice number. None prints no barcode."""
+        return str(self.data.get("invoice_number") or "000")
+
     def _build_header(self, width: float) -> Table:
         comp  = self.config.get("company_details", {})
         left  = [Paragraph(safe_markup(compose_your_name(self.config)), self.styles["CompanyName"])]
         if d := comp.get("description"):
             left += [Spacer(1, 2), Paragraph(safe_markup(d), self.styles["Tagline"])]
 
-        status    = self.data.get("status")
-        doc_title = ("RECEIPT"       if status in (InvoiceStatus.PAID.value, InvoiceStatus.OVERPAID.value) else
-                     "COMPLIMENTARY" if status == InvoiceStatus.COMPLIMENTARY.value else "INVOICE")
+        doc_title = self._document_title()
 
         # --- BARCODE GENERATION ---
         # Code128 only supports a limited ASCII character set, and invoice
@@ -2323,9 +2333,10 @@ class PDFGenerator:
         # to take down the whole PDF. If it fails for any reason, we simply
         # skip the barcode instead of aborting invoice generation.
         title_block_rows = []
-        if BARCODE_AVAILABLE:
+        barcode_text = self._barcode_text()
+        if BARCODE_AVAILABLE and barcode_text is not None:
             try:
-                code128 = barcode.get('code128', str(self.data.get('invoice_number') or '000'), writer=ImageWriter())
+                code128 = barcode.get('code128', barcode_text, writer=ImageWriter())
                 buffer = io.BytesIO()
                 code128.write(buffer, options={"write_text": False, "module_width": 0.2, "module_height": 5.0})
                 buffer.seek(0)
@@ -2389,7 +2400,7 @@ class PDFGenerator:
                 cell.append(Paragraph(body, self.styles["BillTo"]))
             return cell
 
-        bill = block("BILL TO", safe_markup(self.data.get("bill_to")), client_c, cg)
+        bill = block(self.CLIENT_LABEL, safe_markup(self.data.get("bill_to")), client_c, cg)
         mine = block("FROM", safe_markup(self.data.get("your_name")), your_c, yg)
         return Table([[bill, mine]], colWidths=[width / 2.0, width / 2.0], style=[
             ("VALIGN",(0,0),(-1,-1),"TOP"),
@@ -2398,7 +2409,11 @@ class PDFGenerator:
         ])
 
     def _build_meta(self, width: float) -> Table:
-        """The reference details as a strip of labelled cells: invoice number and date, due date, payment terms and,
+        """The reference details as a strip of labelled cells (see _meta_cells for what they hold)."""
+        return self._meta_table(self._meta_cells(), width)
+
+    def _meta_cells(self) -> List[Tuple[str, str]]:
+        """(label, value) of every cell of the reference strip: invoice number and date, due date, payment terms and,
         when they are used, the customer's PO number, the place of supply and the reverse-charge flag."""
         date_str = parse_date(self.data.get("invoice_date"), DB_DATE_FORMAT, DISPLAY_DATE_FORMAT)
         billable = not self.data.get("is_complimentary")                  # a free (complimentary) invoice is not billable
@@ -2414,7 +2429,10 @@ class PDFGenerator:
                 cells.append(("Place of Supply", safe_markup(place)))
             if self.is_gst and self.data.get("reverse_charge"):
                 cells.append(("Reverse Charge", "Yes"))
+        return cells
 
+    def _meta_table(self, cells: List[Tuple[str, str]], width: float) -> Table:
+        """The strip itself: the cells in one row (or two even rows when there are many), in the template's colours."""
         t = self.tpl
         count = len(cells)
         per_row = count if count <= 4 else (3 if count <= 6 else 4)        # 5-6 cells: two even rows of three
@@ -2941,6 +2959,14 @@ class PDFGenerator:
             text = text[:-1]
         return text + "…"
 
+    def _continued_text(self) -> str:
+        """What the running header says on the right: which document the page belongs to."""
+        return f"Invoice {self.data.get('invoice_number') or ''}  ·  continued"
+
+    def _reference_text(self) -> str:
+        """What the footer says on the left of every page: the invoice number."""
+        return str(self.data.get("invoice_number") or "")
+
     def _draw_running_header(self, canvas):
         """Pages after the first: whose invoice this is, so a loose sheet can be identified and filed."""
         width, height = A4
@@ -2951,8 +2977,7 @@ class PDFGenerator:
         canvas.drawString(left, height - 1.2*cm, self._fit_text(canvas, compose_your_name(self.config), 9.0*cm, 9, self.bold))
         canvas.setFont(self.font, 8.5)
         canvas.setFillColor(colors.HexColor("#6B7280"))
-        number = str(self.data.get("invoice_number") or "")
-        canvas.drawRightString(right, height - 1.2*cm, self._fit_text(canvas, f"Invoice {number}  ·  continued", 8.0*cm, 8.5))
+        canvas.drawRightString(right, height - 1.2*cm, self._fit_text(canvas, self._continued_text(), 8.0*cm, 8.5))
         canvas.setStrokeColor(colors.HexColor(self.tpl.rule))
         canvas.setLineWidth(0.6)
         canvas.line(left, height - 1.5*cm, right, height - 1.5*cm)
@@ -3007,7 +3032,7 @@ class PDFGenerator:
         canvas.line(left, 1.95*cm, right, 1.95*cm)
         canvas.setFont(self.font, 8)
         canvas.setFillColor(colors.HexColor("#6B7280"))
-        canvas.drawString(left, first, self._fit_text(canvas, str(self.data.get("invoice_number") or ""), 4.0*cm, 8))
+        canvas.drawString(left, first, self._fit_text(canvas, self._reference_text(), 4.0*cm, 8))
         canvas.drawRightString(right, first, f"Page {page} of {total}")
         note = str(self.config.get("pdf_settings", {}).get("footer_message", "Thank you!") or "")
         lines = [line for part in note.splitlines() for line in (simpleSplit(part, self.font, 8, 9.5*cm) or [""])]
@@ -3070,18 +3095,28 @@ class PDFGenerator:
     def _layout(self, target) -> None:
         """Lays the whole invoice out on A4 pages and writes the PDF to `target` (a path or a file-like object). Leaves
         the number of pages in self.page_count and the room left on the last page in self._room_left."""
-        number = str(self.data.get("invoice_number") or "")
+        title, subject = self._document_info()
         doc = BaseDocTemplate(target, pagesize=A4,
                               rightMargin=self.MARGIN_X*cm, leftMargin=self.MARGIN_X*cm,
                               topMargin=self.MARGIN_TOP*cm, bottomMargin=self.MARGIN_BOTTOM*cm,
-                              title=f"Invoice {number}", author=compose_your_name(self.config),
-                              subject=f"Invoice {number} for {self.data.get('bill_to') or ''}".strip(),
+                              title=title, author=compose_your_name(self.config), subject=subject,
                               creator=f"{APP_NAME} {APP_VERSION} (build {APP_BUILD_VERSION})")
         # A frame without padding: every table is exactly as wide as the printable area, so the page edges line up.
         frame = Frame(doc.leftMargin, doc.bottomMargin, doc.width, doc.height, id="page",
                       leftPadding=0, rightPadding=0, topPadding=0, bottomPadding=0)
         doc.addPageTemplates([PageTemplate(id="invoice", frames=[frame], onPage=self._on_page, pagesize=A4)])
-        width, gap = doc.width, self._g
+        story = self._build_story(doc.width)
+        story.append(self._tail_marker())
+        doc.build(story, canvasmaker=self._numbered_canvas())
+
+    def _document_info(self) -> Tuple[str, str]:
+        """(title, subject) stored inside the PDF file -- what a PDF program shows in its title bar and file properties."""
+        number = str(self.data.get("invoice_number") or "")
+        return f"Invoice {number}", f"Invoice {number} for {self.data.get('bill_to') or ''}".strip()
+
+    def _build_story(self, width: float) -> List[Any]:
+        """Everything on the pages, top to bottom, as a list of flowables."""
+        gap = self._g
         story: List[Any] = [
             self._build_header(width),         Spacer(1, gap(0.45*cm)),
             self._build_parties(width),        Spacer(1, gap(0.4*cm)),
@@ -3099,8 +3134,7 @@ class PDFGenerator:
         notes = self._build_notes_terms()
         if notes:
             story += [Spacer(1, gap(0.4*cm)), *notes]
-        story.append(self._tail_marker())
-        doc.build(story, canvasmaker=self._numbered_canvas())
+        return story
 
     def generate(self) -> Path:
         """Writes the invoice PDF and returns its path. An invoice that runs only a little onto a second (or later) page
