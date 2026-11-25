@@ -126,7 +126,7 @@ else:
 APP_NAME: str          = "Vyaprix"
 APP_VERSION: str       = "v2.5"
 APP_BUILD_VERSION: str = "2.5.87"
-APP_RELEASE_DATE: str  = "24 November 2026"
+APP_RELEASE_DATE: str  = "25 November 2026"
 APP_TAGLINE: str       = "Business Made Smarter."
 
 APP_ATTRIBUTION: str = (
@@ -173,6 +173,7 @@ ASSETS_DIR: Path       = DATA_DIR / "assets"
 DATA_FONTS_DIR: Path   = DATA_DIR / "fonts"
 INVOICES_DIR: Path     = DATA_DIR / "invoices"
 BATCH_DIR: Path        = INVOICES_DIR / "_batches"
+STATEMENTS_DIR: Path   = DATA_DIR / "statements"
 PRINT_BATCH_SIZE: int  = 100  # bulk print merges PDFs in groups of this size -- see DashboardFrame._bulk_print_work
 LOGS_DIR: Path         = DATA_DIR / "logs"
 
@@ -211,8 +212,8 @@ def _copy_bundled_files(src_dir: Path, dest_dir: Path, allowed_files: Tuple[str,
 def _initialize_environment() -> None:
     """Create mutable directories and copy default assets/fonts on first launch."""
     directories_to_create = (
-        DATA_DIR, ASSETS_DIR, DATA_FONTS_DIR, 
-        INVOICES_DIR, BATCH_DIR, LOGS_DIR
+        DATA_DIR, ASSETS_DIR, DATA_FONTS_DIR,
+        INVOICES_DIR, BATCH_DIR, STATEMENTS_DIR, LOGS_DIR
     )
     for directory in directories_to_create:
         directory.mkdir(parents=True, exist_ok=True)
@@ -1536,6 +1537,63 @@ class DatabaseManager:
         with closing(self._conn()) as c:
             row = c.execute("SELECT contact FROM clients WHERE name = ? COLLATE NOCASE", (str(name).strip(),)).fetchone()
         return str(row["contact"] or "") if row else ""
+
+    # ------------------------------------------------------------------ #
+    #  Customer statements
+    # ------------------------------------------------------------------ #
+    def get_statement_clients(self) -> List[str]:
+        """The clients a statement can be made for: every name that has at least one invoice that is not free, each client once
+        however its name was typed (capitals and extra spaces make no difference), in alphabetical order. A client who is
+        saved on the Clients page lists under that spelling; otherwise the spelling used most often on invoices."""
+        with closing(self._conn()) as c:
+            counts = c.execute("SELECT bill_to, COUNT(*) AS n FROM invoices WHERE COALESCE(is_complimentary, 0) = 0 "
+                               "AND TRIM(COALESCE(bill_to, '')) != '' GROUP BY bill_to").fetchall()
+            saved = {client_key(r["name"]): " ".join(str(r["name"]).split())
+                     for r in c.execute("SELECT name FROM clients").fetchall()}
+        best: Dict[str, Tuple[int, str]] = {}
+        for row in counts:
+            key = client_key(row["bill_to"])
+            if key not in best or row["n"] > best[key][0]:
+                best[key] = (int(row["n"]), " ".join(str(row["bill_to"]).split()))
+        names = [saved.get(key) or spelling for key, (_n, spelling) in best.items()]
+        return sorted(names, key=str.casefold)
+
+    def get_client_ledger_rows(self, client_name: str) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+        """(invoices, payments) -- what a statement is made from: every invoice made out to this client (however the name
+        was typed) that is not free, oldest first, and every payment received on those invoices."""
+        key = client_key(client_name)
+        with closing(self._conn()) as c:
+            names = [r["bill_to"] for r in c.execute("SELECT DISTINCT bill_to FROM invoices").fetchall()
+                     if client_key(r["bill_to"]) == key]
+            if not key or not names:
+                return [], []
+            marks = ",".join("?" * len(names))
+            invoices = [dict(r) for r in c.execute(
+                "SELECT invoice_number, bill_to, client_contact, client_gstin, invoice_date, due_date, grand_total, status "
+                f"FROM invoices WHERE bill_to IN ({marks}) AND COALESCE(is_complimentary, 0) = 0 "
+                "ORDER BY invoice_date, invoice_number", names).fetchall()]
+            payments: List[Dict[str, Any]] = []
+            numbers = [i["invoice_number"] for i in invoices]
+            for start in range(0, len(numbers), 500):                    # SQLite takes only so many ? in one statement
+                chunk = numbers[start:start + 500]
+                payments += [dict(r) for r in c.execute(
+                    f"SELECT invoice_number, amount, payment_date, mode, reference, note FROM payments "
+                    f"WHERE invoice_number IN ({','.join('?' * len(chunk))}) ORDER BY payment_date, id", chunk).fetchall()]
+        return invoices, payments
+
+    def get_client_profile(self, client_name: str, invoices: Optional[List[Dict[str, Any]]] = None) -> Dict[str, str]:
+        """{name, contact, gstin} of a client for the top of a statement: from the Clients page, else from the newest of
+        their invoices."""
+        name = " ".join(str(client_name).split())
+        with closing(self._conn()) as c:
+            row = next((r for r in c.execute("SELECT name, contact, gstin FROM clients").fetchall()
+                        if client_key(r["name"]) == client_key(name)), None)
+        profile = {"name": " ".join(str(row["name"]).split()) if row else name,
+                   "contact": str(row["contact"] or "") if row else "", "gstin": str(row["gstin"] or "") if row else ""}
+        for inv in sorted(invoices or [], key=lambda i: str(i.get("invoice_date") or ""), reverse=True):
+            profile["contact"] = profile["contact"] or str(inv.get("client_contact") or "")
+            profile["gstin"] = profile["gstin"] or str(inv.get("client_gstin") or "")
+        return profile
 
     def get_all_invoices(self, search_query: str = "", status_filter: str = "All") -> List[sqlite3.Row]:
         clauses, params = [], []
