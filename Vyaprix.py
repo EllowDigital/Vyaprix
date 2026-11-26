@@ -174,6 +174,7 @@ DATA_FONTS_DIR: Path   = DATA_DIR / "fonts"
 INVOICES_DIR: Path     = DATA_DIR / "invoices"
 BATCH_DIR: Path        = INVOICES_DIR / "_batches"
 STATEMENTS_DIR: Path   = DATA_DIR / "statements"
+QUOTATIONS_DIR: Path   = DATA_DIR / "quotations"
 PRINT_BATCH_SIZE: int  = 100  # bulk print merges PDFs in groups of this size -- see DashboardFrame._bulk_print_work
 LOGS_DIR: Path         = DATA_DIR / "logs"
 
@@ -213,7 +214,7 @@ def _initialize_environment() -> None:
     """Create mutable directories and copy default assets/fonts on first launch."""
     directories_to_create = (
         DATA_DIR, ASSETS_DIR, DATA_FONTS_DIR,
-        INVOICES_DIR, BATCH_DIR, STATEMENTS_DIR, LOGS_DIR
+        INVOICES_DIR, BATCH_DIR, STATEMENTS_DIR, QUOTATIONS_DIR, LOGS_DIR
     )
     for directory in directories_to_create:
         directory.mkdir(parents=True, exist_ok=True)
@@ -376,6 +377,30 @@ class InvoiceStatus(Enum):
     PARTIAL       = "Partial"
     OVERPAID      = "Overpaid"
     COMPLIMENTARY = "Complimentary"
+
+
+# ---- quotations ---------------------------------------------------------------------------------------------- #
+# A quotation is an offer: it is not an invoice, owes nothing and never counts in the Invoices page, the totals, the
+# overdue list or a customer statement. It is Open until the customer answers; "Expired" is not stored -- an Open
+# quotation whose "valid until" day has passed simply shows as Expired. Making an invoice from it marks it Invoiced.
+QUOTE_OPEN, QUOTE_ACCEPTED, QUOTE_DECLINED, QUOTE_INVOICED = "Open", "Accepted", "Declined", "Invoiced"
+QUOTE_EXPIRED = "Expired"                       # shown, never stored
+QUOTE_STATUSES: Tuple[str, ...] = (QUOTE_OPEN, QUOTE_ACCEPTED, QUOTE_DECLINED, QUOTE_INVOICED)
+#: What the Quotations page can be filtered by, in the order of its drop-down: (stored/shown status or "", wording)
+QUOTE_FILTERS: List[Tuple[str, str]] = [
+    ("", "All quotations"), (QUOTE_OPEN, "Open"), (QUOTE_ACCEPTED, "Accepted"), (QUOTE_EXPIRED, "Expired"),
+    (QUOTE_DECLINED, "Declined"), (QUOTE_INVOICED, "Made into an invoice"),
+]
+#: Text colour of a quotation's status in the list (theme tones, like the status of an invoice)
+QUOTE_TONES: Dict[str, str] = {
+    QUOTE_OPEN: "info", QUOTE_ACCEPTED: "success", QUOTE_DECLINED: "danger", QUOTE_EXPIRED: "warning",
+    QUOTE_INVOICED: "secondary",
+}
+#: How long a new quotation stays valid unless the person says otherwise (days), and the choices offered
+QUOTE_DEFAULT_VALID_DAYS: int = 30
+QUOTE_VALID_CHOICES: List[Tuple[Optional[int], str]] = [
+    (7, "7 days"), (15, "15 days"), (30, "30 days"), (45, "45 days"), (60, "60 days"), (90, "90 days"), (None, "Choose a date…"),
+]
 
 
 # =============================================================================
