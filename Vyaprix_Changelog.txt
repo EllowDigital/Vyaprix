@@ -4,14 +4,14 @@ The record of every version and build of Vyaprix, newest first.
 ====================================================================================================
 
   Latest version : v2.5
-  Latest build   : 2.5.87
-  Released on    : 25 November 2026
+  Latest build   : 2.5.93
+  Released on    : 26 November 2026
 
 
 HOW TO READ THIS FILE
 ----------------------------------------------------------------------------------------------------
   - Versions are listed newest first. Changes that carry a build number are listed newest first too.
-  - A build number looks like 2.5.87. The first part is the version (here v2.5). The last part
+  - A build number looks like 2.5.93. The first part is the version (here v2.5). The last part
     counts every change made to Vyaprix since version v1.5 (build 1.5.2), so every change adds one
     to it and it never goes back.
   - A version carries the date its newest build was handed over.
@@ -20,8 +20,8 @@ HOW TO READ THIS FILE
 
 VERSIONS AT A GLANCE
 ----------------------------------------------------------------------------------------------------
-  v2.5  -  newest build 2.5.87  -  25 November 2026  -  5 changes
-        Payment reminders for overdue invoices
+  v2.5  -  newest build 2.5.93  -  26 November 2026  -  11 changes
+        Payment reminders and customer statements
   v2.4  -  newest build 2.4.82  -  23 November 2026  -  46 changes
         A friendlier Vyaprix: correct amounts, easier payments and plain wording
   v2.3  -  newest build 2.3.36  -  12 November 2026  -  12 changes
@@ -37,7 +37,8 @@ VERSIONS AT A GLANCE
 
 BUILDS HANDED OVER
 ----------------------------------------------------------------------------------------------------
-  Build 2.5.87   25 November 2026   (latest)
+  Build 2.5.93   26 November 2026   (latest)
+  Build 2.5.87   25 November 2026
   Build 2.4.82   23 November 2026
   Build 2.4.76   21 November 2026
   Build 2.4.70   20 November 2026
@@ -53,9 +54,46 @@ BUILDS HANDED OVER
 
 
 ====================================================================================================
-v2.5 - Payment reminders for overdue invoices
-Released 25 November 2026  |  newest build 2.5.87  |  5 changes
+v2.5 - Payment reminders and customer statements
+Released 26 November 2026  |  newest build 2.5.93  |  11 changes
 ====================================================================================================
+
+BUILDS 2.5.88 TO 2.5.93 - 26 November 2026
+
+  2.5.93  A long statement carries on over as many pages as it needs, with the table heading
+          repeated, the customer's name at the top of every page after the first and "Page x of y"
+          at the bottom. Help has a new topic, "Make a statement for a customer".
+
+  2.5.92  A finished statement opens in the same window as an invoice, so you can print it, save a
+          copy or share it. Sharing by WhatsApp or email uses statement wording ("Please find
+          attached your account statement ... The amount due is ...") with the WhatsApp number and
+          email address filled in from the client's details. Statements are kept in their own
+          "statements" folder next to your invoices, and making a statement never changes any
+          invoice or payment.
+
+  2.5.91  Below the lines of the statement come the invoices that are still unpaid at the end of the
+          period, each with its due date, what has been paid, what is still to pay and how many days
+          late it is, and a strip that sorts the unpaid money by age (not yet due, 1-30, 31-60,
+          61-90 and over 90 days late). Your bank details, UPI ID and QR code are printed only while
+          money is owed, or always if Settings says so.
+
+  2.5.90  The statement is a PDF with your own letterhead, logo and invoice look. It shows the
+          customer, the period and four figures at a glance (opening balance, invoiced, payments
+          received and amount due), then every invoice and every payment in date order with the
+          balance after each line, ending with the closing balance. Money a customer paid in advance
+          is taken off and shown as "Advance / Credit".
+
+  2.5.89  The statement period can be this financial year (1 April to 31 March), last financial
+          year, this month, last month, the last 3 months, the last 12 months, everything so far, or
+          dates you choose yourself. A line under the dates tells you, before you make the
+          statement, how many invoices and payments it will hold and how much the customer owes at
+          the end. A first date that comes after the last date is not accepted.
+
+  2.5.88  A new "Statement" button on the Clients page, and a "Customer Statement" choice when you
+          right-click a client or an invoice, open the new Customer Statement window. Choose the
+          customer and the period, then press Create Statement. Each customer is listed once,
+          however their name was typed (capital letters and extra spaces make no difference), and
+          customers who only have free invoices are left out.
 
 BUILDS 2.5.83 TO 2.5.87 - 25 November 2026
 
@@ -315,7 +353,7 @@ Not needed by users. Remove this part before publishing the file online, if you 
 Recording the next build
   1. Add a line for every change at the top of the newest version's section above, newest first,
      each with its build number. The number counts every change made since v1.5, so after build
-     2.5.87 comes 2.5.88.
+     2.5.93 comes 2.5.94.
   2. In section 1 of Vyaprix.py set APP_BUILD_VERSION to the same number and APP_RELEASE_DATE to the
      day the build is handed over (and APP_VERSION when a new version starts). These values are what
      the About window, the opening screen, the menu and the PDF invoices show.
@@ -323,7 +361,7 @@ Recording the next build
      "Builds handed over" lists, and the heading of the version (its date, newest build and number
      of changes).
   4. A new version starts a new section above v2.5 with its own heading, date and title. Its build
-     numbers continue the same count: v2.6 would begin with build 2.6.88.
+     numbers continue the same count: v2.6 would begin with build 2.6.94.
 
 Where the version information lives in the program
   APP_NAME, APP_VERSION, APP_BUILD_VERSION, APP_RELEASE_DATE and APP_TAGLINE, in section 1 of

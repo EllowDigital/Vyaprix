@@ -27,7 +27,7 @@ from decimal import Decimal, ROUND_DOWN, ROUND_HALF_UP
 from enum import Enum
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Type
+from typing import Any, Callable, Dict, Iterable, List, Optional, Set, Tuple, Type
 
 # --- Standard Library: Lazy Imports ---
 lazy import csv
@@ -125,8 +125,8 @@ else:
 # build to that file.
 APP_NAME: str          = "Vyaprix"
 APP_VERSION: str       = "v2.5"
-APP_BUILD_VERSION: str = "2.5.87"
-APP_RELEASE_DATE: str  = "25 November 2026"
+APP_BUILD_VERSION: str = "2.5.93"
+APP_RELEASE_DATE: str  = "26 November 2026"
 APP_TAGLINE: str       = "Business Made Smarter."
 
 APP_ATTRIBUTION: str = (
@@ -1546,17 +1546,26 @@ class DatabaseManager:
         however its name was typed (capitals and extra spaces make no difference), in alphabetical order. A client who is
         saved on the Clients page lists under that spelling; otherwise the spelling used most often on invoices."""
         with closing(self._conn()) as c:
-            counts = c.execute("SELECT bill_to, COUNT(*) AS n FROM invoices WHERE COALESCE(is_complimentary, 0) = 0 "
-                               "AND TRIM(COALESCE(bill_to, '')) != '' GROUP BY bill_to").fetchall()
+            rows = c.execute("SELECT bill_to FROM invoices WHERE COALESCE(is_complimentary, 0) = 0 "
+                             "AND TRIM(COALESCE(bill_to, '')) != ''").fetchall()
             saved = {client_key(r["name"]): " ".join(str(r["name"]).split())
                      for r in c.execute("SELECT name FROM clients").fetchall()}
-        best: Dict[str, Tuple[int, str]] = {}
-        for row in counts:
-            key = client_key(row["bill_to"])
-            if key not in best or row["n"] > best[key][0]:
-                best[key] = (int(row["n"]), " ".join(str(row["bill_to"]).split()))
-        names = [saved.get(key) or spelling for key, (_n, spelling) in best.items()]
+        typed: Dict[str, List[str]] = {}
+        for row in rows:
+            typed.setdefault(client_key(row["bill_to"]), []).append(str(row["bill_to"]))
+        names = [saved.get(key) or self._commonest_spelling(spellings) for key, spellings in typed.items()]
         return sorted(names, key=str.casefold)
+
+    @staticmethod
+    def _commonest_spelling(names: Iterable[Any]) -> str:
+        """Of the ways one client's name was typed, the one used most often (with the same count, the one that comes first
+        alphabetically), with its extra spaces taken out."""
+        count: Dict[str, int] = {}
+        for name in names:
+            spelling = " ".join(str(name).split())
+            if spelling:
+                count[spelling] = count.get(spelling, 0) + 1
+        return min(count, key=lambda s: (-count[s], s)) if count else ""
 
     def get_client_ledger_rows(self, client_name: str) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
         """(invoices, payments) -- what a statement is made from: every invoice made out to this client (however the name
@@ -1588,7 +1597,10 @@ class DatabaseManager:
         with closing(self._conn()) as c:
             row = next((r for r in c.execute("SELECT name, contact, gstin FROM clients").fetchall()
                         if client_key(r["name"]) == client_key(name)), None)
-        profile = {"name": " ".join(str(row["name"]).split()) if row else name,
+        # the spelling on the Clients page; a client who is not saved there is named the way their invoices name them most often
+        spelling = " ".join(str(row["name"]).split()) if row else self._commonest_spelling(
+            i.get("bill_to") for i in (invoices or [])) or name
+        profile = {"name": spelling,
                    "contact": str(row["contact"] or "") if row else "", "gstin": str(row["gstin"] or "") if row else ""}
         for inv in sorted(invoices or [], key=lambda i: str(i.get("invoice_date") or ""), reverse=True):
             profile["contact"] = profile["contact"] or str(inv.get("client_contact") or "")
@@ -3600,7 +3612,9 @@ def make_statement(db: "DatabaseManager", client_name: str, start: datetime.date
     client = db.get_client_profile(client_name, invoices)
     statement = build_statement(invoices, payments, start, end, today)
     config = config or load_config()
-    generator = StatementGenerator(client, statement, config, out_dir)
+    folder = out_dir or STATEMENTS_DIR
+    folder.mkdir(parents=True, exist_ok=True)               # (the folder may have been deleted since Vyaprix started)
+    generator = StatementGenerator(client, statement, config, folder)
     path = generator.generate()
     return path, {"is_statement": True, "invoice_number": generator.data["invoice_number"], "bill_to": client["name"],
                   "client_contact": client["contact"], "your_name": compose_your_name(config),
