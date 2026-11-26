@@ -3193,6 +3193,420 @@ def sample_invoice_data(config: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Di
     return data, payments
 
 
+# =============================================================================
+#  Customer statements
+# =============================================================================
+# The ready-made periods of the Customer Statement window: (key, wording). "custom" lets the person type both dates.
+STATEMENT_PRESETS: Tuple[Tuple[str, str], ...] = (
+    ("fy",         "This financial year"),
+    ("last_fy",    "Last financial year"),
+    ("month",      "This month"),
+    ("last_month", "Last month"),
+    ("quarter",    "Last 3 months"),
+    ("year",       "Last 12 months"),
+    ("all",        "Everything so far"),
+    ("custom",     "Choose my own dates"),
+)
+# How the unpaid amounts of a statement are sorted by age: (heading, fewest days late, most days late).
+STATEMENT_AGE_GROUPS: Tuple[Tuple[str, int, int], ...] = (
+    ("Not yet due", 0, 0), ("1-30 days late", 1, 30), ("31-60 days late", 31, 60),
+    ("61-90 days late", 61, 90), ("Over 90 days late", 91, 10 ** 6),
+)
+
+
+def add_months(day: datetime.date, months: int) -> datetime.date:
+    """`day` moved forward (or back, with a negative number) by whole months. A day the new month does not have
+    (31 January + 1 month) becomes the last day of that month."""
+    year, month0 = divmod(day.year * 12 + day.month - 1 + months, 12)
+    month = month0 + 1
+    last = (datetime.date(year + (month == 12), month % 12 + 1, 1) - datetime.timedelta(days=1)).day
+    return datetime.date(year, month, min(day.day, last))
+
+
+def statement_period(key: str, today: Optional[datetime.date] = None, earliest: Optional[datetime.date] = None,
+                     latest: Optional[datetime.date] = None) -> Tuple[datetime.date, datetime.date]:
+    """(first day, last day) of one of the ready-made statement periods. The financial year runs from 1 April to 31 March.
+    A period that has not ended yet stops today. `earliest` and `latest` are the first and last day anything was billed or
+    paid (they give "Everything so far" its dates)."""
+    today = today or datetime.date.today()
+    year = today.year if today.month >= 4 else today.year - 1          # the financial year we are in began on 1 April of this year
+    first_of_month = today.replace(day=1)
+    if key == "last_fy":
+        return datetime.date(year - 1, 4, 1), datetime.date(year, 3, 31)
+    if key == "month":
+        return first_of_month, today
+    if key == "last_month":
+        end = first_of_month - datetime.timedelta(days=1)
+        return end.replace(day=1), end
+    if key == "quarter":
+        return add_months(today, -3) + datetime.timedelta(days=1), today
+    if key == "year":
+        return add_months(today, -12) + datetime.timedelta(days=1), today
+    if key == "all":
+        return min(earliest or today, today), max(latest or today, today)
+    return datetime.date(year, 4, 1), today                             # "fy" -- and anything not known
+
+
+def statement_period_text(start: datetime.date, end: datetime.date) -> str:
+    """"01 Apr 2026 to 25 Nov 2026"."""
+    return f"{start.strftime(DISPLAY_DATE_FORMAT)} to {end.strftime(DISPLAY_DATE_FORMAT)}"
+
+
+def _db_date(text: Any) -> Optional[datetime.date]:
+    """A stored 'YYYY-MM-DD' as a date -- None when it is empty or not a date."""
+    try:
+        return datetime.datetime.strptime(str(text or "").strip(), DB_DATE_FORMAT).date()
+    except ValueError:
+        return None
+
+
+def _paise(value: Any) -> int:
+    """An amount as a whole number of paise: adding up whole numbers never leaves a stray fraction of a paisa."""
+    number = safe_float(value)
+    return int(_round2(number) * 100) if math.isfinite(number) else 0
+
+
+def _paise_text(paise: int) -> str:
+    """Whole paise as money text, "₹1,234.50" -- with a minus sign in front when it is below zero."""
+    text = fmt_money(Decimal(abs(int(paise))) / 100)
+    return f"- {text}" if paise < 0 else text
+
+
+def build_statement(invoices: List[Dict[str, Any]], payments: List[Dict[str, Any]], start: datetime.date,
+                    end: datetime.date, today: Optional[datetime.date] = None) -> Dict[str, Any]:
+    """What a customer statement says, worked out from one client's invoices and the payments on them (see
+    DatabaseManager.get_client_ledger_rows). All money is counted in whole paise.
+
+    The account: the opening balance is what the client owed on the day before `start` (invoiced minus paid -- below zero
+    when they had paid in advance). Every invoice (it adds to the balance) and every payment (it lowers it) dated from
+    `start` to `end` is an entry, in date order -- on one day the invoice comes before the payment -- with the balance after
+    it. Opening + invoiced - paid = closing. The invoices still unpaid on `end` are listed with how late each is (counted to
+    `end`, or to today when the period has not ended yet), the advance paid is added up, and the unpaid amounts are sorted
+    into age groups.
+
+    Returns: start, end, as_at, today, opening, billed, received, closing, entries, open_items, open_total, credit, ageing
+    [(heading, paise)], invoice_count and payment_count. An entry is a dict: date, kind ("invoice" or "payment"), number,
+    debit, credit, balance, due_date, mode, reference and note. Closing always equals open_total - credit."""
+    today = today or datetime.date.today()
+    as_at = min(end, today)
+    unknown_day = datetime.date.min                      # a date that cannot be read counts as "long ago"
+    docs: List[Tuple[datetime.date, int, str, int, Dict[str, Any]]] = []
+    info: Dict[str, Dict[str, Any]] = {}
+    unplaced = 0                                         # paid on a number that is not one of the invoices (not possible from the database)
+    for seq, inv in enumerate(invoices):
+        number = str(inv.get("invoice_number") or "")
+        day = _db_date(inv.get("invoice_date")) or unknown_day
+        total = _paise(inv.get("grand_total"))
+        due = _db_date(inv.get("due_date"))
+        info[number] = {"number": number, "date": day, "due": due, "total": total, "paid": 0}
+        if day <= end:
+            docs.append((day, 0, number, seq, {"kind": "invoice", "number": number, "debit": total, "credit": 0,
+                                               "due_date": due, "mode": "", "reference": "", "note": ""}))
+    for seq, pay in enumerate(payments, start=len(invoices)):
+        number = str(pay.get("invoice_number") or "")
+        day = _db_date(pay.get("payment_date")) or unknown_day
+        amount = _paise(pay.get("amount"))
+        if day > end:
+            continue
+        if number in info:
+            info[number]["paid"] += amount
+        else:
+            unplaced += amount
+        docs.append((day, 1, number, seq, {"kind": "payment", "number": number, "debit": 0, "credit": amount,
+                                           "due_date": None, "mode": str(pay.get("mode") or "").strip(),
+                                           "reference": str(pay.get("reference") or "").strip(),
+                                           "note": str(pay.get("note") or "").strip()}))
+    docs.sort(key=lambda d: d[:4])
+    opening = sum(d[4]["debit"] - d[4]["credit"] for d in docs if d[0] < start)
+    entries: List[Dict[str, Any]] = []
+    balance = opening
+    for day, _order, _number, _seq, entry in docs:
+        if day < start:
+            continue
+        balance += entry["debit"] - entry["credit"]
+        entries.append({**entry, "date": day, "balance": balance})
+    billed = sum(e["debit"] for e in entries)
+    received = sum(e["credit"] for e in entries)
+
+    open_items: List[Dict[str, Any]] = []
+    open_total, credit = 0, unplaced
+    for item in info.values():
+        if item["date"] > end:
+            credit += item["paid"]                       # paid before the date the invoice carries
+            continue
+        owing = item["total"] - item["paid"]
+        if owing > 0:
+            late = max(0, (as_at - item["due"]).days) if item["due"] else 0
+            open_items.append({**item, "balance": owing, "days_late": late})
+            open_total += owing
+        else:
+            credit += -owing                             # paid more than the invoice came to
+    open_items.sort(key=lambda i: (i["due"] or i["date"], i["date"], i["number"]))
+    ageing = [(heading, sum(i["balance"] for i in open_items if low <= i["days_late"] <= high))
+              for heading, low, high in STATEMENT_AGE_GROUPS]
+    return {"start": start, "end": end, "as_at": as_at, "today": today, "opening": opening, "billed": billed,
+            "received": received, "closing": opening + billed - received, "entries": entries, "open_items": open_items,
+            "open_total": open_total, "credit": credit, "ageing": ageing,
+            "invoice_count": sum(1 for e in entries if e["kind"] == "invoice"),
+            "payment_count": sum(1 for e in entries if e["kind"] == "payment")}
+
+
+class StatementGenerator(PDFGenerator):
+    """Draws a customer statement as an A4 PDF: the invoice's letterhead, the customer, the period, a summary of the account
+    (opening balance, invoiced, payments received, amount due), every invoice and payment in date order with the balance
+    after it, the invoices still unpaid with how late each is and -- when money is owed -- how to pay.
+
+    It is drawn with the template, brand colour, fonts, letterhead, footer and "Page x of y" of an invoice (this class only
+    changes what is on the page), and a long statement flows over to more pages with the table header repeated."""
+
+    FILE_PREFIX  = "Statement"
+    CLIENT_LABEL = "CUSTOMER"
+    _RED, _GREEN = "#DC2626", "#059669"
+
+    def __init__(self, client: Dict[str, str], statement: Dict[str, Any], config: Dict[str, Any],
+                 out_dir: Optional[Path] = None):
+        self.client = client
+        self.statement = statement
+        name = " ".join(str(client.get("name") or "").split()) or "Customer"
+        first, last = statement["start"], statement["end"]
+        data = {
+            # becomes the file name: one file for each customer and period, so making it again replaces the old one
+            "invoice_number": f"{name[:50]} {first.strftime(DB_DATE_FORMAT)} to {last.strftime(DB_DATE_FORMAT)}",
+            "bill_to": name, "client_contact": client.get("contact", ""), "client_gstin": client.get("gstin", ""),
+            "your_name": compose_your_name(config), "your_contact": compose_your_contact(config),
+            "is_gst_invoice": 1, "is_complimentary": 0, "show_qr_code": 1, "items": "[]",
+        }
+        super().__init__(data, config, payments=[], out_dir=out_dir or STATEMENTS_DIR)
+
+    @staticmethod
+    def _day(day: datetime.date) -> str:
+        return day.strftime(DISPLAY_DATE_FORMAT)
+
+    # ---- what differs from an invoice: the words, and no stamp ---------------------------------------------------
+    def _document_title(self) -> str:
+        return "STATEMENT"
+
+    def _barcode_text(self) -> Optional[str]:
+        return None                                      # a statement has no number to scan
+
+    def _continued_text(self) -> str:
+        return f"Statement for {self.data.get('bill_to') or ''}  ·  continued"
+
+    def _reference_text(self) -> str:
+        return "Statement"
+
+    def _document_info(self) -> Tuple[str, str]:
+        name, s = self.data.get("bill_to") or "", self.statement
+        return f"Statement for {name}", f"Statement of account for {name}, {statement_period_text(s['start'], s['end'])}"
+
+    def _apply_watermark(self, canvas, doc=None):
+        """A statement covers many invoices, so it carries no PAID / BALANCE DUE stamp."""
+
+    def _invoice_needs_payment(self) -> bool:
+        """How to pay (bank details, UPI, QR code) is printed only while money is owed -- or always, when Settings says so."""
+        return self.statement["closing"] > 0 or bool(self.config.get("pdf_settings", {}).get("always_show_qr_code", False))
+
+    def _build_signature(self) -> Optional[Table]:
+        return None
+
+    def _meta_cells(self) -> List[Tuple[str, str]]:
+        s = self.statement
+        return [("Statement Period", statement_period_text(s["start"], s["end"])), ("Prepared On", self._day(s["today"]))]
+
+    # ---- the parts of the page -------------------------------------------------------------------------------------
+    def _fit_column(self, texts: List[str], heading: str, minimum: float, size: float = 9, bold: bool = True) -> float:
+        """A column as wide as its widest text (and its heading) needs, never narrower than `minimum`."""
+        widest = max([self._text_width(text, size, bold) for text in texts] + [self._text_width(heading, 8, True)])
+        return max(minimum, widest + 18)
+
+    def _build_account_summary(self, width: float) -> Table:
+        """Four figures side by side: what was owed at the start, what was invoiced, what was paid and what is owed now
+        (the last one on a bar of its own)."""
+        s, t = self.statement, self.tpl
+        closing = s["closing"]
+        label_style = ParagraphStyle("SumLabel", parent=self.styles["NC"], fontSize=7, leading=9,
+                                     textColor=colors.HexColor(t.label_color))
+        value_style = ParagraphStyle("SumValue", parent=self.styles["NC"], fontName=self.bold, fontSize=11.5, leading=15)
+        end_color = t.total_fg if t.total_bg else (self._RED if closing > 0 else self._GREEN)
+        end_bg = t.total_bg or ("#FEF2F2" if closing > 0 else "#ECFDF5")
+        end_label = ParagraphStyle("SumLabelEnd", parent=label_style, textColor=colors.HexColor(end_color))
+        end_value = ParagraphStyle("SumValueEnd", parent=value_style, textColor=colors.HexColor(end_color))
+        figures = [("Opening Balance", s["opening"]), ("Invoiced", s["billed"]), ("Payments Received", s["received"]),
+                   ("Amount Due" if closing >= 0 else "Advance / Credit", abs(closing))]
+        cells = [[Paragraph(label, end_label if n == 3 else label_style),
+                  Paragraph(_paise_text(paise), end_value if n == 3 else value_style)]
+                 for n, (label, paise) in enumerate(figures)]
+        line = colors.HexColor(t.meta_border or "#E5E7EB")
+        style: List[Tuple] = [("VALIGN",(0,0),(-1,-1),"TOP"), ("TOPPADDING",(0,0),(-1,-1),self._g(7)),
+                              ("BOTTOMPADDING",(0,0),(-1,-1),self._g(7)), ("LEFTPADDING",(0,0),(-1,-1),9),
+                              ("RIGHTPADDING",(0,0),(-1,-1),6), ("LINEAFTER",(0,0),(2,0),0.6,line)]
+        if t.meta_border:
+            style.append(("BOX",(0,0),(-1,-1),1,line))
+        if t.meta_bg:
+            style.append(("BACKGROUND",(0,0),(-1,-1),colors.HexColor(t.meta_bg)))
+        if t.meta_lines:
+            style += [("LINEABOVE",(0,0),(-1,0),0.6,colors.HexColor(t.meta_lines)),
+                      ("LINEBELOW",(0,-1),(-1,-1),0.6,colors.HexColor(t.meta_lines))]
+        style.append(("BACKGROUND",(3,0),(3,0),colors.HexColor(end_bg)))
+        return Table([cells], colWidths=[width / 4.0] * 4, style=TableStyle(style))
+
+    def _build_activity(self, width: float) -> Table:
+        """Every invoice and payment of the period, oldest first, between the opening and the closing balance."""
+        s, t = self.statement, self.tpl
+        normal, small = self.styles["NC"], self.styles["ItemDesc"]
+        hs, hsr, _hsc = self._head_styles()
+        # (date, details, invoiced, paid, balance, bold)
+        lines: List[Tuple[str, List[Any], str, str, str, bool]] = [
+            (self._day(s["start"]), [Paragraph("<b>Opening balance</b>", normal)], "", "", _paise_text(s["opening"]), True)]
+        for e in s["entries"]:
+            if e["kind"] == "invoice":
+                details: List[Any] = [Paragraph(f"<b>Invoice {safe_markup(e['number'])}</b>", normal)]
+                if e["due_date"]:
+                    details.append(Paragraph(f"Due {self._day(e['due_date'])}", small))
+                lines.append((self._day(e["date"]), details, _paise_text(e["debit"]), "", _paise_text(e["balance"]), False))
+            else:
+                title = "Payment received" + (f" ({safe_markup(e['mode'])})" if e["mode"] else "")
+                about = [f"For invoice {safe_markup(e['number'])}"]
+                if e["reference"]:
+                    about.append(f"Ref: {safe_markup(e['reference'])}")
+                if e["note"]:
+                    about.append(safe_markup(e["note"]))
+                details = [Paragraph(f"<b>{title}</b>", normal), Paragraph("  ·  ".join(about), small)]
+                lines.append((self._day(e["date"]), details, "", _paise_text(e["credit"]), _paise_text(e["balance"]), False))
+        lines.append(("", [Paragraph("<b>Closing balance</b>", normal)], _paise_text(s["billed"]), _paise_text(s["received"]),
+                      _paise_text(s["closing"]), True))
+
+        date_w = max(2.2 * cm, max(self._text_width(line[0], 9) for line in lines) + 16)
+        money_w = [self._fit_column([line[i] for line in lines], head, 2.3 * cm)
+                   for i, head in ((2, "INVOICED"), (3, "PAID"), (4, "BALANCE"))]
+        fixed = date_w + sum(money_w)
+        if width - fixed < 4.0 * cm:                      # enormous amounts: the figure columns give up some room
+            scale = (width - 4.0 * cm) / fixed
+            date_w, money_w = date_w * scale, [w * scale for w in money_w]
+            fixed = date_w + sum(money_w)
+        widths = [date_w, width - fixed, *money_w]
+
+        last = len(lines)
+        rows: List[List[Any]] = [[Paragraph("<b>DATE</b>", hs), Paragraph("<b>DETAILS</b>", hs),
+                                  Paragraph("<b>INVOICED</b>", hsr), Paragraph("<b>PAID</b>", hsr),
+                                  Paragraph("<b>BALANCE</b>", hsr)]]
+        for n, (day, details, debit, credit, balance, bold) in enumerate(lines, start=1):
+            def figure(text: str, colored: bool = False) -> Paragraph:
+                if not text:
+                    return Paragraph("", self.styles["Right"])
+                if colored:                                # the closing balance: red while money is owed, green when it is not
+                    text = f"<font color='{self._RED if s['closing'] > 0 else self._GREEN}'>{text}</font>"
+                return Paragraph(f"<b>{text}</b>" if bold else text, self.styles["Right"])
+            rows.append([Paragraph(f"<b>{day}</b>" if bold else day, normal), details, figure(debit), figure(credit),
+                         figure(balance, colored=(n == last))])
+        style = [*self._items_style(len(rows) - 1), ("ALIGN",(2,0),(-1,-1),"RIGHT"),
+                 ("LINEABOVE",(0,last),(-1,last),1,colors.HexColor(t.head_bg or t.end_line)),
+                 ("BACKGROUND",(0,last),(-1,last),colors.HexColor(t.meta_bg or "#F9FAFB"))]
+        return self._items_table(rows, widths, style)
+
+    def _unpaid_table(self, width: float, items: List[Dict[str, Any]]) -> Table:
+        t = self.tpl
+        head = ParagraphStyle("PHS", parent=self.styles["Small"], textColor=colors.HexColor(t.pay_head_fg))
+        head_right = ParagraphStyle("PHSR", parent=head, alignment=TA_RIGHT)
+        cell = ParagraphStyle("UnpaidCell", parent=self.styles["NC"], fontSize=8.5, leading=10.5)
+        cell_right = ParagraphStyle("UnpaidCellR", parent=cell, alignment=TA_RIGHT)
+        texts = [[_paise_text(i["total"]) for i in items], [_paise_text(i["paid"]) for i in items],
+                 [_paise_text(i["balance"]) for i in items]]
+        money_w = [self._fit_column(col, heading, 2.3 * cm, 8.5) for col, heading in
+                   zip(texts, ("INVOICE TOTAL", "PAID", "BALANCE DUE"))]
+        due_w, late_w = 2.5 * cm, 2.1 * cm
+        widths = [max(width - due_w - late_w - sum(money_w), 3.0 * cm), due_w, *money_w, late_w]
+        rows: List[List[Any]] = [[Paragraph("<b>INVOICE</b>", head), Paragraph("<b>DUE DATE</b>", head),
+                                  Paragraph("<b>INVOICE TOTAL</b>", head_right), Paragraph("<b>PAID</b>", head_right),
+                                  Paragraph("<b>BALANCE DUE</b>", head_right), Paragraph("<b>LATE BY</b>", head_right)]]
+        for n, item in enumerate(items):
+            late = (f"<font color='{self._RED}'>{_days_text(item['days_late'])}</font>" if item["days_late"] else "-")
+            rows.append([Paragraph(safe_markup(item["number"]), cell),
+                         Paragraph(self._day(item["due"]) if item["due"] else "-", cell),
+                         Paragraph(texts[0][n], cell_right), Paragraph(texts[1][n], cell_right),
+                         Paragraph(f"<b>{texts[2][n]}</b>", cell_right), Paragraph(late, cell_right)])
+        return Table(rows, colWidths=widths, repeatRows=1, style=TableStyle([
+            ("BACKGROUND",(0,0),(-1,0),colors.HexColor(t.pay_head_bg)),
+            ("VALIGN",(0,0),(-1,-1),"MIDDLE"),
+            ("LINEBELOW",(0,0),(-1,-2),0.5,colors.HexColor("#F3F4F6")),
+            ("LINEBELOW",(0,-1),(-1,-1),0.8,colors.HexColor("#E5E7EB")),
+            ("TOPPADDING",(0,0),(-1,-1),self._g(3.5)), ("BOTTOMPADDING",(0,0),(-1,-1),self._g(3.5)),
+            ("LEFTPADDING",(0,0),(-1,-1),6), ("RIGHTPADDING",(0,0),(-1,-1),6),
+        ]))
+
+    def _build_ageing(self, width: float) -> Table:
+        """The unpaid amounts sorted by how late they are, in one strip."""
+        t = self.tpl
+        label_style = ParagraphStyle("AgeLabel", parent=self.styles["NC"], fontSize=7, leading=9,
+                                     textColor=colors.HexColor(t.label_color))
+        cells = []
+        for n, (heading, paise) in enumerate(self.statement["ageing"]):
+            color = self._RED if (n > 0 and paise > 0) else "#111827"
+            cells.append([Paragraph(heading, label_style),
+                          Paragraph(f"<font color='{color}'><b>{_paise_text(paise)}</b></font>", self.styles["NC"])])
+        line = colors.HexColor(t.meta_border or "#E5E7EB")
+        style: List[Tuple] = [("BOX",(0,0),(-1,-1),0.8,line), ("LINEAFTER",(0,0),(-2,-1),0.5,line),
+                              ("VALIGN",(0,0),(-1,-1),"TOP"), ("LEFTPADDING",(0,0),(-1,-1),8), ("RIGHTPADDING",(0,0),(-1,-1),6),
+                              ("TOPPADDING",(0,0),(-1,-1),self._g(5)), ("BOTTOMPADDING",(0,0),(-1,-1),self._g(5))]
+        if t.meta_bg:
+            style.append(("BACKGROUND",(0,0),(-1,-1),colors.HexColor(t.meta_bg)))
+        return Table([cells], colWidths=[width / len(cells)] * len(cells), style=TableStyle(style))
+
+    def _build_unpaid(self, width: float) -> List[Any]:
+        """The invoices still unpaid at the end of the period, how late they are, any advance paid, and the age groups."""
+        s, gap, note = self.statement, self._g, self.styles["NoteText"]
+        out: List[Any] = [CondPageBreak(3.5 * cm), Paragraph("Unpaid Invoices", self.styles["Caption"]), Spacer(1, gap(0.12 * cm))]
+        if s["open_items"]:
+            out.append(self._unpaid_table(width, s["open_items"]))
+        else:
+            out.append(Paragraph(f"None. Every invoice up to {self._day(s['end'])} has been paid.", note))
+        if s["credit"] > 0:
+            out += [Spacer(1, gap(0.2 * cm)),
+                    Paragraph(f"Advance / credit in your favour: <b>{_paise_text(s['credit'])}</b>. It is already taken off "
+                              f"the amount due shown above.", note)]
+        if s["open_items"]:
+            out += [Spacer(1, gap(0.35 * cm)), CondPageBreak(2.5 * cm), Paragraph("Unpaid Amounts by Age", self.styles["Caption"]),
+                    Spacer(1, gap(0.12 * cm)), self._build_ageing(width)]
+        if any(e["balance"] < 0 for e in s["entries"]):
+            out += [Spacer(1, gap(0.25 * cm)),
+                    Paragraph("A minus sign in the balance means the customer had paid more than was billed up to that point "
+                              "(an advance).", self.styles["Small"])]
+        return out
+
+    def _build_story(self, width: float) -> List[Any]:
+        gap = self._g
+        story: List[Any] = [
+            self._build_header(width),          Spacer(1, gap(0.45 * cm)),
+            self._build_parties(width),         Spacer(1, gap(0.4 * cm)),
+            self._build_meta(width),            Spacer(1, gap(0.3 * cm)),
+            self._build_account_summary(width), Spacer(1, gap(0.45 * cm)),
+            Paragraph("Account Activity", self.styles["Caption"]), Spacer(1, gap(0.12 * cm)),
+            self._build_activity(width),        Spacer(1, gap(0.45 * cm)),
+            *self._build_unpaid(width),
+        ]
+        if footer := self._build_footer_section(width):
+            story += [Spacer(1, gap(0.45 * cm)), KeepTogether([footer])]
+        return story
+
+
+def make_statement(db: "DatabaseManager", client_name: str, start: datetime.date, end: datetime.date,
+                   config: Optional[Dict[str, Any]] = None, today: Optional[datetime.date] = None,
+                   out_dir: Optional[Path] = None) -> Tuple[Path, Dict[str, Any]]:
+    """Makes the statement PDF of one client for the days `start` to `end`. Returns (the PDF's path, what the preview
+    window's Share button needs to know about it)."""
+    invoices, payments = db.get_client_ledger_rows(client_name)
+    if not invoices:
+        raise ValueError(f"There are no invoices for {client_name}, so there is nothing to put on a statement.")
+    client = db.get_client_profile(client_name, invoices)
+    statement = build_statement(invoices, payments, start, end, today)
+    config = config or load_config()
+    generator = StatementGenerator(client, statement, config, out_dir)
+    path = generator.generate()
+    return path, {"is_statement": True, "invoice_number": generator.data["invoice_number"], "bill_to": client["name"],
+                  "client_contact": client["contact"], "your_name": compose_your_name(config),
+                  "statement_period": statement_period_text(start, end), "amount_due": statement["closing"]}
+
+
 def merge_pdfs(paths: List[Path], out_path: Path) -> Path:
     """Combine multiple single-invoice PDFs into one file for batch printing.
 
@@ -5350,6 +5764,11 @@ class PDFViewer(QDialog):
         self._build()
         self._bind_keys()
 
+    @property
+    def _noun(self) -> str:
+        """What the file is called in this window's messages: "invoice", or "statement" for a customer statement."""
+        return "statement" if (self.invoice_data or {}).get("is_statement") else "invoice"
+
     # ------------------------------------------------------------------ #
     #  Opening the document
     # ------------------------------------------------------------------ #
@@ -5358,15 +5777,15 @@ class PDFViewer(QDialog):
         if QPdfDocument is None:
             return self._give_up(
                 "The built-in preview is not available on this computer.\n"
-                "The invoice will open in your usual PDF program instead.", external=True)
+                f"The {self._noun} will open in your usual PDF program instead.", external=True)
         doc = QPdfDocument(self)
         error = doc.load(str(self.pdf_path))
         if error != QPdfDocument.Error.None_:
             doc.close()
-            return self._give_up(f"This invoice could not be opened:\n{self.pdf_path}\n\n{_pdf_error_text(QPdfDocument, error)}")
+            return self._give_up(f"This {self._noun} could not be opened:\n{self.pdf_path}\n\n{_pdf_error_text(QPdfDocument, error)}")
         if doc.pageCount() < 1:
             doc.close()
-            return self._give_up(f"This invoice could not be opened:\n{self.pdf_path}\n\nThe file has no pages.")
+            return self._give_up(f"This {self._noun} could not be opened:\n{self.pdf_path}\n\nThe file has no pages.")
         self.doc = doc
         self.total = doc.pageCount()
         return True
@@ -5426,7 +5845,7 @@ class PDFViewer(QDialog):
         self.zoom_lbl.setMinimumWidth(52)
         self.print_btn = make_button("🖨  Print", "success", self._print, "Print this PDF (Ctrl+P)")
         self.save_btn = make_button("💾  Save", "secondary", self._save_copy, "Save a copy of this PDF (Ctrl+E)")
-        self.share_btn = make_button("📤 Share", "info", self._open_share, "Share this invoice by WhatsApp or e-mail")
+        self.share_btn = make_button("📤 Share", "info", self._open_share, f"Share this {self._noun} by WhatsApp or e-mail")
         self.close_btn = make_button("✕  Close", "danger", self._close, "Close this viewer (Esc)")
         for b in (self.print_btn, self.save_btn, self.share_btn, self.close_btn):
             b.setMinimumWidth(88)
@@ -5621,7 +6040,7 @@ class PDFViewer(QDialog):
             try:
                 subprocess.run(["lp", str(self.pdf_path)], check=True)
             except Exception as exc:
-                Messagebox.show_error("Print Error", f"The invoice could not be printed:\n{exc}", parent=self)
+                Messagebox.show_error("Print Error", f"The {self._noun} could not be printed:\n{exc}", parent=self)
             return
 
         support = _load_print_support()
@@ -5653,12 +6072,12 @@ class PDFViewer(QDialog):
             Messagebox.show_warning(
                 "Print It Yourself",
                 "No program is set up on this computer to print PDF files.\n"
-                "The invoice will open instead -- press Ctrl+P there to print it.", parent=self)
+                f"The {self._noun} will open instead -- press Ctrl+P there to print it.", parent=self)
             self._open_manually()
 
     def _open_manually(self):
         if not open_in_system_viewer(self.pdf_path):
-            Messagebox.show_error("Open Error", f"The invoice could not be opened:\n{self.pdf_path}", parent=self)
+            Messagebox.show_error("Open Error", f"The {self._noun} could not be opened:\n{self.pdf_path}", parent=self)
 
     def _print_with_qt(self, printer_name: Optional[str] = None, show_dialog: bool = False):
         """Both ways of printing: straight to a named printer, or through the system print dialog."""
@@ -5706,7 +6125,7 @@ class PDFViewer(QDialog):
             if busy:
                 QApplication.restoreOverrideCursor()
                 busy = False
-            Messagebox.show_error("Print Error", f"The invoice could not be printed:\n{exc}", parent=self)
+            Messagebox.show_error("Print Error", f"The {self._noun} could not be printed:\n{exc}", parent=self)
             return
         finally:
             # Tk BUG FIX kept: cleanup is on every path (a failure part-way used to leave the painter attached to
@@ -5731,7 +6150,7 @@ class PDFViewer(QDialog):
         try:
             shutil.copy(self.pdf_path, path)
         except Exception as exc:
-            Messagebox.show_error("Save Error", f"The invoice could not be saved:\n{exc}", parent=self)
+            Messagebox.show_error("Save Error", f"The {self._noun} could not be saved:\n{exc}", parent=self)
             return
         _VIEWER_STATE["save_dir"] = str(Path(path).parent)
         notify(self, f"PDF saved: {Path(path).name}")
@@ -5741,14 +6160,15 @@ class PDFViewer(QDialog):
 
 
 class ShareDialog(QDialog):
-    """Mini dialog to share the invoice via WhatsApp or the default e-mail program."""
+    """Mini dialog to share the invoice (or a customer statement) via WhatsApp or the default e-mail program."""
 
     def __init__(self, parent, pdf_path: Path, invoice_data: Optional[Dict]):
         super().__init__(parent)
         self.pdf_path = pdf_path
         self.invoice_data = dict(invoice_data) if invoice_data else {}
+        self.kind = "statement" if self.invoice_data.get("is_statement") else "invoice"     # what is being sent
 
-        self.setWindowTitle("Share Invoice")
+        self.setWindowTitle(f"Share {self.kind.capitalize()}")
         self.setModal(True)
         self._build()
         self._prefill_data()
@@ -5760,7 +6180,7 @@ class ShareDialog(QDialog):
         lay.setSpacing(0)
         lay.setSizeConstraint(QLayout.SizeConstraint.SetFixedSize)         # Tk: 420x340, not resizable
 
-        lay.addWidget(make_label("📤 Share Invoice", "h2"))
+        lay.addWidget(make_label(f"📤 Share {self.kind.capitalize()}", "h2"))
         lay.addSpacing(15)
 
         lay.addWidget(make_label("WhatsApp number (with country code):", "caption"))
@@ -5789,7 +6209,7 @@ class ShareDialog(QDialog):
         lay.addLayout(row)
         lay.addSpacing(15)
 
-        note = make_label("Tip: the invoice file's location is copied for you.\n"
+        note = make_label(f"Tip: the {self.kind} file's location is copied for you.\n"
                           "When you attach the file, just paste it (Ctrl+V) into the file name box.", "small",
                           align=Qt.AlignmentFlag.AlignCenter)
         lay.addWidget(note)
@@ -5822,6 +6242,9 @@ class ShareDialog(QDialog):
 
         inv_num = self.invoice_data.get('invoice_number', 'Invoice')
         msg = f"Hello! Please find attached {inv_num}. Thank you for your business."
+        if self.kind == "statement":
+            msg = (f"Hello! Please find attached your account statement from {self.invoice_data.get('your_name') or 'us'} "
+                   f"for {self.invoice_data.get('statement_period', '')}.{self._amount_due_sentence()} Thank you.")
         safe_msg = urllib.parse.quote(msg)
         self._open_link(f"https://wa.me/{clean_phone}?text={safe_msg}")
 
@@ -5836,7 +6259,16 @@ class ShareDialog(QDialog):
         inv_num = self.invoice_data.get('invoice_number', 'Invoice')
         subject = urllib.parse.quote(f"Invoice {inv_num} from {self.invoice_data.get('your_name', 'Us')}")
         body = urllib.parse.quote(f"Hello,\n\nPlease find attached {inv_num}.\n\nThank you!")
+        if self.kind == "statement":
+            subject = urllib.parse.quote(f"Account statement from {self.invoice_data.get('your_name') or 'us'}")
+            body = urllib.parse.quote(f"Hello,\n\nPlease find attached your account statement for "
+                                      f"{self.invoice_data.get('statement_period', '')}.{self._amount_due_sentence()}\n\nThank you!")
         self._open_link(f"mailto:{email}?subject={subject}&body={body}")
+
+    def _amount_due_sentence(self) -> str:
+        """" The amount due is ₹1,234.00." for a statement that shows money owed; nothing when nothing is owed."""
+        due = int(safe_float(self.invoice_data.get("amount_due")))
+        return f" The amount due is {_paise_text(due)}." if due > 0 else ""
 
     def _open_link(self, url: str):
         if webbrowser.open(url):
@@ -5844,7 +6276,7 @@ class ShareDialog(QDialog):
         else:
             Messagebox.show_warning(
                 "Share", "Vyaprix could not open WhatsApp or your email program.\n"
-                "The invoice file's location is copied, so you can still paste it into a message.", parent=self)
+                f"The {self.kind} file's location is copied, so you can still paste it into a message.", parent=self)
 
 
 # =============================================================================
@@ -6642,6 +7074,122 @@ class OverdueRemindersDialog(QDialog):
         self._refresh()
 
 
+# -----------------------------------------------------------------------------
+#  Customer statements
+# -----------------------------------------------------------------------------
+class StatementDialog(_EditDialog):
+    """Customer Statement: pick the customer and the period, then press Create Statement. The window only collects the choice
+    (`request` = {client, start, end}); InvoiceApp makes the PDF (see InvoiceApp.open_statement). While the person picks, a
+    line under the dates says how many invoices and payments the statement will hold and what is owed at the end."""
+
+    def __init__(self, parent, db_manager: "DatabaseManager", client_name: str = ""):
+        super().__init__(parent, "Customer Statement", "📄  Customer Statement", width=500)
+        self.db_manager = db_manager
+        self.request: Optional[Dict[str, Any]] = None
+        self.today = datetime.date.today()
+        self.clients = db_manager.get_statement_clients()
+        self._ledgers: Dict[str, Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]] = {}
+        self._root.addWidget(make_label("A statement lists everything one customer has been billed and has paid, and what "
+                                        "they still owe.", "muted", wrap=True))
+        self._root.addSpacing(14)
+
+        self.client_box = QComboBox()
+        self.client_box.addItems(self.clients)
+        self.client_box.setToolTip("Every customer you have made an invoice for")
+        guard_wheel(self.client_box)
+        self._add_field("Customer", self.client_box)
+
+        self.period_box = QComboBox()
+        for key, wording in STATEMENT_PRESETS:
+            self.period_box.addItem(wording, key)
+        self.period_box.setToolTip("The financial year runs from 1 April to 31 March")
+        guard_wheel(self.period_box)
+        self._add_field("Period", self.period_box, space_after=10)
+
+        self.from_edit, self.to_edit = make_date_edit(), make_date_edit()
+        dates = QHBoxLayout()
+        dates.setSpacing(12)
+        for text, edit in (("From", self.from_edit), ("To", self.to_edit)):
+            column = QVBoxLayout()
+            column.setSpacing(4)
+            column.addWidget(make_label(text, "h3"))
+            column.addWidget(edit)
+            dates.addLayout(column, 1)
+        self._root.addLayout(dates)
+        self._root.addSpacing(12)
+
+        self.summary_lbl = make_label("", "small", wrap=True)
+        self.summary_lbl.setMinimumHeight(46)                       # room for two lines, so the window does not jump about
+        self.summary_lbl.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
+        self._root.addWidget(self.summary_lbl)
+        self._root.addSpacing(10)
+        self._add_buttons("📄  Create Statement", self._create)
+
+        wanted = client_key(client_name)
+        self.client_box.setCurrentIndex(next((n for n, name in enumerate(self.clients) if client_key(name) == wanted), 0))
+        self.client_box.currentIndexChanged.connect(lambda _n: self._period_changed())
+        self.period_box.currentIndexChanged.connect(lambda _n: self._period_changed())
+        self.from_edit.dateChanged.connect(lambda _d: self._update_summary())
+        self.to_edit.dateChanged.connect(lambda _d: self._update_summary())
+        self._period_changed()
+        self.client_box.setFocus()
+
+    def _ledger(self) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+        """The chosen customer's invoices and payments (looked up once for each customer)."""
+        name = self.client_box.currentText()
+        if name not in self._ledgers:
+            self._ledgers[name] = self.db_manager.get_client_ledger_rows(name)
+        return self._ledgers[name]
+
+    def _span(self) -> Tuple[Optional[datetime.date], Optional[datetime.date]]:
+        """The first and last day anything was billed or paid for the chosen customer."""
+        invoices, payments = self._ledger()
+        days = [d for d in [_db_date(i.get("invoice_date")) for i in invoices] + [_db_date(p.get("payment_date")) for p in payments] if d]
+        return (min(days), max(days)) if days else (None, None)
+
+    def _period_changed(self) -> None:
+        """A ready-made period fills in both dates; "Choose my own dates" leaves them as they are and lets them be typed."""
+        key = self.period_box.currentData()
+        custom = key == "custom"
+        if not custom:
+            earliest, latest = self._span()
+            start, end = statement_period(key, self.today, earliest, latest)
+            for edit, day in ((self.from_edit, start), (self.to_edit, end)):
+                edit.blockSignals(True)
+                edit.setDate(QDate(day.year, day.month, day.day))
+                edit.blockSignals(False)
+        self.from_edit.setEnabled(custom)
+        self.to_edit.setEnabled(custom)
+        self._update_summary()
+
+    def _update_summary(self) -> None:
+        start, end = date_edit_value(self.from_edit), date_edit_value(self.to_edit)
+        if start > end:
+            self.summary_lbl.setText("The first date must not be after the last date.")
+            set_tone(self.summary_lbl, "danger")
+            self.save_btn.setEnabled(False)
+            return
+        statement = build_statement(*self._ledger(), start, end, self.today)
+        invoices, payments, closing = statement["invoice_count"], statement["payment_count"], statement["closing"]
+        lines = [f"{invoices} invoice{'s' if invoices != 1 else ''} and {payments} payment{'s' if payments != 1 else ''} "
+                 f"in this period." if (invoices or payments) else "Nothing was billed or paid in this period.",
+                 f"Amount due at the end: {_paise_text(closing)}" if closing > 0 else
+                 f"Advance / credit at the end: {_paise_text(-closing)}" if closing < 0 else "Nothing is due at the end."]
+        self.summary_lbl.setText("\n".join(lines))
+        set_tone(self.summary_lbl, "danger" if closing > 0 else "success")
+        self.save_btn.setEnabled(True)
+
+    def _create(self) -> None:
+        client = self.client_box.currentText().strip()
+        if not client:
+            return Messagebox.show_error("Please Check", "Please choose a customer.", parent=self)
+        start, end = date_edit_value(self.from_edit), date_edit_value(self.to_edit)
+        if start > end:
+            return Messagebox.show_error("Please Check", "The first date must not be after the last date.", parent=self)
+        self.request = {"client": client, "start": start, "end": end}
+        self.accept()
+
+
 class BulkProgressDialog(QDialog):
     """Modal progress window for long bulk jobs (delete / export / print / PDF generation).
 
@@ -7026,6 +7574,13 @@ class HelpDialog(QDialog):
          "ready and you press Send there. Vyaprix remembers when each client was last reminded. You can also "
          "right-click an overdue invoice and choose Send Payment Reminder.",
          "", ""),
+        ("Make a statement for a customer",
+         "A statement lists everything one customer has been billed and has paid, and what they still owe. Press the "
+         "button below, or press Statement on the Clients page, or right-click any of their invoices and choose "
+         "Customer Statement. Pick the customer and the period (this financial year, last month, everything so far, or "
+         "your own dates) and press Create Statement. You can then print it, save it, or send it by WhatsApp or email "
+         "just like an invoice.",
+         "Make a statement", "statement"),
         ("Print, save or send an invoice",
          "Select an invoice in the list and press View Invoice. From there you can print it, save a copy, or send it by "
          "WhatsApp or email. In the invoice form you can also choose whether the terms, the notes, both or neither are "
@@ -7112,6 +7667,7 @@ class HelpDialog(QDialog):
             "settings": app.open_settings,
             "backup": lambda: prompt_and_backup_database(app),
             "shortcuts": app.open_shortcuts,
+            "statement": app.open_statement,
         }
         handler = actions.get(action)
         if handler is not None:
@@ -8943,6 +9499,7 @@ class _ManagerFrame(QWidget):
         self._ctx.addAction("🗑️  Delete", self._delete_selected)
 
         act = QHBoxLayout()
+        self._actions_row = act                                    # (a page can add a button of its own to this row)
         act.setContentsMargins(0, 10, 0, 0)
         self.hint_lbl = make_label(self.HINT_NONE, "small")
         act.addWidget(self.hint_lbl)
@@ -9040,6 +9597,30 @@ class ClientsFrame(_ManagerFrame):
         ("contact", "Contact Info",     320, Qt.AlignmentFlag.AlignLeft),
         ("gstin",   "GSTIN",            160, Qt.AlignmentFlag.AlignLeft),
     ]
+
+    def _build(self):
+        super()._build()
+        self.statement_btn = make_button("📄  Statement", "secondary", self._open_statement,
+                                         tooltip="Make a statement of everything this client has been billed and has paid")
+        self.statement_btn.setEnabled(False)
+        row = self._actions_row
+        row.insertWidget(row.indexOf(self.edit_btn), self.statement_btn)
+        row.insertSpacing(row.indexOf(self.edit_btn), 8)
+        self._ctx.clear()
+        self._ctx.addAction("✏️  Edit", self._edit_selected)
+        self._statement_action = self._ctx.addAction("📄  Customer Statement", self._open_statement)
+        self._ctx.addAction("🗑️  Delete", self._delete_selected)
+
+    def _on_select(self):
+        super()._on_select()
+        if hasattr(self, "statement_btn"):
+            single = len(self._selected_ids()) == 1               # a statement is made for one client at a time
+            self.statement_btn.setEnabled(single)
+            self._statement_action.setEnabled(single)
+
+    def _open_statement(self):
+        if rec := self._selected_record():
+            self.controller.open_statement(rec["name"])
 
     def _fetch(self, search):
         return self.db_manager.get_all_clients(search)
@@ -9370,6 +9951,7 @@ class DashboardFrame(QWidget):
         self._ctx_single.addAction("💵  Record Payment",  self._act_record_payment)
         self._remind_action = self._ctx_single.addAction("🔔  Send Payment Reminder", self._act_remind)
         self._ctx_single.setToolTipsVisible(True)
+        self._ctx_single.addAction("📄  Customer Statement", self._act_statement)
         self._ctx_single.addAction("📋  Make a Copy",     self._act_duplicate)
         self._ctx_single.addAction("🗒  Add or Edit Note", self._act_edit_note)
         self._ctx_single.addSeparator()
@@ -9836,6 +10418,12 @@ class DashboardFrame(QWidget):
         if dialog.sent:
             self.on_show()
             notify(self.controller, f"Reminder noted for {group['name']}.")
+
+    def _act_statement(self):
+        """Right-click an invoice > Customer Statement: the statement window, with this invoice's client already chosen."""
+        row = self._row_index.get(self._selected_id() or "")
+        if row:
+            self.controller.open_statement(str(row.get("bill_to") or ""))
 
     def _act_open_reminders(self):
         """The "Send Reminders" bar: the list of every client who is overdue, to remind one after another."""
@@ -13879,6 +14467,31 @@ class InvoiceApp(QMainWindow):
     def open_help(self) -> None:
         run_dialog(HelpDialog(self))
 
+    def open_statement(self, client_name: str = "") -> None:
+        """Opens the Customer Statement window (from the Clients page and from an invoice's right-click menu) and, when a
+        customer and a period were picked, makes the statement in the background and shows it. A client who has no invoices
+        has nothing to put on a statement."""
+        clients = self.db_manager.get_statement_clients()
+        wanted = client_key(client_name)
+        if not clients or (wanted and not any(client_key(name) == wanted for name in clients)):
+            who = f"{' '.join(str(client_name).split())} has no invoices yet" if wanted else "There are no invoices yet"
+            Messagebox.show_info("Customer Statement", f"{who}, so there is nothing to put on a statement.", parent=self)
+            return
+        dialog = StatementDialog(self, self.db_manager, client_name)
+        run_dialog(dialog)
+        if dialog.request:
+            self.show_progress(True, "Preparing the statement…")
+            threading.Thread(target=self._statement_worker, args=(dialog.request, self.task_queue), daemon=True).start()
+
+    def _statement_worker(self, request: Dict[str, Any], q: queue.Queue) -> None:
+        """Background thread: makes the statement PDF and hands it to the GUI through the queue."""
+        try:
+            path, info = make_statement(self.db_manager, request["client"], request["start"], request["end"])
+            q.put({"status": "success", "kind": "statement", "path": path, "invoice_data": info})
+        except Exception as exc:
+            logger.error("Statement failed (%s): %s", request.get("client"), exc, exc_info=True)
+            q.put({"status": "error", "message": f"The statement could not be made.\n\n{exc}"})
+
     def _on_settings_saved(self, new_theme: Optional[str] = None) -> None:
         # 1. LIVE THEME SWITCHING: one application-wide stylesheet + palette swap re-colours every widget that exists,
         #    including the multi-line boxes the Tk build had to walk and re-theme by hand (_retheme_text_widgets). (Colours
@@ -13927,7 +14540,8 @@ class InvoiceApp(QMainWindow):
                 self.show_progress(False)
                 if msg["status"] == "success":
                     PDFViewer(self, msg["path"], invoice_data=msg.get("invoice_data")).show()
-                    self.frames[DashboardFrame].on_show()
+                    if msg.get("kind") != "statement":              # a statement changes nothing on the Invoices page
+                        self.frames[DashboardFrame].on_show()
                 else:
                     Messagebox.show_error("Error", msg.get("message", "An unknown error occurred."), parent=self)
         except queue.Empty:
