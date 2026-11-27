@@ -4,14 +4,14 @@ The record of every version and build of Vyaprix, newest first.
 ====================================================================================================
 
   Latest version : v2.5
-  Latest build   : 2.5.93
-  Released on    : 26 November 2026
+  Latest build   : 2.5.100
+  Released on    : 27 November 2026
 
 
 HOW TO READ THIS FILE
 ----------------------------------------------------------------------------------------------------
   - Versions are listed newest first. Changes that carry a build number are listed newest first too.
-  - A build number looks like 2.5.93. The first part is the version (here v2.5). The last part
+  - A build number looks like 2.5.100. The first part is the version (here v2.5). The last part
     counts every change made to Vyaprix since version v1.5 (build 1.5.2), so every change adds one
     to it and it never goes back.
   - A version carries the date its newest build was handed over.
@@ -20,8 +20,8 @@ HOW TO READ THIS FILE
 
 VERSIONS AT A GLANCE
 ----------------------------------------------------------------------------------------------------
-  v2.5  -  newest build 2.5.93  -  26 November 2026  -  11 changes
-        Payment reminders and customer statements
+  v2.5  -  newest build 2.5.100  -  27 November 2026  -  18 changes
+        Payment reminders, customer statements and quotations
   v2.4  -  newest build 2.4.82  -  23 November 2026  -  46 changes
         A friendlier Vyaprix: correct amounts, easier payments and plain wording
   v2.3  -  newest build 2.3.36  -  12 November 2026  -  12 changes
@@ -37,7 +37,8 @@ VERSIONS AT A GLANCE
 
 BUILDS HANDED OVER
 ----------------------------------------------------------------------------------------------------
-  Build 2.5.93   26 November 2026   (latest)
+  Build 2.5.100   27 November 2026   (latest)
+  Build 2.5.93   26 November 2026
   Build 2.5.87   25 November 2026
   Build 2.4.82   23 November 2026
   Build 2.4.76   21 November 2026
@@ -54,9 +55,57 @@ BUILDS HANDED OVER
 
 
 ====================================================================================================
-v2.5 - Payment reminders and customer statements
-Released 26 November 2026  |  newest build 2.5.93  |  11 changes
+v2.5 - Payment reminders, customer statements and quotations
+Released 27 November 2026  |  newest build 2.5.100  |  18 changes
 ====================================================================================================
+
+BUILDS 2.5.94 TO 2.5.100 - 27 November 2026
+
+  2.5.100  Help has a new topic, "Send a quotation and turn it into an invoice", and the shortcut
+           list shows the new keys for the Quotations page (New Quotation and Search). The menu now
+           has one more entry; in a window that is not very tall it switches to pictures only a
+           little earlier, so every entry stays in view. In a narrow window the line under the title
+           of the Clients, Items and Quotations pages now ends in "..." instead of being cut off.
+
+  2.5.99  Quotations are kept completely apart from invoices: they never appear on the Invoices
+          page, in its totals, in the overdue list or reminders, in a customer statement or in the
+          spreadsheet saved from the Invoices page. A backup made before this version restores
+          without losing anything, and the Quotations page simply starts empty.
+
+  2.5.98  "View / Print" makes the quotation as a PDF in your own letterhead, logo and invoice look,
+          with QUOTATION as its title, the quotation number, date, "Valid Until" and payment terms,
+          the items, GST and discount, and the "Quotation Total". It says "This is a quotation, not
+          a tax invoice. It is valid until ..." and prints no payment details or QR code. It opens
+          in the same window as an invoice, so you can print it, save a copy or share it by WhatsApp
+          or email in quotation wording ("Please find attached our quotation ... It is valid until
+          ..."). Quotations are kept in their own "quotations" folder next to your invoices.
+
+  2.5.97  "Mark as" writes down the customer's answer: Accepted, Declined, or Open again. A declined
+          quotation cannot be made into an invoice until you open it again, and a quotation that has
+          become an invoice can no longer be changed, so the offer and the invoice never disagree.
+          Deleting a quotation never touches an invoice made from it. A quotation you have just
+          saved is shown selected on the list, with its buttons ready.
+
+  2.5.96  When the customer says yes, select the quotation and press "Make Invoice". Vyaprix makes
+          the invoice for you with today's date and the next free invoice number, and the same
+          customer, items, prices, GST, discount, notes and terms. The due date follows the payment
+          terms (for example Net 15, or Due on receipt), and the invoice starts unpaid with a note
+          saying which quotation it came from. It opens at once so you can still change it. The
+          quotation is marked Invoiced, and the invoice total always matches the quotation to the
+          paisa. If anything goes wrong, no invoice is made and the quotation stays as it was.
+
+  2.5.95  Press "New Quotation" (or Ctrl+N on the Quotations page) to make an offer before the work
+          is agreed. The quotation form is the invoice form you already know, with the same
+          customer, items, GST, discount and look, but it has a "Valid For" choice (7, 15, 30, 45,
+          60 or 90 days, or a date you pick) instead of a due date, and no payments, free-of-charge
+          switch or QR code, because nothing is owed yet. The number follows on by itself (QT-001,
+          QT-002 and so on) and can be changed.
+
+  2.5.94  A new "Quotations" entry in the menu opens the Quotations page, a list of every quotation
+          with its customer, date, the last day it is valid, amount and status: Open, Accepted,
+          Expired, Declined or Invoiced. You can search by number, customer, reference or status,
+          and show only one kind of quotation. A quotation nobody answered turns to Expired by
+          itself when its last valid day has passed.
 
 BUILDS 2.5.88 TO 2.5.93 - 26 November 2026
 
@@ -353,7 +402,7 @@ Not needed by users. Remove this part before publishing the file online, if you 
 Recording the next build
   1. Add a line for every change at the top of the newest version's section above, newest first,
      each with its build number. The number counts every change made since v1.5, so after build
-     2.5.93 comes 2.5.94.
+     2.5.100 comes 2.5.101.
   2. In section 1 of Vyaprix.py set APP_BUILD_VERSION to the same number and APP_RELEASE_DATE to the
      day the build is handed over (and APP_VERSION when a new version starts). These values are what
      the About window, the opening screen, the menu and the PDF invoices show.
@@ -361,7 +410,7 @@ Recording the next build
      "Builds handed over" lists, and the heading of the version (its date, newest build and number
      of changes).
   4. A new version starts a new section above v2.5 with its own heading, date and title. Its build
-     numbers continue the same count: v2.6 would begin with build 2.6.94.
+     numbers continue the same count: v2.6 would begin with build 2.6.101.
 
 Where the version information lives in the program
   APP_NAME, APP_VERSION, APP_BUILD_VERSION, APP_RELEASE_DATE and APP_TAGLINE, in section 1 of

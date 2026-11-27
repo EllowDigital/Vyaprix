@@ -125,8 +125,8 @@ else:
 # build to that file.
 APP_NAME: str          = "Vyaprix"
 APP_VERSION: str       = "v2.5"
-APP_BUILD_VERSION: str = "2.5.93"
-APP_RELEASE_DATE: str  = "26 November 2026"
+APP_BUILD_VERSION: str = "2.5.100"
+APP_RELEASE_DATE: str  = "27 November 2026"
 APP_TAGLINE: str       = "Business Made Smarter."
 
 APP_ATTRIBUTION: str = (
@@ -389,18 +389,20 @@ QUOTE_STATUSES: Tuple[str, ...] = (QUOTE_OPEN, QUOTE_ACCEPTED, QUOTE_DECLINED, Q
 #: What the Quotations page can be filtered by, in the order of its drop-down: (stored/shown status or "", wording)
 QUOTE_FILTERS: List[Tuple[str, str]] = [
     ("", "All quotations"), (QUOTE_OPEN, "Open"), (QUOTE_ACCEPTED, "Accepted"), (QUOTE_EXPIRED, "Expired"),
-    (QUOTE_DECLINED, "Declined"), (QUOTE_INVOICED, "Made into an invoice"),
+    (QUOTE_DECLINED, "Declined"), (QUOTE_INVOICED, "Invoiced"),
 ]
 #: Text colour of a quotation's status in the list (theme tones, like the status of an invoice)
 QUOTE_TONES: Dict[str, str] = {
     QUOTE_OPEN: "info", QUOTE_ACCEPTED: "success", QUOTE_DECLINED: "danger", QUOTE_EXPIRED: "warning",
     QUOTE_INVOICED: "secondary",
 }
-#: How long a new quotation stays valid unless the person says otherwise (days), and the choices offered
+#: Text colour of a quotation's status in the Quotations list (the hues the invoice statuses use)
+QUOTE_BADGE: Dict[str, str] = {
+    QUOTE_OPEN: "#3B82F6", QUOTE_ACCEPTED: "#10B981", QUOTE_DECLINED: "#EF4444", QUOTE_EXPIRED: "#F59E0B",
+    QUOTE_INVOICED: "#6B7280",
+}
+#: How long a new quotation stays valid unless the person says otherwise (days)
 QUOTE_DEFAULT_VALID_DAYS: int = 30
-QUOTE_VALID_CHOICES: List[Tuple[Optional[int], str]] = [
-    (7, "7 days"), (15, "15 days"), (30, "30 days"), (45, "45 days"), (60, "60 days"), (90, "90 days"), (None, "Choose a date…"),
-]
 
 
 # =============================================================================
@@ -614,6 +616,9 @@ _DUE_CUSTOM = -1        # the due-date list's "pick a date" choice
 #: the due-date list: (caption, days after the invoice date) -- None: no due date, _DUE_CUSTOM: a date picked by hand
 DUE_CHOICES: List[Tuple[str, Optional[int]]] = [("None", None), ("On receipt", 0), ("7 days", 7), ("15 days", 15),
                                                 ("30 days", 30), ("45 days", 45), ("60 days", 60), ("Custom", _DUE_CUSTOM)]
+#: the "valid for" list of a quotation (same idea: caption, days after the quotation date). There is always an end date.
+QUOTE_VALID_CHOICES: List[Tuple[str, int]] = [("7 days", 7), ("15 days", 15), ("30 days", 30), ("45 days", 45),
+                                              ("60 days", 60), ("90 days", 90), ("Choose a date", _DUE_CUSTOM)]
 
 #: GST state / union-territory codes (the first two digits of a GSTIN) -- the "place of supply" list
 INDIAN_STATES: List[Tuple[str, str]] = [
@@ -861,6 +866,57 @@ def compose_your_contact(config: Dict[str, Any]) -> str:
     return (user_details.get("contact_info") or "").strip()
 
 
+def due_days_from_terms(terms: str) -> Optional[int]:
+    """How many days after its date a document is due, as the payment terms say it ("Net 15", "30 days" -> 15, 30;
+    "due on receipt", "immediate", "advance" -> 0). None when the terms say nothing about days."""
+    terms = str(terms or "")
+    found = re.search(r"\bnet\s*(\d{1,3})\b|\b(\d{1,3})\s*days?\b", terms, re.IGNORECASE)
+    if found:
+        return int(found.group(1) or found.group(2))
+    return 0 if re.search(r"receipt|immediate|advance", terms, re.IGNORECASE) else None
+
+
+def bump_number(number: str) -> str:
+    """The number after `number`, keeping its prefix and width: "INV-009" -> "INV-010", "QT-99" -> "QT-100". A number that
+    does not end in digits gets "-2" added."""
+    found = re.match(r"^(.*?)(\d+)$", str(number or ""))
+    if not found:
+        return f"{number}-2"
+    prefix, digits = found.groups()
+    return f"{prefix}{int(digits) + 1:0{len(digits)}d}"
+
+
+def quote_display_status(status: Optional[str], valid_until: Optional[str], today: Optional[datetime.date] = None) -> str:
+    """The status a quotation is shown with: its stored status, except that an Open quotation whose last valid day has
+    passed shows as Expired (nothing is stored -- the day going by is enough)."""
+    status = str(status or QUOTE_OPEN)
+    if status == QUOTE_OPEN and valid_until:
+        today_text = (today or datetime.date.today()).strftime(DB_DATE_FORMAT)
+        if str(valid_until) < today_text:
+            return QUOTE_EXPIRED
+    return status
+
+
+#: The columns a quotation and an invoice have in common (same names, same meaning): what is copied when a quotation
+#: is turned into an invoice, and what the quotation form saves.
+QUOTE_SHARED_COLUMNS: Tuple[str, ...] = (
+    "bill_to", "client_contact", "client_gstin", "your_name", "your_contact", "items", "tax_rate", "payment_terms",
+    "is_gst_invoice", "global_discount_value", "global_discount_type", "gst_type", "notes", "tax_mode", "round_off",
+    "place_of_supply", "po_number", "reverse_charge", "customer_notes", "terms", "pdf_template", "print_extras",
+)
+
+
+def quote_as_invoice(quote: Any) -> Dict[str, Any]:
+    """A stored quotation as an invoice-shaped dict -- what the quotation form, the totals and the PDF engine all read:
+    quotation_number -> invoice_number, quotation_date -> invoice_date, valid_until -> due_date. Nothing is owed on it, so
+    there is no payment, no free-of-charge flag and no status stamp."""
+    d = dict(quote)
+    d.update(invoice_number=d.get("quotation_number"), invoice_date=d.get("quotation_date"), due_date=d.get("valid_until"),
+             is_complimentary=0, show_qr_code=0, pdf_watermark="", amount_paid=0.0, total_paid=0.0)
+    d["is_quotation"] = True
+    return d
+
+
 # =============================================================================
 #  9. DATABASE LAYER
 # =============================================================================
@@ -1012,6 +1068,47 @@ class DatabaseManager:
                 # a payment can carry a reference (UPI UTR, cheque number ...): older databases get the column here
                 if "reference" not in {r["name"] for r in c.execute("PRAGMA table_info(payments)").fetchall()}:
                     c.execute("ALTER TABLE payments ADD COLUMN reference TEXT DEFAULT ''")
+
+                # --- quotations: offers made before an invoice. A separate table, so a quotation never shows up in the
+                #     Invoices page, the totals, the overdue list or a customer statement. The columns it shares with an
+                #     invoice carry the same names, so making an invoice from a quotation is a straight copy.
+                c.execute("""
+                    CREATE TABLE IF NOT EXISTS quotations (
+                        id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+                        quotation_number      TEXT UNIQUE NOT NULL,
+                        bill_to               TEXT NOT NULL,
+                        client_contact        TEXT,
+                        client_gstin          TEXT,
+                        your_name             TEXT NOT NULL,
+                        your_contact          TEXT,
+                        items                 TEXT NOT NULL,
+                        tax_rate              REAL    DEFAULT 0,
+                        quotation_date        TEXT,
+                        valid_until           TEXT,
+                        status                TEXT    DEFAULT 'Open',
+                        payment_terms         TEXT,
+                        is_gst_invoice        INTEGER DEFAULT 1,
+                        global_discount_value REAL    DEFAULT 0,
+                        global_discount_type  TEXT    DEFAULT 'amount',
+                        gst_type              TEXT    DEFAULT 'CGST/SGST',
+                        notes                 TEXT    DEFAULT '',
+                        tax_mode              TEXT    DEFAULT 'overall',
+                        round_off             INTEGER DEFAULT 0,
+                        place_of_supply       TEXT    DEFAULT '',
+                        po_number             TEXT    DEFAULT '',
+                        reverse_charge        INTEGER DEFAULT 0,
+                        customer_notes        TEXT    DEFAULT '',
+                        terms                 TEXT    DEFAULT '',
+                        pdf_template          TEXT    DEFAULT '',
+                        print_extras          TEXT    DEFAULT 'both',
+                        grand_total           REAL    DEFAULT 0,
+                        invoice_number        TEXT    DEFAULT '',
+                        created_ts            REAL    DEFAULT 0
+                    )
+                """)
+                c.execute("CREATE INDEX IF NOT EXISTS idx_quotations_status  ON quotations(status)")
+                c.execute("CREATE INDEX IF NOT EXISTS idx_quotations_date    ON quotations(quotation_date)")
+                c.execute("CREATE INDEX IF NOT EXISTS idx_quotations_billto  ON quotations(bill_to)")
 
                 # --- indexes for search / sort / filter perf ----------------
                 # One per column DashboardFrame can sort by server-side
@@ -1754,45 +1851,52 @@ class DatabaseManager:
         try:
             with closing(self._conn()) as c:
                 with c:
-                    data = dict(data)
-                    data.setdefault("created_ts", time.time())
-                    if is_update:
-                        nid = data["invoice_number"]
-                        if nid != original_id and c.execute(
-                            "SELECT 1 FROM invoices WHERE invoice_number=?", (nid,)
-                        ).fetchone():
-                            return False, f"Invoice number '{nid}' already exists."
-                        existing = c.execute(
-                            "SELECT created_ts FROM invoices WHERE invoice_number=?", (original_id,)
-                        ).fetchone()
-                        if existing and existing["created_ts"]:
-                            data["created_ts"] = existing["created_ts"]
-                        qd = {**data, "original_id": original_id}
-                        c.execute(
-                            f"UPDATE invoices SET {', '.join(f'{k}=:{k}' for k in data)} WHERE invoice_number=:original_id",
-                            qd,
-                        )
-                        if payments is not None and nid != original_id:
-                            c.execute("UPDATE payments SET invoice_number=? WHERE invoice_number=?",
-                                      (nid, original_id))
-                    else:
-                        if c.execute(
-                            "SELECT 1 FROM invoices WHERE invoice_number=?", (data["invoice_number"],)
-                        ).fetchone():
-                            return False, f"Invoice number '{data['invoice_number']}' already exists."
-                        c.execute(
-                            f"INSERT INTO invoices ({', '.join(data)}) VALUES (:{', :'.join(data)})",
-                            data,
-                        )
-                    final_id = data["invoice_number"]
-                    if payments is not None:
-                        c.execute("DELETE FROM payments WHERE invoice_number=?", (final_id,))
-                        for p in payments:
-                            self._insert_payment(c, final_id, p)
-                    self._recompute_one(c, final_id)
-            return True, None
+                    return self._write_invoice(c, data, is_update, original_id, payments)
         except sqlite3.Error as exc:
             return False, str(exc)
+
+    def _write_invoice(self, c: sqlite3.Connection, data: Dict[str, Any], is_update: bool,
+                       original_id: Optional[str], payments: Optional[List[Dict]]) -> Tuple[bool, Optional[str]]:
+        """Writes one invoice (and its payments) inside the caller's transaction, so a caller can do other writes in the
+        same all-or-nothing step (a quotation being turned into an invoice). Returns (True, None) or (False, reason);
+        a refusal has written nothing."""
+        data = dict(data)
+        data.setdefault("created_ts", time.time())
+        if is_update:
+            nid = data["invoice_number"]
+            if nid != original_id and c.execute(
+                "SELECT 1 FROM invoices WHERE invoice_number=?", (nid,)
+            ).fetchone():
+                return False, f"Invoice number '{nid}' already exists."
+            existing = c.execute(
+                "SELECT created_ts FROM invoices WHERE invoice_number=?", (original_id,)
+            ).fetchone()
+            if existing and existing["created_ts"]:
+                data["created_ts"] = existing["created_ts"]
+            qd = {**data, "original_id": original_id}
+            c.execute(
+                f"UPDATE invoices SET {', '.join(f'{k}=:{k}' for k in data)} WHERE invoice_number=:original_id",
+                qd,
+            )
+            if payments is not None and nid != original_id:
+                c.execute("UPDATE payments SET invoice_number=? WHERE invoice_number=?",
+                          (nid, original_id))
+        else:
+            if c.execute(
+                "SELECT 1 FROM invoices WHERE invoice_number=?", (data["invoice_number"],)
+            ).fetchone():
+                return False, f"Invoice number '{data['invoice_number']}' already exists."
+            c.execute(
+                f"INSERT INTO invoices ({', '.join(data)}) VALUES (:{', :'.join(data)})",
+                data,
+            )
+        final_id = data["invoice_number"]
+        if payments is not None:
+            c.execute("DELETE FROM payments WHERE invoice_number=?", (final_id,))
+            for p in payments:
+                self._insert_payment(c, final_id, p)
+        self._recompute_one(c, final_id)
+        return True, None
 
     def delete_invoice(self, inv_id: str) -> bool:
         with closing(self._conn()) as c:
@@ -1847,6 +1951,163 @@ class DatabaseManager:
                 prefix, num_str = m.group(1), m.group(2)
                 return f"{prefix}{int(num_str) + 1:0{len(num_str)}d}"
         return "INV-001"
+
+    # ------------------------------------------------------------------ #
+    #  Quotations
+    # ------------------------------------------------------------------ #
+    def get_next_quotation_number(self) -> str:
+        """The number a new quotation starts with: the one after the most recently made quotation ("QT-004" after
+        "QT-003"), or "QT-001" for the first."""
+        with closing(self._conn()) as c:
+            rows = c.execute("SELECT quotation_number FROM quotations ORDER BY created_ts DESC, id DESC").fetchall()
+        for r in rows:
+            if re.match(r"^(.*-)(\d+)$", r["quotation_number"]):
+                return bump_number(r["quotation_number"])
+        return "QT-001"
+
+    def get_quotation(self, number: str) -> Optional[Dict[str, Any]]:
+        with closing(self._conn()) as c:
+            row = c.execute("SELECT * FROM quotations WHERE quotation_number=?", (number,)).fetchone()
+        return dict(row) if row else None
+
+    def get_quotation_by_id(self, quotation_id: int) -> Optional[Dict[str, Any]]:
+        """The quotation with this row id (what the Quotations page keeps for each line), with its shown status."""
+        with closing(self._conn()) as c:
+            row = c.execute("SELECT * FROM quotations WHERE id=?", (quotation_id,)).fetchone()
+        if not row:
+            return None
+        d = dict(row)
+        d["shown_status"] = quote_display_status(d.get("status"), d.get("valid_until"))
+        return d
+
+    def get_quotations(self, search: str = "", status_filter: str = "",
+                       today: Optional[datetime.date] = None) -> List[Dict[str, Any]]:
+        """Quotations, newest first. `search` looks in the number, the customer, the customer's reference and the status
+        as it is shown (so "expired" finds the quotations whose last valid day has passed); `status_filter` is a status to
+        show ("Expired" included) or "" for all. Each has "shown_status"."""
+        where, args = [], []
+        today_text = (today or datetime.date.today()).strftime(DB_DATE_FORMAT)
+        if search:
+            pattern = like_pattern(search)
+            where.append("(quotation_number LIKE ? ESCAPE '\\' OR bill_to LIKE ? ESCAPE '\\' OR po_number LIKE ? ESCAPE '\\' "
+                         "OR (CASE WHEN status = ? AND valid_until IS NOT NULL AND valid_until < ? THEN ? ELSE status END) "
+                         "LIKE ? ESCAPE '\\')")
+            args += [pattern] * 3 + [QUOTE_OPEN, today_text, QUOTE_EXPIRED, pattern]
+        if status_filter == QUOTE_EXPIRED:
+            where.append("status = ? AND valid_until IS NOT NULL AND valid_until < ?")
+            args += [QUOTE_OPEN, today_text]
+        elif status_filter == QUOTE_OPEN:
+            where.append("status = ? AND (valid_until IS NULL OR valid_until >= ?)")
+            args += [QUOTE_OPEN, today_text]
+        elif status_filter:
+            where.append("status = ?")
+            args.append(status_filter)
+        sql = "SELECT * FROM quotations" + (" WHERE " + " AND ".join(where) if where else "") + \
+              " ORDER BY quotation_date DESC, created_ts DESC, id DESC"
+        with closing(self._conn()) as c:
+            rows = c.execute(sql, args).fetchall()
+        result = []
+        for row in rows:
+            d = dict(row)
+            d["shown_status"] = quote_display_status(d.get("status"), d.get("valid_until"), today)
+            result.append(d)
+        return result
+
+    def save_quotation(self, data: Dict[str, Any], is_update: bool,
+                       original_id: Optional[str] = None) -> Tuple[bool, Optional[str]]:
+        """Saves a quotation. `data` is invoice-shaped (what the form collects: invoice_number, invoice_date, due_date =
+        the valid-until day, and the columns in QUOTE_SHARED_COLUMNS); anything else in it is left out. A quotation that
+        has already been made into an invoice is closed for changes. Its status is kept as it was."""
+        try:
+            number = str(data["invoice_number"])
+            row = {col: data[col] for col in QUOTE_SHARED_COLUMNS if col in data}
+            row.update(quotation_number=number, quotation_date=data.get("invoice_date"), valid_until=data.get("due_date"),
+                       grand_total=self.totals_for(data)["grand_total"])
+            with closing(self._conn()) as c:
+                with c:
+                    if is_update:
+                        old = c.execute("SELECT id, status, created_ts FROM quotations WHERE quotation_number=?",
+                                        (original_id,)).fetchone()
+                        if old is None:
+                            return False, "This quotation no longer exists."
+                        if old["status"] == QUOTE_INVOICED:
+                            return False, "An invoice has already been made from this quotation, so it cannot be changed."
+                        if number != original_id and c.execute(
+                                "SELECT 1 FROM quotations WHERE quotation_number=?", (number,)).fetchone():
+                            return False, f"Quotation number '{number}' already exists."
+                        row["created_ts"] = old["created_ts"] or time.time()
+                        c.execute(f"UPDATE quotations SET {', '.join(f'{k}=:{k}' for k in row)} WHERE id=:_id",
+                                  {**row, "_id": old["id"]})
+                    else:
+                        if c.execute("SELECT 1 FROM quotations WHERE quotation_number=?", (number,)).fetchone():
+                            return False, f"Quotation number '{number}' already exists."
+                        row.update(created_ts=time.time(), status=QUOTE_OPEN)
+                        c.execute(f"INSERT INTO quotations ({', '.join(row)}) VALUES (:{', :'.join(row)})", row)
+            return True, None
+        except sqlite3.Error as exc:
+            return False, str(exc)
+
+    def set_quotation_status(self, number: str, status: str) -> bool:
+        """Records the customer's answer: Open (again), Accepted or Declined. A quotation that was made into an invoice
+        keeps that status. True when the status was changed."""
+        if status not in (QUOTE_OPEN, QUOTE_ACCEPTED, QUOTE_DECLINED):
+            return False
+        with closing(self._conn()) as c:
+            with c:
+                done = c.execute("UPDATE quotations SET status=? WHERE quotation_number=? AND status != ?",
+                                 (status, number, QUOTE_INVOICED)).rowcount
+        return bool(done)
+
+    def delete_quotations(self, quotation_ids: List[int]) -> int:
+        """Deletes the quotations with these row ids. Invoices made from them are not touched."""
+        with closing(self._conn()) as c:
+            with c:
+                c.executemany("DELETE FROM quotations WHERE id=?", [(int(i),) for i in quotation_ids])
+        return len(quotation_ids)
+
+    def convert_quotation_to_invoice(self, number: str, today: Optional[datetime.date] = None) -> Tuple[bool, str]:
+        """Makes an invoice from the quotation `number` and marks the quotation Invoiced, in one all-or-nothing step.
+        The invoice takes the next free invoice number and today's date, the customer, the items, the tax settings, the
+        terms and the notes of the quotation; its due date follows the payment terms ("Net 15"), and it starts unpaid.
+        Returns (True, the new invoice number) or (False, a plain sentence saying why it was not made)."""
+        today = today or datetime.date.today()
+        try:
+            with closing(self._conn()) as c:
+                with c:
+                    quote = c.execute("SELECT * FROM quotations WHERE quotation_number=?", (number,)).fetchone()
+                    if quote is None:
+                        return False, "This quotation no longer exists."
+                    quote = dict(quote)
+                    if quote["status"] == QUOTE_INVOICED:
+                        which = f"Invoice {quote['invoice_number']}" if quote.get("invoice_number") else "An invoice"
+                        return False, f"{which} has already been made from this quotation."
+                    if quote["status"] == QUOTE_DECLINED:
+                        return False, "This quotation was declined. Mark it as Open or Accepted first if the customer agrees after all."
+                    invoice_number = self.get_next_invoice_number()
+                    for _ in range(10000):                  # the next free number, even when a number further on is already used
+                        if not c.execute("SELECT 1 FROM invoices WHERE invoice_number=?", (invoice_number,)).fetchone():
+                            break
+                        invoice_number = bump_number(invoice_number)
+                    days = due_days_from_terms(quote.get("payment_terms"))
+                    due = None if days is None else (today + datetime.timedelta(days=days)).strftime(DB_DATE_FORMAT)
+                    note = f"Made from quotation {number}."
+                    if str(quote.get("notes") or "").strip():
+                        note += "\n" + str(quote["notes"]).strip()
+                    data = {col: quote.get(col) for col in QUOTE_SHARED_COLUMNS}
+                    data.update(
+                        invoice_number=invoice_number, invoice_date=today.strftime(DB_DATE_FORMAT), due_date=due,
+                        notes=note, amount_paid=0.0, payment_date=None, status=InvoiceStatus.DUE.value, payment_mode=None,
+                        show_qr_code=1, is_complimentary=0, advance_amount=0.0, advance_date=None, pdf_watermark="",
+                        created_ts=time.time())
+                    ok, err = self._write_invoice(c, data, False, None, [])
+                    if not ok:
+                        return False, err or "The invoice could not be made."
+                    c.execute("UPDATE quotations SET status=?, invoice_number=? WHERE quotation_number=?",
+                              (QUOTE_INVOICED, invoice_number, number))
+            return True, invoice_number
+        except sqlite3.Error as exc:
+            logger.error("Could not make an invoice from quotation %s: %s", number, exc, exc_info=True)
+            return False, f"The invoice could not be made.\n\n{exc}"
 
     def export_to_csv(self, file_path: str, invoice_ids: Optional[List[str]] = None) -> Tuple[bool, Optional[str]]:
         try:
@@ -2674,13 +2935,9 @@ class PDFGenerator:
     # ------------------------------------------------------------------ #
     #  Totals
     # ------------------------------------------------------------------ #
-    def _build_totals(self, width: float, totals: Dict[str, Any]) -> Table:
-        """The totals box. GST is always one CGST and one SGST line (or one IGST line) -- however many rates the
-        invoice has; the rate-wise split goes into the GST summary beside it."""
+    def _totals_top_rows(self, totals: Dict[str, Any]) -> List[List[Any]]:
+        """The lines of the totals box above the total: subtotal, discount, taxable amount, the GST lines and round off."""
         right = self.styles["Right"]
-        total_paid = sum(safe_float(p.get("amount")) for p in self.payments)
-        _status, balance, credit = DatabaseManager.compute_payment_status(totals["grand_total"], total_paid)
-
         rows = [[Paragraph("Subtotal", right), Paragraph(fmt_money(totals['subtotal']), right)]]
         if totals["total_discount"] > 0:
             rows.append([Paragraph("Discount", right), Paragraph(f"- {fmt_money(totals['total_discount'])}", right)])
@@ -2705,7 +2962,16 @@ class PDFGenerator:
         if totals["round_off"]:
             sign = "+" if totals["round_off"] > 0 else "-"
             rows.append([Paragraph("Round Off", right), Paragraph(f"{sign} {fmt_money(abs(totals['round_off']))}", right)])
+        return rows
 
+    def _build_totals(self, width: float, totals: Dict[str, Any]) -> Table:
+        """The totals box. GST is always one CGST and one SGST line (or one IGST line) -- however many rates the
+        invoice has; the rate-wise split goes into the GST summary beside it."""
+        right = self.styles["Right"]
+        total_paid = sum(safe_float(p.get("amount")) for p in self.payments)
+        _status, balance, credit = DatabaseManager.compute_payment_status(totals["grand_total"], total_paid)
+
+        rows = self._totals_top_rows(totals)
         t = self.tpl
         total_row = len(rows)
         if t.total_bg:                                       # the total on a coloured bar
@@ -3646,6 +3912,101 @@ def make_statement(db: "DatabaseManager", client_name: str, start: datetime.date
                   "statement_period": statement_period_text(start, end), "amount_due": statement["closing"]}
 
 
+class QuotationGenerator(PDFGenerator):
+    """Draws a quotation as an A4 PDF. It is the invoice page -- the letterhead, the customer, the items, the GST and the
+    totals, in the template and brand colour chosen for it -- with its own title, the day the offer is valid until, a
+    "Quotation Total" in place of the amounts paid and owed, and no PAID / BALANCE DUE stamp. Bank and UPI details are
+    printed only when Settings asks for payment details on every document.
+
+    `data` is invoice-shaped (see quote_as_invoice): invoice_number is the quotation's number, invoice_date its date and
+    due_date the last day it is valid."""
+
+    FILE_PREFIX  = "Quotation"
+    CLIENT_LABEL = "PREPARED FOR"
+
+    def __init__(self, data: Dict[str, Any], config: Dict[str, Any], out_dir: Optional[Path] = None):
+        super().__init__(data, config, payments=[], out_dir=out_dir or QUOTATIONS_DIR)
+
+    def _document_title(self) -> str:
+        return "QUOTATION"
+
+    def _continued_text(self) -> str:
+        return f"Quotation {self.data.get('invoice_number') or ''}  ·  continued"
+
+    def _document_info(self) -> Tuple[str, str]:
+        number = str(self.data.get("invoice_number") or "")
+        return f"Quotation {number}", f"Quotation {number} for {self.data.get('bill_to') or ''}".strip()
+
+    def _apply_watermark(self, canvas, doc=None):
+        """An offer owes nothing yet, so there is no PAID / BALANCE DUE stamp."""
+
+    def _invoice_needs_payment(self) -> bool:
+        return bool(self.config.get("pdf_settings", {}).get("always_show_qr_code", False))
+
+    def _meta_cells(self) -> List[Tuple[str, str]]:
+        d = self.data
+        cells = [("Quotation #", safe_markup(d.get("invoice_number"))),
+                 ("Quotation Date", parse_date(d.get("invoice_date"), DB_DATE_FORMAT, DISPLAY_DATE_FORMAT))]
+        if d.get("due_date"):
+            cells.append(("Valid Until", parse_date(d.get("due_date"), DB_DATE_FORMAT, DISPLAY_DATE_FORMAT)))
+        if terms := str(d.get("payment_terms") or "").strip():
+            cells.append(("Payment Terms", safe_markup(terms)))
+        if po := str(d.get("po_number") or "").strip():
+            cells.append(("PO / Ref #", safe_markup(po)))
+        if self.is_gst and (place := str(d.get("place_of_supply") or "").strip()):
+            cells.append(("Place of Supply", safe_markup(place)))
+        if self.is_gst and d.get("reverse_charge"):
+            cells.append(("Reverse Charge", "Yes"))
+        return cells
+
+    def _build_totals(self, width: float, totals: Dict[str, Any]) -> Table:
+        """The invoice's totals box without the payment lines: it ends with the Quotation Total."""
+        right = self.styles["Right"]
+        rows = self._totals_top_rows(totals)
+        t = self.tpl
+        total_row = len(rows)
+        if t.total_bg:
+            rows.append([Paragraph(f"<font color='{t.total_fg}'><b>Quotation Total</b></font>", right),
+                         Paragraph(f"<font color='{t.total_fg}'><b>{fmt_money(totals['grand_total'])}</b></font>", right)])
+        else:
+            rows.append([Paragraph("<b>Quotation Total</b>", right), Paragraph(f"<b>{fmt_money(totals['grand_total'])}</b>", right)])
+        style: List[Tuple] = [
+            ("ALIGN",(0,0),(-1,-1),"RIGHT"), ("LEFTPADDING",(0,0),(-1,-1),10),
+            ("TOPPADDING",(0,0),(-1,-1),self._g(3)), ("BOTTOMPADDING",(0,0),(-1,-1),self._g(3)),
+        ]
+        if t.total_bg:
+            style.append(("BACKGROUND",(0,total_row),(1,total_row),colors.HexColor(t.total_bg)))
+        else:
+            style.append(("BACKGROUND",(0,total_row),(1,total_row),colors.HexColor("#F3F4F6")))
+            style.append(("GRID",(0,total_row),(1,total_row),1,colors.HexColor("#E5E7EB")))
+        if t.total_rule:
+            style.append(("LINEABOVE",(0,total_row),(1,total_row),0.8,colors.HexColor(t.total_rule)))
+        return Table(rows, colWidths=[width * 0.58, width * 0.42], hAlign="RIGHT", style=TableStyle(style))
+
+    def _build_summary(self, width: float) -> List[Any]:
+        """The totals, then one plain line saying what this is and how long it holds."""
+        parts = super()._build_summary(width)
+        text = "This is a quotation, not a tax invoice."
+        if self.data.get("due_date"):
+            text += f" It is valid until {parse_date(self.data.get('due_date'), DB_DATE_FORMAT, DISPLAY_DATE_FORMAT)}."
+        return parts + [Spacer(1, self._g(0.25 * cm)), Paragraph(text, self.styles["Small"])]
+
+
+def make_quotation_pdf(db: "DatabaseManager", number: str, config: Optional[Dict[str, Any]] = None,
+                       out_dir: Optional[Path] = None) -> Tuple[Path, Dict[str, Any]]:
+    """Makes the PDF of the quotation `number`. Returns (the PDF's path, what the preview window's Share button needs)."""
+    quote = db.get_quotation(number)
+    if quote is None:
+        raise ValueError(f"Quotation {number} no longer exists.")
+    config = config or load_config()
+    folder = out_dir or QUOTATIONS_DIR
+    folder.mkdir(parents=True, exist_ok=True)               # (the folder may have been deleted since Vyaprix started)
+    path = QuotationGenerator(quote_as_invoice(quote), config, folder).generate()
+    return path, {"is_quotation": True, "invoice_number": number, "bill_to": quote.get("bill_to") or "",
+                  "client_contact": quote.get("client_contact") or "", "your_name": quote.get("your_name") or "",
+                  "valid_until": quote.get("valid_until") or ""}
+
+
 def merge_pdfs(paths: List[Path], out_path: Path) -> Path:
     """Combine multiple single-invoice PDFs into one file for batch printing.
 
@@ -4346,6 +4707,16 @@ def _ic_invoices(p: QPainter, color: QColor) -> None:
     p.drawLine(QPointF(8.5, 15.5), QPointF(12.5, 15.5))
 
 
+def _ic_quotes(p: QPainter, color: QColor) -> None:
+    """A sheet with a tick: an offer waiting for a yes."""
+    p.drawRoundedRect(QRectF(5, 3, 14, 18), 2.5, 2.5)
+    tick = QPainterPath()
+    tick.moveTo(8.6, 12.6)
+    tick.lineTo(11.0, 15.0)
+    tick.lineTo(15.4, 9.2)
+    p.drawPath(tick)
+
+
 def _ic_clients(p: QPainter, color: QColor) -> None:
     p.drawEllipse(QPointF(9, 8.2), 3.2, 3.2)
     body = QPainterPath()
@@ -4441,7 +4812,7 @@ def _ic_book(p: QPainter, color: QColor) -> None:
 
 
 _ICON_SHAPES: Dict[str, Callable[[QPainter, QColor], None]] = {
-    "plus": _ic_plus, "invoices": _ic_invoices, "clients": _ic_clients, "items": _ic_items, "settings": _ic_settings,
+    "plus": _ic_plus, "invoices": _ic_invoices, "quotes": _ic_quotes, "clients": _ic_clients, "items": _ic_items, "settings": _ic_settings,
     "help": _ic_help, "info": _ic_info, "chevrons-left": _ic_chevrons_left, "chevrons-right": _ic_chevrons_right,
     "check": _ic_check, "alert": _ic_alert, "cross": _ic_cross, "book": _ic_book,
 }
@@ -5805,8 +6176,10 @@ class PDFViewer(QDialog):
 
     @property
     def _noun(self) -> str:
-        """What the file is called in this window's messages: "invoice", or "statement" for a customer statement."""
-        return "statement" if (self.invoice_data or {}).get("is_statement") else "invoice"
+        """What the file is called in this window's messages: "invoice", "statement" for a customer statement or
+        "quotation"."""
+        info = self.invoice_data or {}
+        return "statement" if info.get("is_statement") else "quotation" if info.get("is_quotation") else "invoice"
 
     # ------------------------------------------------------------------ #
     #  Opening the document
@@ -6205,7 +6578,8 @@ class ShareDialog(QDialog):
         super().__init__(parent)
         self.pdf_path = pdf_path
         self.invoice_data = dict(invoice_data) if invoice_data else {}
-        self.kind = "statement" if self.invoice_data.get("is_statement") else "invoice"     # what is being sent
+        self.kind = ("statement" if self.invoice_data.get("is_statement") else
+                     "quotation" if self.invoice_data.get("is_quotation") else "invoice")     # what is being sent
 
         self.setWindowTitle(f"Share {self.kind.capitalize()}")
         self.setModal(True)
@@ -6284,6 +6658,8 @@ class ShareDialog(QDialog):
         if self.kind == "statement":
             msg = (f"Hello! Please find attached your account statement from {self.invoice_data.get('your_name') or 'us'} "
                    f"for {self.invoice_data.get('statement_period', '')}.{self._amount_due_sentence()} Thank you.")
+        elif self.kind == "quotation":
+            msg = f"Hello! Please find attached our quotation {inv_num}.{self._valid_until_sentence()} Thank you."
         safe_msg = urllib.parse.quote(msg)
         self._open_link(f"https://wa.me/{clean_phone}?text={safe_msg}")
 
@@ -6302,12 +6678,21 @@ class ShareDialog(QDialog):
             subject = urllib.parse.quote(f"Account statement from {self.invoice_data.get('your_name') or 'us'}")
             body = urllib.parse.quote(f"Hello,\n\nPlease find attached your account statement for "
                                       f"{self.invoice_data.get('statement_period', '')}.{self._amount_due_sentence()}\n\nThank you!")
+        elif self.kind == "quotation":
+            subject = urllib.parse.quote(f"Quotation {inv_num} from {self.invoice_data.get('your_name') or 'us'}")
+            body = urllib.parse.quote(f"Hello,\n\nPlease find attached our quotation {inv_num}.{self._valid_until_sentence()}"
+                                      f"\n\nThank you!")
         self._open_link(f"mailto:{email}?subject={subject}&body={body}")
 
     def _amount_due_sentence(self) -> str:
         """" The amount due is ₹1,234.00." for a statement that shows money owed; nothing when nothing is owed."""
         due = int(safe_float(self.invoice_data.get("amount_due")))
         return f" The amount due is {_paise_text(due)}." if due > 0 else ""
+
+    def _valid_until_sentence(self) -> str:
+        """" It is valid until 26 Dec 2026." for a quotation that has an end date; nothing otherwise."""
+        day = parse_date(self.invoice_data.get("valid_until"), DB_DATE_FORMAT, DISPLAY_DATE_FORMAT)
+        return f" It is valid until {day}." if day and day != "N/A" else ""
 
     def _open_link(self, url: str):
         if webbrowser.open(url):
@@ -7620,6 +8005,13 @@ class HelpDialog(QDialog):
          "your own dates) and press Create Statement. You can then print it, save it, or send it by WhatsApp or email "
          "just like an invoice.",
          "Make a statement", "statement"),
+        ("Send a quotation and turn it into an invoice",
+         "Open Quotations in the menu and press New Quotation. It is filled in like an invoice, but it shows a "
+         "\u201cvalid until\u201d day instead of a due date and nothing is owed on it. Use View / Print to print it, save "
+         "it or send it by WhatsApp or email. Use Mark as to write down the customer's answer. When the customer agrees, "
+         "select the quotation and press Make Invoice: Vyaprix makes the invoice for you with today's date, the same "
+         "items and prices, and opens it so you can check it. The quotation then shows as Invoiced.",
+         "Make a quotation", "quotation"),
         ("Print, save or send an invoice",
          "Select an invoice in the list and press View Invoice. From there you can print it, save a copy, or send it by "
          "WhatsApp or email. In the invoice form you can also choose whether the terms, the notes, both or neither are "
@@ -7707,6 +8099,7 @@ class HelpDialog(QDialog):
             "backup": lambda: prompt_and_backup_database(app),
             "shortcuts": app.open_shortcuts,
             "statement": app.open_statement,
+            "quotation": lambda: app.show_frame_by_name("QuotationFormFrame"),
         }
         handler = actions.get(action)
         if handler is not None:
@@ -9485,9 +9878,8 @@ class _ManagerFrame(QWidget):
         left = QVBoxLayout()
         left.setSpacing(2)
         left.addWidget(make_label(self.TITLE, "h1"))
-        left.addWidget(make_label(self.SUBTITLE, "muted"))
-        head.addLayout(left)
-        head.addStretch()
+        left.addWidget(make_elided_label(self.SUBTITLE, "muted"))    # a narrow window shortens it with "…", not cuts it off
+        head.addLayout(left, 1)
         self.add_btn = make_button(self.ADD_TEXT, "primary", lambda: self._open_editor(None),
                                    tooltip=self.ADD_TIP, min_height=38)
         head.addWidget(self.add_btn, 0, Qt.AlignmentFlag.AlignVCenter)
@@ -9495,6 +9887,7 @@ class _ManagerFrame(QWidget):
         outer.addSpacing(18)
 
         srch = QHBoxLayout()
+        self._search_row = srch                                    # (a page can add a filter of its own beside the search box)
         srch.addWidget(QLabel("🔍"))
         self.search_entry = QLineEdit()
         self.search_entry.setFixedWidth(300)
@@ -9732,6 +10125,219 @@ class CatalogFrame(_ManagerFrame):
     def new_catalog_item(self):
         """Ctrl+N on this page: open the Add Item dialog, exactly like the "＋ Add Item" button."""
         self._open_editor(None)
+
+
+# -----------------------------------------------------------------------------
+#  Quotations (the list of offers)
+# -----------------------------------------------------------------------------
+class QuotationsFrame(_ManagerFrame):
+    """The Quotations page: every quotation with its customer, dates, amount and status; make a new one, change one, see
+    it as a PDF, record the customer's answer, and -- the point of it all -- turn an accepted quotation into an invoice
+    with one click (the invoice gets today's date and the next invoice number, and the quotation is marked Invoiced)."""
+
+    TITLE = "Quotations"
+    SUBTITLE = "Offers you send before the work is agreed. When the customer says yes, one click turns a quotation into an invoice."
+    ADD_TEXT = "＋  New Quotation  (Ctrl+N)"
+    ADD_TIP = "Make a new quotation (Ctrl+N)"
+    SEARCH_TIP = "Search your quotations by number, customer, reference or status (Ctrl+F)"
+    HINT_NONE = "Click a quotation to change it, send it or turn it into an invoice"
+    EMPTY_NONE = ("You have not made any quotations yet.\nClick “New Quotation” to make your first offer. When the customer "
+                  "agrees, one click turns it into an invoice.")
+    COL_DEFS = [
+        ("number", "Quotation #", 130, Qt.AlignmentFlag.AlignLeft),
+        ("client", "Customer",    260, Qt.AlignmentFlag.AlignLeft),
+        ("date",   "Date",        110, Qt.AlignmentFlag.AlignLeft),
+        ("valid",  "Valid Until", 110, Qt.AlignmentFlag.AlignLeft),
+        ("amount", "Amount",      130, Qt.AlignmentFlag.AlignRight),
+        ("status", "Status",      110, Qt.AlignmentFlag.AlignLeft),
+    ]
+    STATUS_COL = 5
+    _MARK_CHOICES = (("✅  Accepted by the customer", QUOTE_ACCEPTED), ("❌  Declined by the customer", QUOTE_DECLINED),
+                     ("↩  Open again", QUOTE_OPEN))
+
+    def __init__(self, parent, controller):
+        self._rows: Dict[int, Dict[str, Any]] = {}          # the quotations on screen, by row id
+        super().__init__(parent, controller)
+
+    def _build(self):
+        super()._build()
+        # a filter beside the search box
+        self.filter_combo = QComboBox()
+        for key, text in QUOTE_FILTERS:
+            self.filter_combo.addItem(text, key)
+        self.filter_combo.setMinimumWidth(190)
+        self.filter_combo.setToolTip("Show only the quotations that are open, accepted, expired, declined or already "
+                                     "turned into an invoice")
+        guard_wheel(self.filter_combo)
+        self.filter_combo.currentIndexChanged.connect(lambda _index: self._populate())
+        search_row = self._search_row
+        at = search_row.indexOf(self.search_entry) + 1
+        search_row.insertSpacing(at, 12)
+        search_row.insertWidget(at + 1, self.filter_combo)
+
+        # buttons of this page, before Edit
+        self.view_btn = make_button("📄  View / Print", "secondary", self._view_pdf,
+                                    tooltip="See this quotation as a PDF to print, save or send")
+        self.invoice_btn = make_button("🧾  Make Invoice", "success", self._make_invoice,
+                                       tooltip="Turn this quotation into an invoice")
+        self.mark_btn = make_button("Mark as", "secondary", tooltip="Write down what the customer answered")
+        self.mark_menu = QMenu(self.mark_btn)
+        for text, status in self._MARK_CHOICES:
+            self.mark_menu.addAction(text, lambda status=status: self._mark(status))
+        self.mark_btn.setMenu(self.mark_menu)
+        row = self._actions_row
+        before = row.indexOf(self.edit_btn)
+        for offset, widget in enumerate((self.invoice_btn, self.view_btn, self.mark_btn)):
+            row.insertWidget(before + offset * 2, widget)
+            row.insertSpacing(before + offset * 2 + 1, 8)
+        for button in (self.view_btn, self.invoice_btn, self.mark_btn):
+            button.setEnabled(False)
+
+        self._ctx.clear()
+        self._edit_action = self._ctx.addAction("✏️  Edit", self._edit_selected)
+        self._invoice_action = self._ctx.addAction("🧾  Make Invoice", self._make_invoice)
+        self._view_action = self._ctx.addAction("📄  View / Print", self._view_pdf)
+        self._mark_submenu = self._ctx.addMenu("Mark as")
+        for text, status in self._MARK_CHOICES:
+            self._mark_submenu.addAction(text, lambda status=status: self._mark(status))
+        self._ctx.addSeparator()
+        self._ctx.addAction("🗑️  Delete", self._delete_selected)
+
+    # ---- what the page shows ------------------------------------------------------------------------------------ #
+    def _fetch(self, search: str) -> List[Dict]:
+        records = self.db_manager.get_quotations(search, self.filter_combo.currentData() or "")
+        self._rows = {int(q["id"]): q for q in records}
+        return records
+
+    def _cells(self, q: Dict) -> List[str]:
+        shown = lambda day: parse_date(day, DB_DATE_FORMAT, DISPLAY_DATE_FORMAT) if day else "-"
+        return [q["quotation_number"], q["bill_to"], shown(q.get("quotation_date")), shown(q.get("valid_until")),
+                fmt_money(q.get("grand_total")), q["shown_status"]]
+
+    def _populate(self):
+        super()._populate()
+        t = self.table
+        for r in range(t.rowCount()):
+            quote = self._rows.get(int(t.item(r, 0).data(Qt.ItemDataRole.UserRole)))
+            if quote is None:
+                continue
+            status = quote["shown_status"]
+            cell = t.item(r, self.STATUS_COL)
+            cell.setForeground(QBrush(QColor(QUOTE_BADGE.get(status, QUOTE_BADGE[QUOTE_OPEN]))))
+            font = cell.font()
+            font.setBold(True)
+            cell.setFont(font)
+            if status == QUOTE_INVOICED:
+                cell.setToolTip(f"Made into invoice {quote.get('invoice_number') or ''}".strip())
+            elif status == QUOTE_EXPIRED:
+                cell.setToolTip("The last valid day has passed. Change the date to offer it again.")
+            t.item(r, 1).setToolTip(quote["bill_to"])
+        if not self._rows and self.filter_combo.currentData():
+            # quotations exist, but none of this kind: say so (not "you have not made any yet")
+            wording, searching = self.filter_combo.currentText().lower(), self.search_entry.text().strip()
+            self.empty_state.show_message(
+                f"Nothing matches “{searching}” among the {wording} quotations.\nCheck the spelling, or choose “All quotations”."
+                if searching else f"You have no {wording} quotations.\nChoose “All quotations” to see every quotation.")
+
+    def show_all(self) -> None:
+        """Back to the whole list -- no filter and no search -- so that a quotation that has just been saved can be seen.
+        (The list is redrawn when the page is shown.)"""
+        for widget in (self.filter_combo, self.search_entry):
+            widget.blockSignals(True)
+        self.filter_combo.setCurrentIndex(0)
+        self.search_entry.clear()
+        for widget in (self.filter_combo, self.search_entry):
+            widget.blockSignals(False)
+
+    def _on_select(self):
+        super()._on_select()
+        if not hasattr(self, "view_btn"):
+            return
+        quote = self._selected_record()                      # None unless exactly one quotation is selected
+        raw = quote["status"] if quote else ""
+        can_edit = quote is not None and raw != QUOTE_INVOICED
+        can_invoice = quote is not None and raw not in (QUOTE_DECLINED, QUOTE_INVOICED)
+        self.edit_btn.setEnabled(can_edit)
+        self.view_btn.setEnabled(quote is not None)
+        self.invoice_btn.setEnabled(can_invoice)
+        self.mark_btn.setEnabled(can_edit)
+        self._edit_action.setEnabled(can_edit)
+        self._view_action.setEnabled(quote is not None)
+        self._invoice_action.setEnabled(can_invoice)
+        self._mark_submenu.setEnabled(can_edit)
+        if quote is not None and raw == QUOTE_INVOICED:
+            self.hint_lbl.setText(f"Made into invoice {quote.get('invoice_number') or ''}".strip())
+
+    # ---- the page's actions ------------------------------------------------------------------------------------- #
+    def _get_by_id(self, rec_id: int) -> Optional[Dict]:
+        return self.db_manager.get_quotation_by_id(rec_id)
+
+    def _open_editor(self, quote: Optional[Dict]):
+        if quote is None:
+            self.controller.show_frame(QuotationFormFrame)
+        elif quote.get("status") == QUOTE_INVOICED:
+            made = f"invoice {quote['invoice_number']}" if quote.get("invoice_number") else "an invoice"
+            Messagebox.show_info(
+                "Already an Invoice",
+                f"Quotation {quote['quotation_number']} was made into {made}, so it cannot be changed any more.\n\n"
+                "To change the invoice, open it on the Invoices page.", parent=self.controller)
+        else:
+            self.controller.show_frame(QuotationFormFrame, quote["quotation_number"])
+
+    def _delete_ids(self, ids):
+        self.db_manager.delete_quotations(ids)
+
+    def _delete_prompt(self, n):
+        msg = (f"Delete these {n} quotations?" if n > 1 else "Delete this quotation?") + \
+            "\nInvoices already made from them are not affected."
+        return ("Delete Quotations" if n > 1 else "Delete Quotation"), msg
+
+    def new_quotation(self):
+        """Ctrl+N on this page: start a new quotation, exactly like the "＋ New Quotation" button."""
+        self._open_editor(None)
+
+    def _view_pdf(self):
+        if quote := self._selected_record():
+            self.controller.open_quotation_pdf(quote["quotation_number"])
+
+    def _make_invoice(self):
+        quote = self._selected_record()
+        if quote is None:
+            return
+        number = quote["quotation_number"]
+        if quote["status"] == QUOTE_INVOICED:
+            return Messagebox.show_info("Already an Invoice", f"Invoice {quote.get('invoice_number') or ''} has already been "
+                                        f"made from quotation {number}.", parent=self.controller)
+        if quote["status"] == QUOTE_DECLINED:
+            return Messagebox.show_info("Quotation Declined", f"Quotation {number} was declined by the customer.\n"
+                                        "If they agree after all, use “Mark as” > “Open again” first.", parent=self.controller)
+        if not Messagebox.yesno(
+                "Make an Invoice",
+                f"Make an invoice from quotation {number} for {quote['bill_to']}?\n\n"
+                "The invoice gets today's date and the next invoice number, with the same items, prices and GST. You can "
+                "still change it before you send it.", parent=self.controller):
+            return
+        self.controller.make_invoice_from_quotation(number)
+
+    def _mark(self, status: str):
+        quote = self._selected_record()
+        if quote is None:
+            return
+        number = quote["quotation_number"]
+        if not self.db_manager.set_quotation_status(number, status):
+            return Messagebox.show_info("Quotation Not Changed", f"Quotation {number} can no longer be changed.",
+                                        parent=self.controller)
+        self._populate()
+        self.select_number(number)
+        notify(self.controller, f"Quotation {number} is open again." if status == QUOTE_OPEN
+               else f"Quotation {number} marked as {status.lower()}.")
+
+    def select_number(self, number: str) -> None:
+        """Selects the line of quotation `number` (after the list was redrawn)."""
+        for r in range(self.table.rowCount()):
+            if self.table.item(r, 0).text() == number:
+                self.table.select_only_row(r)
+                return
 
 
 # -----------------------------------------------------------------------------
@@ -11472,7 +12078,14 @@ class _SummaryRow(QWidget):
 
 class InvoiceFormFrame(QWidget):
     """Create / edit an invoice: billing info, items, tax & discount, and a
-    payment history ledger that supports multiple partial payments."""
+    payment history ledger that supports multiple partial payments.
+
+    The quotation form (QuotationFormFrame) is this same form for an offer: NOUN is the word its messages use, and the
+    few things that differ -- where a number comes from, where a document is read from and saved to, what a save says --
+    are small methods a subclass replaces (_next_number, _fetch_document, _fill_payments, _number_in_use, _store,
+    _after_saved)."""
+
+    NOUN = "invoice"
 
     def __init__(self, parent, controller):
         super().__init__(parent)
@@ -11623,16 +12236,19 @@ class InvoiceFormFrame(QWidget):
         row.setSpacing(16)
 
         left, lay = self._card("Invoice Details")
+        self._details_title = lay.itemAt(0).widget()
         lay.setSpacing(8)
         self.invoice_number_entry = QLineEdit()
         self.invoice_number_entry.setPlaceholderText("INV-001")
         advance_on_enter(self.invoice_number_entry)
-        lay.addWidget(self._labeled("Invoice Number *", self.invoice_number_entry))
+        self._number_row = self._labeled("Invoice Number *", self.invoice_number_entry)
+        lay.addWidget(self._number_row)
 
         self.invoice_date_edit = make_date_edit()
         self.invoice_date_edit.dateChanged.connect(self._on_invoice_date_changed)
         advance_on_enter(self.invoice_date_edit)
-        lay.addWidget(self._labeled("Invoice Date *", self.invoice_date_edit))
+        self._date_row = self._labeled("Invoice Date *", self.invoice_date_edit)
+        lay.addWidget(self._date_row)
 
         self.due_combo = QComboBox()
         for text, days in DUE_CHOICES:
@@ -11643,7 +12259,8 @@ class InvoiceFormFrame(QWidget):
                                   "The due date is printed on the invoice.")
         self.due_combo.activated.connect(self._on_due_chosen)
         guard_wheel(self.due_combo)
-        lay.addWidget(self._labeled("Due Date", self.due_combo))
+        self._due_row = self._labeled("Due Date", self.due_combo)
+        lay.addWidget(self._due_row)
         self.due_date_edit = make_date_edit()
         self.due_date_edit.setEnabled(False)
         self.due_date_edit.dateChanged.connect(self._on_due_date_edited)
@@ -11670,7 +12287,8 @@ class InvoiceFormFrame(QWidget):
                                        "Settings > Invoice Design.")
         guard_wheel(self.template_combo)
         self._fill_template_combo()
-        lay.addWidget(self._labeled("Invoice Look", self.template_combo))
+        self._look_row = self._labeled("Invoice Look", self.template_combo)
+        lay.addWidget(self._look_row)
 
         self.watermark_combo = QComboBox()
         self.watermark_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
@@ -11679,7 +12297,8 @@ class InvoiceFormFrame(QWidget):
                                         "for this invoice.\n\"Default\" follows Settings > Invoice Design.")
         guard_wheel(self.watermark_combo)
         self._fill_watermark_combo()
-        lay.addWidget(self._labeled("Status Watermark", self.watermark_combo))
+        self._watermark_row = self._labeled("Status Watermark", self.watermark_combo)
+        lay.addWidget(self._watermark_row)
 
         lay.addSpacing(4)
         self.no_charge_toggle = ToggleSwitch("Free of charge (complimentary) - nothing to pay")
@@ -11855,11 +12474,8 @@ class InvoiceFormFrame(QWidget):
     def _default_due_days(self) -> int:
         """How many days after the invoice date a due date starts at: read from the payment terms ("Net 15",
         "30 days"), 0 for "on receipt", else 15."""
-        terms = self.payment_terms_entry.text()
-        found = re.search(r"\bnet\s*(\d{1,3})\b|\b(\d{1,3})\s*days?\b", terms, re.IGNORECASE)
-        if found:
-            return int(found.group(1) or found.group(2))
-        return 0 if re.search(r"receipt|immediate|advance", terms, re.IGNORECASE) else 15
+        days = due_days_from_terms(self.payment_terms_entry.text())
+        return 15 if days is None else days
 
     def _set_due_in(self, days: int):
         due = date_edit_value(self.invoice_date_edit) + datetime.timedelta(days=days)
@@ -12036,6 +12652,7 @@ class InvoiceFormFrame(QWidget):
     # ---- Payment History ------------------------------------------------ #
     def _section_payments(self, parent: QVBoxLayout):
         card, lay = self._card("Payment History")
+        self._payments_card = card
         lay.addWidget(make_label("Log each payment received. Status updates automatically.", "muted"))
         lay.addSpacing(8)
         header = QHBoxLayout()
@@ -12098,12 +12715,14 @@ class InvoiceFormFrame(QWidget):
     # ---- Notes & Terms (printed) ------------------------------------------ #
     def _section_print_notes(self, parent: QVBoxLayout):
         card, lay = self._card("Notes & Terms")
-        lay.addWidget(make_label("Choose what is printed on the invoice, under the totals. A box you leave empty prints nothing.",
-                                 "muted", wrap=True))
+        self._print_hint = make_label("Choose what is printed on the invoice, under the totals. A box you leave empty prints nothing.",
+                                      "muted", wrap=True)
+        lay.addWidget(self._print_hint)
         lay.addSpacing(8)
         choose = QHBoxLayout()
         choose.setSpacing(10)
-        choose.addWidget(_caption("Print on the invoice"))
+        self._print_caption = _caption("Print on the invoice")
+        choose.addWidget(self._print_caption)
         self.print_extras_combo = QComboBox()
         for key, label in PRINT_EXTRAS_CHOICES:
             self.print_extras_combo.addItem(label, key)
@@ -12165,7 +12784,8 @@ class InvoiceFormFrame(QWidget):
     # ---- Notes ------------------------------------------------------------ #
     def _section_notes(self, parent: QVBoxLayout):
         card, lay = self._card("Internal Notes")
-        lay.addWidget(make_label("Visible only inside Vyaprix — never printed on the invoice PDF.", "muted"))
+        self._notes_hint = make_label("Visible only inside Vyaprix — never printed on the invoice PDF.", "muted")
+        lay.addWidget(self._notes_hint)
         lay.addSpacing(6)
         self.notes_text = self._text_box("Internal notes (optional) — not shown on the PDF")
         lay.addWidget(self.notes_text)
@@ -12340,7 +12960,7 @@ class InvoiceFormFrame(QWidget):
             return True
         return Messagebox.yesno(
             "Discard Changes?",
-            "This invoice has unsaved changes. Leave without saving?",
+            f"This {self.NOUN} has unsaved changes. Leave without saving?",
             parent=self.controller,
         )
 
@@ -12501,16 +13121,7 @@ class InvoiceFormFrame(QWidget):
             if invoice_id:
                 self._load_for_edit(invoice_id)
             else:
-                self.editing_id = None
-                self.title_lbl.setText("New Invoice")
-                self.save_btn.setText("💾  Save Invoice  (Ctrl+S)")
-                self.invoice_number_entry.setText(self.db_manager.get_next_invoice_number())
-                set_date_edit_from_db(self.invoice_date_edit, None)
-                self.payment_terms_entry.setText(CONFIG.get("payment_details", {}).get("payment_terms", ""))
-                self.your_name_entry.setText(compose_your_name(CONFIG))
-                self.your_contact_text.setPlainText(compose_your_contact(CONFIG))
-                self.terms_text.setPlainText(str(CONFIG.get("pdf_settings", {}).get("default_terms", "") or ""))
-                self._add_item_row()
+                self._prepare_new()
         finally:
             self._loading = False
         self._apply_field_states()
@@ -12518,6 +13129,25 @@ class InvoiceFormFrame(QWidget):
         self._initial_snapshot = self._snapshot()
         self.scroll.verticalScrollBar().setValue(0)
         QTimer.singleShot(0, self._focus_first_field)
+
+    def _next_number(self) -> str:
+        """The number a new document starts with."""
+        return self.db_manager.get_next_invoice_number()
+
+    def _prepare_new(self):
+        """A blank new document: the next number, today's date, and the business details, terms and payment terms
+        that Settings holds."""
+        Noun = self.NOUN.capitalize()
+        self.editing_id = None
+        self.title_lbl.setText(f"New {Noun}")
+        self.save_btn.setText(f"💾  Save {Noun}  (Ctrl+S)")
+        self.invoice_number_entry.setText(self._next_number())
+        set_date_edit_from_db(self.invoice_date_edit, None)
+        self.payment_terms_entry.setText(CONFIG.get("payment_details", {}).get("payment_terms", ""))
+        self.your_name_entry.setText(compose_your_name(CONFIG))
+        self.your_contact_text.setPlainText(compose_your_contact(CONFIG))
+        self.terms_text.setPlainText(str(CONFIG.get("pdf_settings", {}).get("default_terms", "") or ""))
+        self._add_item_row()
 
     def _focus_first_field(self):
         if self.isVisible():
@@ -12570,17 +13200,25 @@ class InvoiceFormFrame(QWidget):
         self._set_badge("", "secondary")
         self._restore_tab_order()
 
-    def _load_for_edit(self, invoice_id: str):
-        row = self.db_manager.get_invoice_by_id(invoice_id)
-        if not row:
-            Messagebox.show_error("Not Found", f"Invoice {invoice_id} no longer exists.", parent=self.controller)
-            self.controller.show_frame(DashboardFrame)
-            return
-        d = dict(row)
-        self.editing_id = invoice_id
-        self.title_lbl.setText(f"Editing Invoice #{invoice_id}")
-        self.save_btn.setText("💾  Update Invoice  (Ctrl+S)")
+    def _fetch_document(self, document_id: str) -> Optional[Dict[str, Any]]:
+        """The stored document to edit, as an invoice-shaped dict -- None when it is gone."""
+        row = self.db_manager.get_invoice_by_id(document_id)
+        return dict(row) if row else None
 
+    def _load_for_edit(self, invoice_id: str):
+        d = self._fetch_document(invoice_id)
+        if d is None:
+            Messagebox.show_error("Not Found", f"{self.NOUN.capitalize()} {invoice_id} no longer exists.", parent=self.controller)
+            self._go_back()
+            return
+        self.editing_id = invoice_id
+        self.title_lbl.setText(f"Editing {self.NOUN.capitalize()} #{invoice_id}")
+        self.save_btn.setText(f"💾  Update {self.NOUN.capitalize()}  (Ctrl+S)")
+        self._fill_from(d)
+        self._fill_payments(invoice_id)
+
+    def _fill_from(self, d: Dict[str, Any]):
+        """Puts a stored document's details into the fields."""
         self.client_edit.set_text(d.get("bill_to") or "")
         self.client_contact_text.setPlainText(d.get("client_contact") or "")
         self.client_gstin_entry.setText(d.get("client_gstin") or "")
@@ -12622,6 +13260,7 @@ class InvoiceFormFrame(QWidget):
         if not self.item_rows:
             self._add_item_row()
 
+    def _fill_payments(self, invoice_id: str):
         for p in self.db_manager.get_payments(invoice_id):
             self._add_payment_row(safe_float(p.get("amount")), p.get("payment_date"),
                                   p.get("mode") or "Cash", p.get("note") or "", payment_id=p.get("id"),
@@ -12633,23 +13272,39 @@ class InvoiceFormFrame(QWidget):
     def _error(self, title: str, message: str) -> None:
         Messagebox.show_error(title, message, parent=self.controller)
 
+    def _number_in_use(self, number: str) -> bool:
+        return self.db_manager.get_invoice_by_id(number) is not None
+
+    def _due_before_date_text(self) -> str:
+        return "The due date cannot be earlier than the invoice date."
+
+    def _store(self, data: Dict[str, Any], is_update: bool, payments: Optional[List[Dict]]) -> Tuple[bool, Optional[str]]:
+        """Writes the document to the database: (True, None) or (False, the reason)."""
+        return self.db_manager.save_invoice(data, is_update, original_id=self.editing_id, payments=payments)
+
+    def _after_saved(self, number: str, is_update: bool) -> None:
+        """What happens once it is saved: back to the list, with a short message."""
+        self.controller.show_frame(DashboardFrame)
+        notify(self.controller, f"Invoice {number} {'updated' if is_update else 'saved'}.")
+
     def _save(self):
+        noun, Noun = self.NOUN, self.NOUN.capitalize()
         inv_num = self.invoice_number_entry.text().strip()
         bill_to = self.client_edit.text().strip()
         your_name = self.your_name_entry.text().strip()
         if not inv_num or not bill_to or not your_name:
-            return self._error("Please Check", "Invoice Number, Client Name, and Your Name are all required.")
+            return self._error("Please Check", f"{Noun} Number, Client Name, and Your Name are all required.")
         if INVALID_FILENAME_CHARS.search(inv_num):
             return self._error(
                 "Please Check",
-                'Invoice Number cannot contain any of:  \\  /  :  * ?  "  <  >  |\n'
+                f'{Noun} Number cannot contain any of:  \\  /  :  * ?  "  <  >  |\n'
                 "(these characters break the PDF file that gets generated from it).",
             )
-        if inv_num != self.editing_id and self.db_manager.get_invoice_by_id(inv_num) is not None:
+        if inv_num != self.editing_id and self._number_in_use(inv_num):
             return self._error(
-                "Duplicate Invoice Number",
-                f'Invoice number "{inv_num}" is already used by another invoice.\n'
-                "Please choose a different invoice number.",
+                f"Duplicate {Noun} Number",
+                f'{Noun} number "{inv_num}" is already used by another {noun}.\n'
+                f"Please choose a different {noun} number.",
             )
 
         client_gstin = self.client_gstin_entry.text().strip()
@@ -12681,11 +13336,11 @@ class InvoiceFormFrame(QWidget):
         if self._due_on() and not no_charge:
             due_date = date_edit_db(self.due_date_edit)
             if due_date < inv_date:
-                return self._error("Please Check", "The due date cannot be earlier than the invoice date.")
+                return self._error("Please Check", self._due_before_date_text())
 
         items = self._filled_items()
         if not no_charge and not items:
-            return self._error("Please Check", "Add at least one item to the invoice.")
+            return self._error("Please Check", f"Add at least one item to the {noun}.")
         per_item = self._per_item_active()
         for i in items:
             name = i["title"] or "an item"
@@ -12743,8 +13398,7 @@ class InvoiceFormFrame(QWidget):
         }
 
         is_update = self.editing_id is not None
-        ok, err = self.db_manager.save_invoice(data, is_update, original_id=self.editing_id,
-                                               payments=None if no_charge else payments)
+        ok, err = self._store(data, is_update, None if no_charge else payments)
         if not ok:
             return self._error("Save Failed", err)
 
@@ -12757,8 +13411,7 @@ class InvoiceFormFrame(QWidget):
                                                       item.get("unit", ""), item.get("hsn", ""), item.get("tax_rate"))
 
         self._initial_snapshot = self._snapshot()
-        self.controller.show_frame(DashboardFrame)
-        notify(self.controller, f"Invoice {inv_num} {'updated' if is_update else 'saved'}.")
+        self._after_saved(inv_num, is_update)
 
     # ------------------------------------------------------------------ #
     #  Public API used by application-level keyboard shortcuts
@@ -12805,6 +13458,135 @@ class InvoiceFormFrame(QWidget):
         row = self._focused_item_row() or (self.item_rows[-1] if self.item_rows else None)
         if row is not None:
             self._show_row(row.title_edit)
+
+
+class QuotationFormFrame(InvoiceFormFrame):
+    """The quotation form: the invoice form -- the same customer, items, GST, discount and look -- for an offer that is
+    not yet an invoice. Instead of a due date it has a "valid until" day; there are no payments, no QR code and no status
+    stamp; and it saves into the Quotations page's list (see QuotationsFrame), from where a quotation can be turned into
+    an invoice. Only what differs from the invoice form is here."""
+
+    NOUN = "quotation"
+
+    def __init__(self, parent, controller):
+        super().__init__(parent, controller)
+        self._quote_status: Optional[str] = None       # the stored status of the quotation being changed (None: a new one)
+        self._quote_shown: str = ""                    # ... and the status it is shown with (Expired included)
+        self._make_it_a_quotation_form()
+
+    def _make_it_a_quotation_form(self) -> None:
+        """Gives the invoice form its quotation wording and takes away what an offer does not have."""
+        back_tip = "Return to the quotation list (Esc). Unsaved changes will ask first."
+        for button in (self.top_back_btn, self.back_btn):
+            button.setText("←  Back to Quotations  (Esc)")
+            button.setToolTip(back_tip)
+        self.title_lbl.setText("New Quotation")
+        self.save_btn.setText("💾  Save Quotation  (Ctrl+S)")
+        self.save_btn.setToolTip("Save this quotation (Ctrl+S)")
+        self._details_title.setText("Quotation Details")
+        self._number_row.label.setText("Quotation Number *")
+        self.invoice_number_entry.setPlaceholderText("QT-001")
+        self._date_row.label.setText("Quotation Date *")
+        # how long the offer holds: always an end date, 30 days unless changed
+        self.due_combo.clear()
+        for text, days in QUOTE_VALID_CHOICES:
+            self.due_combo.addItem(text, days)
+        self.due_combo.setToolTip("How long this offer stays open: a number of days after the quotation date, or a date "
+                                  "you pick.\nThe last day is printed on the quotation.")
+        self._due_row.label.setText("Valid For")
+        self._due_date_row.label.setText("Valid Until")
+        self._set_due_active(True)
+        # nothing to pay on an offer
+        for widget in (self._watermark_row, self.no_charge_toggle, self.show_qr_toggle, self._payments_card):
+            widget.setVisible(False)
+        self._look_row.label.setText("Quotation Look")
+        self.template_combo.setToolTip("The look this quotation is printed in.\n\"Default\" is the look you chose in "
+                                       "Settings > Invoice Design.")
+        self.gst_toggle.setText("GST applies to this quotation")
+        self.tax_mode_combo.setItemText(0, "One rate for the whole quotation")
+        self._print_hint.setText("Choose what is printed on the quotation, under the totals. A box you leave empty prints nothing.")
+        self._print_caption.setText("Print on the quotation")
+        self.print_extras_combo.setToolTip("Print the note, the terms, both, or neither on this quotation. "
+                                           "Whatever you leave out is only hidden, not deleted.")
+        self._notes_hint.setText("Visible only inside Vyaprix — never printed on the quotation PDF.")
+        self.row_grand_total.set(label="Quotation Total:")
+
+    # ---- where a quotation comes from and goes to ------------------------------------------------------------- #
+    def _next_number(self) -> str:
+        return self.db_manager.get_next_quotation_number()
+
+    def _reset(self):
+        super()._reset()
+        self._quote_status, self._quote_shown = None, ""
+
+    def _prepare_new(self):
+        super()._prepare_new()
+        self._show_stored_due(None, None)              # the usual 30 days from the quotation date
+
+    def _fetch_document(self, document_id: str) -> Optional[Dict[str, Any]]:
+        quote = self.db_manager.get_quotation(document_id)
+        if quote is None:
+            return None
+        self._quote_status = quote.get("status")
+        self._quote_shown = quote_display_status(quote.get("status"), quote.get("valid_until"))
+        return quote_as_invoice(quote)
+
+    def _fill_payments(self, invoice_id: str):
+        """An offer has no payments."""
+
+    def _number_in_use(self, number: str) -> bool:
+        return self.db_manager.get_quotation(number) is not None
+
+    def _due_before_date_text(self) -> str:
+        return 'The "valid until" date cannot be earlier than the quotation date.'
+
+    def _store(self, data: Dict[str, Any], is_update: bool, payments: Optional[List[Dict]]) -> Tuple[bool, Optional[str]]:
+        return self.db_manager.save_quotation(data, is_update, original_id=self.editing_id)
+
+    def _after_saved(self, number: str, is_update: bool) -> None:
+        page = self.controller.frames[QuotationsFrame]
+        page.show_all()                                  # a filter or a search must not hide what was just saved
+        self.controller.show_frame(QuotationsFrame)
+        page.select_number(number)                       # ... and its buttons (Make Invoice, View / Print) are at hand
+        notify(self.controller, f"Quotation {number} {'updated' if is_update else 'saved'}.")
+
+    def _go_back(self):
+        self.controller.show_frame(QuotationsFrame)
+
+    # ---- "valid until" in place of "due" ------------------------------------------------------------------------ #
+    def _show_stored_due(self, invoice_date: Optional[str], due: Optional[str]):
+        """Shows the last valid day: as "n days" when it is exactly that long after the quotation date, else as a date
+        picked by hand. A quotation without one starts at 30 days."""
+        self._due_days = None
+        self._set_due_active(True)
+        if not due:
+            self.due_combo.setCurrentIndex(max(0, self.due_combo.findData(QUOTE_DEFAULT_VALID_DAYS)))
+            self._set_due_in(QUOTE_DEFAULT_VALID_DAYS)
+            return
+        set_date_edit_from_db(self.due_date_edit, due)
+        try:
+            days = (datetime.datetime.strptime(due, DB_DATE_FORMAT)
+                    - datetime.datetime.strptime(invoice_date or "", DB_DATE_FORMAT)).days
+        except (TypeError, ValueError):
+            days = -1
+        index = self.due_combo.findData(days) if days >= 0 else -1
+        if index >= 0:
+            self.due_combo.setCurrentIndex(index)
+            self._due_days = days
+        else:
+            self.due_combo.setCurrentIndex(self.due_combo.findData(_DUE_CUSTOM))
+
+    # ---- the totals: no payments, no balance ------------------------------------------------------------------- #
+    def _recalc_totals(self, *_):
+        super()._recalc_totals()
+        if self._loading:
+            return
+        self.row_paid.setVisible(False)
+        self.row_balance.setVisible(False)
+        if self._quote_shown:
+            self._set_badge(self._quote_shown.upper(), QUOTE_TONES.get(self._quote_shown, "secondary"))
+        else:
+            self._set_badge("", "secondary")
 
 
 # =============================================================================
@@ -13626,8 +14408,9 @@ class Sidebar(QFrame):
     How it slides: the content (`_body`) is always laid out at the full width and the sidebar just shows as much of it as
     it is wide; the pictures sit in the same place in both widths and the names fade with the width, so nothing jumps."""
     NAV_ITEMS: List[Tuple[str, str, str, str]] = [        # (picture, name, page, what it is for)
-        ("invoices", "Invoices", "DashboardFrame", "See, search and manage all your invoices"),
-        ("clients",  "Clients",  "ClientsFrame",   "The people and businesses you bill"),
+        ("invoices", "Invoices",   "DashboardFrame",  "See, search and manage all your invoices"),
+        ("quotes",   "Quotations", "QuotationsFrame", "Offers you send before an invoice, turned into invoices with one click"),
+        ("clients",  "Clients",    "ClientsFrame",    "The people and businesses you bill"),
         ("items",    "Items",    "CatalogFrame",   "The things you sell, with their prices"),
     ]
     WIDTH = SIDEBAR_WIDTH
@@ -13916,7 +14699,8 @@ class ShortcutManager:
 
     #: What each page is called on the shortcut list (the list is for people, not programmers).
     _PAGE_NAMES = {"DashboardFrame": "Invoices page", "ClientsFrame": "Clients page", "CatalogFrame": "Items page",
-                   "InvoiceFormFrame": "Invoice form", "SettingsFrame": "Settings"}
+                   "InvoiceFormFrame": "Invoice form", "QuotationsFrame": "Quotations page",
+                   "QuotationFormFrame": "Quotation form", "SettingsFrame": "Settings"}
 
     def register_contextual(self, sequences, frame_class: Type, handler: Callable[[], None],
                             description: str, group: str, display: Optional[str] = None,
@@ -13983,8 +14767,8 @@ class InvoiceApp(QMainWindow):
     FLOOR_SIZE = (880, 540)         # the smallest it shrinks to on a screen that has no room for MIN_SIZE
     COMPACT_BELOW = 1080            # a window narrower than this shows the narrow (pictures only) menu
     SHORT_BELOW = 760               # a window lower than this gets the slim menu header
-    LOW_BELOW = 560                 # ... and one lower than this has no room for the names either (with the slim header
-                                    # the full menu needs 550 px; the narrow one needs only 490)
+    LOW_BELOW = 600                 # ... and one lower than this has no room for the names either (with the slim header
+                                    # the full menu needs 598 px; the narrow one needs only 538)
 
     def __init__(self):
         super().__init__()
@@ -14252,7 +15036,8 @@ class InvoiceApp(QMainWindow):
         column.addWidget(self.progress_panel)
 
         self.frames: Dict[Type, QWidget] = {}
-        for FrameClass, done in ((DashboardFrame, 0.45), (ClientsFrame, 0.58), (CatalogFrame, 0.70), (InvoiceFormFrame, 0.88)):
+        for FrameClass, done in ((DashboardFrame, 0.45), (ClientsFrame, 0.55), (CatalogFrame, 0.63), (QuotationsFrame, 0.70),
+                                 (InvoiceFormFrame, 0.80), (QuotationFormFrame, 0.88)):
             frame = FrameClass(self.container, self)
             self.frames[FrameClass] = frame
             self.container.addWidget(frame)
@@ -14286,6 +15071,8 @@ class InvoiceApp(QMainWindow):
         sc.register_contextual("Ctrl+N", DashboardFrame,   self._sc_new_invoice,      "New Invoice", around, display="Ctrl+N")
         sc.register_contextual("Ctrl+N", ClientsFrame,     self._sc_new_client,       "New Client",  around, display="Ctrl+N")
         sc.register_contextual("Ctrl+N", CatalogFrame,     self._sc_new_catalog_item, "New Item",    around, display="Ctrl+N")
+        sc.register_contextual("Ctrl+N", QuotationsFrame,  self._sc_new_quotation,    "New Quotation", around, display="Ctrl+N")
+        sc.register_contextual("Ctrl+N", QuotationFormFrame, self._sc_new_quotation,  "New Quotation", around, show_in_reference=False)
         # Also meaningful while already on the invoice form (start another blank one); kept out of the reference card
         # to avoid a confusing near-duplicate line right under "New Invoice (Invoices page)".
         sc.register_contextual("Ctrl+N", InvoiceFormFrame, self._sc_new_invoice,      "New Invoice", around, show_in_reference=False)
@@ -14306,6 +15093,8 @@ class InvoiceApp(QMainWindow):
         # ---- Contextual: Clients / Items search boxes -----------------------
         sc.register_contextual("Ctrl+F", ClientsFrame, lambda: self.frames[ClientsFrame].focus_search(), "Search", around, display="Ctrl+F")
         sc.register_contextual("Ctrl+F", CatalogFrame, lambda: self.frames[CatalogFrame].focus_search(), "Search", around, display="Ctrl+F")
+        sc.register_contextual("Ctrl+F", QuotationsFrame, lambda: self.frames[QuotationsFrame].focus_search(), "Search", around,
+                               display="Ctrl+F")
 
         # ---- Contextual: Invoice Form -------------------------------------
         sc.register_contextual("Ctrl+S", InvoiceFormFrame, self._sc_save_invoice, "Save the Invoice", writing, display="Ctrl+S")
@@ -14319,6 +15108,19 @@ class InvoiceApp(QMainWindow):
         sc.register_contextual("F2", InvoiceFormFrame, self._sc_edit_item, "Edit the Selected Item", writing, display="F2")
         # Esc on the invoice form == clicking "Back to Invoices": same method, same unsaved-changes confirmation.
         sc.register_contextual("Esc", InvoiceFormFrame, self._sc_back_to_dashboard, "Back to the Invoices Page", writing, display="Esc")
+        # The quotation form is the invoice form for an offer: the same keys do the same things there (not listed again).
+        quote = QuotationFormFrame
+        sc.register_contextual("Ctrl+S", quote, self._sc_save_quotation, "Save the Quotation", writing, show_in_reference=False)
+        sc.register_contextual("Ctrl+Shift+A", quote, self._sc_add_quote_item, "Add an Item", writing, show_in_reference=False)
+        sc.register_contextual(("Ctrl+=", "Ctrl++"), quote, self._sc_add_quote_item, "Add Another Item", writing,
+                               show_in_reference=False, auto_repeat=True)
+        sc.register_contextual("Ctrl+Shift+Del", quote, self._sc_remove_quote_item, "Remove the Selected Item", writing,
+                               show_in_reference=False, auto_repeat=True)
+        sc.register_contextual("Ctrl+-", quote, self._sc_remove_quote_item, "Remove an Item", writing, show_in_reference=False,
+                               auto_repeat=True)
+        sc.register_contextual("F2", quote, self._sc_edit_quote_item, "Edit the Selected Item", writing, show_in_reference=False)
+        sc.register_contextual("Esc", quote, self._sc_back_to_quotations, "Back to the Quotations Page", writing,
+                               show_in_reference=False)
         # Native Qt field traversal / per-widget Enter handling, not a central registration -- documented here anyway
         # so the reference card stays the one complete list of shortcuts.
         sc.register_info("Tab / Shift+Tab", "Move Between Fields", writing)
@@ -14352,6 +15154,26 @@ class InvoiceApp(QMainWindow):
 
     def _sc_new_client(self):
         self.frames[ClientsFrame].new_client()
+
+    def _sc_new_quotation(self):
+        """Ctrl+N on the Quotations page, or on the quotation form itself: start a fresh quotation (show_frame() asks
+        first when the form has unsaved changes)."""
+        self.show_frame(QuotationFormFrame)
+
+    def _sc_save_quotation(self):
+        self.frames[QuotationFormFrame].save()
+
+    def _sc_add_quote_item(self):
+        self.frames[QuotationFormFrame].add_item()
+
+    def _sc_remove_quote_item(self):
+        self.frames[QuotationFormFrame].remove_selected_item()
+
+    def _sc_edit_quote_item(self):
+        self.frames[QuotationFormFrame].edit_selected_item()
+
+    def _sc_back_to_quotations(self):
+        self.show_frame(QuotationsFrame)
 
     def _sc_new_catalog_item(self):
         self.frames[CatalogFrame].new_catalog_item()
@@ -14430,8 +15252,10 @@ class InvoiceApp(QMainWindow):
         frame = self.frames[frame_class]
         page_changed = frame_class is not previous
         self.container.setCurrentWidget(frame)
-        # The invoice form belongs to the Invoices page in the menu: that button stays highlighted while it is open.
-        active = frame_class.__name__ if frame_class in (DashboardFrame, ClientsFrame, CatalogFrame) else "DashboardFrame"
+        # The invoice form belongs to the Invoices page in the menu (that button stays highlighted while it is open), the
+        # quotation form to the Quotations page.
+        active = (frame_class.__name__ if frame_class in (DashboardFrame, ClientsFrame, CatalogFrame, QuotationsFrame) else
+                  "QuotationsFrame" if frame_class is QuotationFormFrame else "DashboardFrame")
         self.sidebar.set_active(active)
         self._current_frame_class = frame_class
         if refresh and hasattr(frame, "on_show"):
@@ -14445,6 +15269,8 @@ class InvoiceApp(QMainWindow):
             "ClientsFrame": ClientsFrame,
             "CatalogFrame": CatalogFrame,
             "InvoiceFormFrame": InvoiceFormFrame,
+            "QuotationsFrame": QuotationsFrame,
+            "QuotationFormFrame": QuotationFormFrame,
         }
         self.show_frame(mapping[name])
 
@@ -14531,6 +15357,30 @@ class InvoiceApp(QMainWindow):
             logger.error("Statement failed (%s): %s", request.get("client"), exc, exc_info=True)
             q.put({"status": "error", "message": f"The statement could not be made.\n\n{exc}"})
 
+    def open_quotation_pdf(self, number: str) -> None:
+        """View / Print on the Quotations page: makes the quotation's PDF in the background and shows it."""
+        self.show_progress(True, "Preparing the quotation…")
+        threading.Thread(target=self._quotation_worker, args=(number, self.task_queue), daemon=True).start()
+
+    def _quotation_worker(self, number: str, q: queue.Queue) -> None:
+        """Background thread: makes the quotation PDF and hands it to the GUI through the queue."""
+        try:
+            path, info = make_quotation_pdf(self.db_manager, number)
+            q.put({"status": "success", "kind": "quotation", "path": path, "invoice_data": info})
+        except Exception as exc:
+            logger.error("Quotation PDF failed (%s): %s", number, exc, exc_info=True)
+            q.put({"status": "error", "message": f"The quotation could not be made.\n\n{exc}"})
+
+    def make_invoice_from_quotation(self, number: str) -> None:
+        """Make Invoice on the Quotations page: turns the quotation into an invoice and opens that invoice, so it can be
+        looked over (and changed) before it is sent."""
+        ok, result = self.db_manager.convert_quotation_to_invoice(number)
+        if not ok:
+            Messagebox.show_error("Could Not Make the Invoice", result, parent=self)
+            return
+        notify(self, f"Invoice {result} made from quotation {number}.")
+        self.show_frame(InvoiceFormFrame, result)
+
     def _on_settings_saved(self, new_theme: Optional[str] = None) -> None:
         # 1. LIVE THEME SWITCHING: one application-wide stylesheet + palette swap re-colours every widget that exists,
         #    including the multi-line boxes the Tk build had to walk and re-theme by hand (_retheme_text_widgets). (Colours
@@ -14579,7 +15429,7 @@ class InvoiceApp(QMainWindow):
                 self.show_progress(False)
                 if msg["status"] == "success":
                     PDFViewer(self, msg["path"], invoice_data=msg.get("invoice_data")).show()
-                    if msg.get("kind") != "statement":              # a statement changes nothing on the Invoices page
+                    if msg.get("kind") not in ("statement", "quotation"):    # these change nothing on the Invoices page
                         self.frames[DashboardFrame].on_show()
                 else:
                     Messagebox.show_error("Error", msg.get("message", "An unknown error occurred."), parent=self)
