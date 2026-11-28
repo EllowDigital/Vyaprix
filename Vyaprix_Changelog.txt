@@ -1,0 +1,428 @@
+====================================================================================================
+VYAPRIX - COMPLETE CHANGELOG
+The record of every version and build of Vyaprix, newest first.
+====================================================================================================
+
+  Latest version : v2.5
+  Latest build   : 2.5.100
+  Released on    : 27 November 2026
+
+
+HOW TO READ THIS FILE
+----------------------------------------------------------------------------------------------------
+  - Versions are listed newest first. Changes that carry a build number are listed newest first too.
+  - A build number looks like 2.5.100. The first part is the version (here v2.5). The last part
+    counts every change made to Vyaprix since version v1.5 (build 1.5.2), so every change adds one
+    to it and it never goes back.
+  - A version carries the date its newest build was handed over.
+  - Changes are written in plain words, exactly as they were recorded for each version.
+
+
+VERSIONS AT A GLANCE
+----------------------------------------------------------------------------------------------------
+  v2.5  -  newest build 2.5.100  -  27 November 2026  -  18 changes
+        Payment reminders, customer statements and quotations
+  v2.4  -  newest build 2.4.82  -  23 November 2026  -  46 changes
+        A friendlier Vyaprix: correct amounts, easier payments and plain wording
+  v2.3  -  newest build 2.3.36  -  12 November 2026  -  12 changes
+        One GST line, professional A4 invoices, sharp and responsive on every screen
+  v2.2  -  newest build 2.2.24  -  10 November 2026  -  3 changes
+        Invoice templates
+  v2.1  -  newest build 2.1.21  -  9 November 2026  -  14 changes
+        Professional invoicing
+  v2.0  -  newest build 2.0.7  -  6 November 2026  -  7 changes
+        Rebuilt for a sharper, faster app
+  v1.5  -  build 1.5.2  -  22 October 2026  -  the version that v2.0 was rebuilt from
+
+
+BUILDS HANDED OVER
+----------------------------------------------------------------------------------------------------
+  Build 2.5.100   27 November 2026   (latest)
+  Build 2.5.93   26 November 2026
+  Build 2.5.87   25 November 2026
+  Build 2.4.82   23 November 2026
+  Build 2.4.76   21 November 2026
+  Build 2.4.70   20 November 2026
+  Build 2.4.50   14 November 2026
+  Build 2.3.36   12 November 2026   (newest build of v2.3)
+  Build 2.2.24   10 November 2026   (newest build of v2.2)
+  Build 2.1.21   9 November 2026    (newest build of v2.1)
+  Build 2.0.7    6 November 2026    (newest build of v2.0)
+  Build 1.5.2    22 October 2026    (the starting point, v1.5)
+
+  For v2.0 to v2.3 the record keeps one date per version, the day its newest build was handed over;
+  the build numbers shown for them follow the counting rule above.
+
+
+====================================================================================================
+v2.5 - Payment reminders, customer statements and quotations
+Released 27 November 2026  |  newest build 2.5.100  |  18 changes
+====================================================================================================
+
+BUILDS 2.5.94 TO 2.5.100 - 27 November 2026
+
+  2.5.100  Help has a new topic, "Send a quotation and turn it into an invoice", and the shortcut
+           list shows the new keys for the Quotations page (New Quotation and Search). The menu now
+           has one more entry; in a window that is not very tall it switches to pictures only a
+           little earlier, so every entry stays in view. In a narrow window the line under the title
+           of the Clients, Items and Quotations pages now ends in "..." instead of being cut off.
+
+  2.5.99  Quotations are kept completely apart from invoices: they never appear on the Invoices
+          page, in its totals, in the overdue list or reminders, in a customer statement or in the
+          spreadsheet saved from the Invoices page. A backup made before this version restores
+          without losing anything, and the Quotations page simply starts empty.
+
+  2.5.98  "View / Print" makes the quotation as a PDF in your own letterhead, logo and invoice look,
+          with QUOTATION as its title, the quotation number, date, "Valid Until" and payment terms,
+          the items, GST and discount, and the "Quotation Total". It says "This is a quotation, not
+          a tax invoice. It is valid until ..." and prints no payment details or QR code. It opens
+          in the same window as an invoice, so you can print it, save a copy or share it by WhatsApp
+          or email in quotation wording ("Please find attached our quotation ... It is valid until
+          ..."). Quotations are kept in their own "quotations" folder next to your invoices.
+
+  2.5.97  "Mark as" writes down the customer's answer: Accepted, Declined, or Open again. A declined
+          quotation cannot be made into an invoice until you open it again, and a quotation that has
+          become an invoice can no longer be changed, so the offer and the invoice never disagree.
+          Deleting a quotation never touches an invoice made from it. A quotation you have just
+          saved is shown selected on the list, with its buttons ready.
+
+  2.5.96  When the customer says yes, select the quotation and press "Make Invoice". Vyaprix makes
+          the invoice for you with today's date and the next free invoice number, and the same
+          customer, items, prices, GST, discount, notes and terms. The due date follows the payment
+          terms (for example Net 15, or Due on receipt), and the invoice starts unpaid with a note
+          saying which quotation it came from. It opens at once so you can still change it. The
+          quotation is marked Invoiced, and the invoice total always matches the quotation to the
+          paisa. If anything goes wrong, no invoice is made and the quotation stays as it was.
+
+  2.5.95  Press "New Quotation" (or Ctrl+N on the Quotations page) to make an offer before the work
+          is agreed. The quotation form is the invoice form you already know, with the same
+          customer, items, GST, discount and look, but it has a "Valid For" choice (7, 15, 30, 45,
+          60 or 90 days, or a date you pick) instead of a due date, and no payments, free-of-charge
+          switch or QR code, because nothing is owed yet. The number follows on by itself (QT-001,
+          QT-002 and so on) and can be changed.
+
+  2.5.94  A new "Quotations" entry in the menu opens the Quotations page, a list of every quotation
+          with its customer, date, the last day it is valid, amount and status: Open, Accepted,
+          Expired, Declined or Invoiced. You can search by number, customer, reference or status,
+          and show only one kind of quotation. A quotation nobody answered turns to Expired by
+          itself when its last valid day has passed.
+
+BUILDS 2.5.88 TO 2.5.93 - 26 November 2026
+
+  2.5.93  A long statement carries on over as many pages as it needs, with the table heading
+          repeated, the customer's name at the top of every page after the first and "Page x of y"
+          at the bottom. Help has a new topic, "Make a statement for a customer".
+
+  2.5.92  A finished statement opens in the same window as an invoice, so you can print it, save a
+          copy or share it. Sharing by WhatsApp or email uses statement wording ("Please find
+          attached your account statement ... The amount due is ...") with the WhatsApp number and
+          email address filled in from the client's details. Statements are kept in their own
+          "statements" folder next to your invoices, and making a statement never changes any
+          invoice or payment.
+
+  2.5.91  Below the lines of the statement come the invoices that are still unpaid at the end of the
+          period, each with its due date, what has been paid, what is still to pay and how many days
+          late it is, and a strip that sorts the unpaid money by age (not yet due, 1-30, 31-60,
+          61-90 and over 90 days late). Your bank details, UPI ID and QR code are printed only while
+          money is owed, or always if Settings says so.
+
+  2.5.90  The statement is a PDF with your own letterhead, logo and invoice look. It shows the
+          customer, the period and four figures at a glance (opening balance, invoiced, payments
+          received and amount due), then every invoice and every payment in date order with the
+          balance after each line, ending with the closing balance. Money a customer paid in advance
+          is taken off and shown as "Advance / Credit".
+
+  2.5.89  The statement period can be this financial year (1 April to 31 March), last financial
+          year, this month, last month, the last 3 months, the last 12 months, everything so far, or
+          dates you choose yourself. A line under the dates tells you, before you make the
+          statement, how many invoices and payments it will hold and how much the customer owes at
+          the end. A first date that comes after the last date is not accepted.
+
+  2.5.88  A new "Statement" button on the Clients page, and a "Customer Statement" choice when you
+          right-click a client or an invoice, open the new Customer Statement window. Choose the
+          customer and the period, then press Create Statement. Each customer is listed once,
+          however their name was typed (capital letters and extra spaces make no difference), and
+          customers who only have free invoices are left out.
+
+BUILDS 2.5.83 TO 2.5.87 - 25 November 2026
+
+  2.5.87  You can also right-click an overdue invoice and choose "Send Payment Reminder" to remind
+          its client at once; the choice is greyed out for invoices that are not overdue. Help has a
+          new topic, "Remind a customer to pay".
+
+  2.5.86  Vyaprix remembers the day each client was last reminded and how many reminders were sent.
+          The Overdue Payments window shows it, and so does the hint on the "Due On" date of an
+          overdue invoice. A copy of an invoice starts with no reminders, and the spreadsheet saved
+          from the Invoices page now includes the day of the last reminder and the number of
+          reminders.
+
+  2.5.85  Vyaprix writes a friendly payment reminder for each late client: their overdue invoices,
+          how much is still to pay on each, how many days late it is, and how to pay (your UPI ID
+          and bank details from Settings). You can change the message, then send it by WhatsApp or
+          email, which open with the message ready, or copy it. The WhatsApp number and the email
+          address are filled in from the client's invoices or the Clients page, and a 10-digit
+          Indian mobile number gets the +91 code added for WhatsApp. When a message is too long for
+          an email link, it is copied for you to paste into the email.
+
+  2.5.84  The new Overdue Payments window lists every client who is late with a payment, the client
+          who is most overdue first. For each client it shows how many invoices are overdue, how
+          much is still to pay, how many days late the oldest one is and when the client was last
+          reminded. Press Send Reminder, or the Enter key, to write to the selected client.
+
+  2.5.83  A red bar now appears above the Invoices list whenever something is overdue. It shows how
+          many invoices are overdue and how much money is waiting to be collected, with a "Send
+          Reminders" button.
+
+
+====================================================================================================
+v2.4 - A friendlier Vyaprix: correct amounts, easier payments and plain wording
+Released 23 November 2026  |  newest build 2.4.82  |  46 changes
+====================================================================================================
+
+BUILDS 2.4.77 TO 2.4.82 - 23 November 2026
+
+  2.4.82  If the part of Vyaprix that joins invoices into one file is missing from a computer, the
+          message now says so in plain words and asks you to reinstall Vyaprix, instead of showing
+          technical instructions.
+
+  2.4.81  Spreadsheet files saved from the Invoices page now open in Excel with every name and
+          symbol correct, including accented letters, Indian-language text and the rupee sign.
+
+  2.4.80  Messages on the invoice form that ask you to check something now carry the same friendly
+          heading, "Please Check", as the rest of Vyaprix. They used to say "Validation".
+
+  2.4.79  The record of every version and build now lives in this separate text file instead of
+          inside the program, so it can be kept up to date and read online without changing Vyaprix.
+
+  2.4.78  The About window is simpler and tidier: it shows the version, the build, the release date
+          and who made Vyaprix, with one Close button. The hint on the About button in the menu now
+          says which version you are using and who made Vyaprix.
+
+  2.4.77  The "What's New" button is removed from the About window, and so is the "What's New"
+          window with its long list of changes. The list of changes is no longer shown anywhere
+          inside Vyaprix.
+
+EARLIER IN v2.4 - up to build 2.4.76 (21 November 2026) - 40 changes
+
+  - Vyaprix stays light for days on end: a moment after a window or a picture is closed it is
+    cleared from memory, and when Vyaprix is minimized or left in the background it gives back the
+    memory it is not using, so Task Manager shows a much smaller number.
+  - Windows fade in as they open, an error message eases in under its box, and the "working" strip
+    and the "nothing here yet" note appear softly instead of popping up. All the movement follows
+    the "Smooth movement" switch and the Windows setting for reduced animation.
+  - The highlight in the menu glides to the page you choose and brightens under the mouse, and
+    on/off switches slide instead of jumping.
+  - The four figures on the Invoices page run up from zero when Vyaprix opens, and run up or down to
+    the new numbers whenever an invoice changes them.
+  - Pick a colour theme in Settings and the whole of Vyaprix changes at once, with the old colours
+    melting into the new ones, so you can see how every page looks before you save. Closing Settings
+    without saving puts the saved colours back.
+  - The Settings window has minimize, maximize and full-screen buttons (F11 for full screen, Esc to
+    leave it). It opens in the middle of Vyaprix and remembers the size you gave it.
+  - Every invoice line now shows its amount after the discount: Amount = Quantity x Rate - Discount.
+    The invoice form, the preview and the PDF all show the same figures, and the subtotal, the
+    discount, the total, the amount paid, the balance due and the total in words always agree with
+    the Amount column.
+  - Recording a payment now has a Reference box that changes with the payment method: the 12-digit
+    UPI transaction ID (UTR), the cheque number, or the reference / authorization number for a bank
+    transfer or a card. The Note box is still there for anything else, such as "Received from my
+    brother".
+  - The payment reference is saved with the payment and printed in the payment list on the invoice.
+  - A new "Record Payment" window on the Invoices page: add a payment to any invoice without opening
+    it.
+  - The Invoices page has an "Overdue" filter for unpaid invoices whose due date has passed, a "Due
+    On" column (shown in red when late) and a short line on each summary card that says what it adds
+    up.
+  - Settings opens in a window of its own, with its own button on the taskbar, so it can sit beside
+    Vyaprix while you work. Esc closes it, Ctrl+S saves, and the invoice you were writing is kept
+    exactly as it was while you look at Settings.
+  - Vyaprix lets go of what it no longer needs: closed pages, finished previews and old pictures are
+    cleared from memory, so it stays quick and light even after a long day of use.
+  - A free (complimentary) invoice starts with the payment terms "No payment required"; switching it
+    back to a normal invoice brings your own terms back.
+  - A new "Print on the invoice" box on the New Invoice page: print the notes and the terms, only
+    the terms, only the notes, or neither.
+  - The invoice list, the invoice form and Settings fit the window, from a small laptop screen to a
+    large monitor.
+  - The menu on the left can be folded away: press "Hide menu" (or Ctrl+\) and it slides in to a
+    narrow strip of pictures; press "Show menu" and it slides back out. Vyaprix remembers how you
+    left it.
+  - A new welcome screen: a rounded card with a soft shadow, an invoice that writes itself while
+    Vyaprix gets ready and a green READY stamp at the end. It fits any screen size, and a click
+    skips the wait.
+  - Vyaprix opens faster: the welcome screen follows what the app is really doing and gives way as
+    soon as everything is ready, instead of always waiting two and a half seconds.
+  - Everything on screen is written in plain words. "Dashboard" is now "Invoices", "Catalog" is
+    "Items", "Import Database" is "Restore from a backup", and no message uses technical terms.
+  - A new Help window (F1, or Help in the menu): short answers to the questions people ask most,
+    each with a button that takes you straight to the right place, such as starting an invoice or
+    saving a backup.
+  - Pages fade in gently, and good news such as "Invoice saved" appears as a small message that
+    slides up and goes away by itself, so nobody has to click OK.
+  - Two new switches in Settings > General: smooth movement and the welcome screen. Vyaprix also
+    follows the Windows setting for reduced animation.
+  - Tips and clearer wording in Settings, on the invoice form, in the keyboard shortcuts list and in
+    every message.
+  - The version, the build number and the release date are the same everywhere they appear: About,
+    What's New and the details stored inside every PDF invoice.
+  - What's New shows the date of every release next to its notes, and marks the release you are
+    running.
+  - The status watermark (PAID, BALANCE DUE ...) is fixed: it is no longer half hidden and half
+    shown. It is now drawn last, on top of the page, with real transparency and sized to the page,
+    so shaded rows, total boxes and colour bands can no longer cover part of it, and the text under
+    it stays readable.
+  - The status watermark can be switched off for every invoice: "Show the status watermark" in
+    Settings > Invoice Design.
+  - It can also be shown or hidden for a single invoice: the new "Status Watermark" box on the
+    invoice form (Default, On or Off) is remembered with the invoice.
+  - Payment and Invoice Design are now two separate pages in Settings. Payment: currency, bank
+    account, UPI ID and QR code, payment terms and notes, and when the payment details are printed.
+    Invoice Design: template and brand colour, status watermark, total in words, footer note and
+    default terms.
+  - Settings is redesigned: a side menu of six pages -- General, Your Details, Payment, Invoice
+    Design, Logo & Signature and Backup & Restore -- each made of cards that say what their settings
+    do.
+  - Settings fits every window size: the menu shrinks to pictures in a narrow window and two-column
+    cards flow into one column.
+  - Mistakes are explained next to the box (email, phone number, GSTIN, custom currency symbol). A
+    page that has one is marked in the menu, and Save takes you straight to it instead of showing a
+    pop-up.
+  - Settings tells you whether there is anything to save, Ctrl+S saves, and leaving Settings with
+    unsaved changes asks first.
+  - "Preview sample invoice" prints from what is on the screen, so a template, colour or watermark
+    setting can be tried before it is saved.
+  - Logo, signature and UPI QR code: drop a picture onto its row, a file that is not a readable
+    picture is refused, and going Back without saving puts back the pictures you replaced.
+  - The UPI QR code is now set up beside the UPI ID on the Payment page; Logo & Signature keeps the
+    logo and the signature.
+  - The GSTIN is written in capitals for you when you leave the box.
+  - Backup & Restore shows where your data is kept, with "Copy path" and "Show in folder" buttons.
+  - Data and backups made by earlier versions are upgraded automatically to remember each invoice's
+    watermark choice; older invoices follow the Settings switch.
+
+
+====================================================================================================
+v2.3 - One GST line, professional A4 invoices, sharp and responsive on every screen
+Released 12 November 2026  |  newest build 2.3.36  |  12 changes
+====================================================================================================
+
+  - CGST and SGST (or IGST) appear once on the invoice form and on the PDF -- one combined line
+    each, however many GST rates the items use. Hover the line on the form to see the split by rate.
+  - A "GST summary" on the PDF shows the taxable value and the tax at each rate whenever an invoice
+    uses more than one rate.
+  - The invoice PDF is redesigned for A4: header, bill-to and invoice details, items, totals,
+    payment box and signature on even margins, in all four templates.
+  - Long invoices run on to as many A4 pages as they need: the item headings repeat on every page,
+    no line is ever cut in two, and each page carries the invoice number and "Page x of y".
+  - Auto-fit: an invoice that runs only a few lines onto an extra page is fitted onto fewer pages --
+    the gaps tighten a little, the type stays the same size.
+  - The item columns size themselves to what is in them -- quantity, unit, rate, HSN / SAC, GST %
+    and amounts never wrap or get cut, and long descriptions wrap inside their cell.
+  - Very large amounts and very long names, addresses and notes still fit inside the page.
+  - The small previews of each invoice template in Settings are redrawn to match the new layouts.
+  - Vyaprix follows your Windows display scale: 125 % or 150 % is followed exactly, the logo, icons
+    and template previews stay sharp, and the invoice preview and Settings sharpen again when you
+    move them to another monitor.
+  - The main window opens at a size that fits your screen, cannot be made too small to use, and fits
+    itself again when you move it to a smaller monitor.
+  - The menu on the left shrinks to pictures in a narrow window and drops the logo in a short one,
+    so every screen stays usable as you resize.
+  - The version, the build number and the "What's New" list all come from one list of changes: the
+    build number counts every change made since v1.5 (build 1.5.2).
+
+
+====================================================================================================
+v2.2 - Invoice templates
+Released 10 November 2026  |  newest build 2.2.24  |  3 changes
+====================================================================================================
+
+  - Four invoice templates -- Classic, Modern, Minimal and Corporate -- picked in Settings > Invoice
+    Design, with a small preview of each and a "Preview sample invoice" button.
+  - A brand colour for Modern, Minimal and Corporate: ten ready colours, or any colour of your own.
+  - A template can be chosen for a single invoice ("Invoice Look" on the invoice form) and is
+    remembered with it.
+
+
+====================================================================================================
+v2.1 - Professional invoicing
+Released 9 November 2026  |  newest build 2.1.21  |  14 changes
+====================================================================================================
+
+  - Every invoice line has a quantity, a unit and a rate (250 Nos x Rs. 50); the line amount is
+    worked out for you.
+  - One saved item can be sold in several units, each with its own rate, and Vyaprix remembers the
+    rate per unit.
+  - GST for the whole invoice or a different GST rate for every item, chosen per invoice.
+  - HSN / SAC code on every item, saved with the item.
+  - Item discounts as an amount or a percentage, besides the overall discount.
+  - The place of supply decides CGST + SGST or IGST (a customer's GSTIN fills it in).
+  - Due date (on receipt, 7, 15, 30 ... days, or a date you pick), customer PO / reference number
+    and a reverse-charge flag.
+  - Optional round off of the invoice total to the nearest rupee.
+  - Notes for the customer and Terms & Conditions printed on the invoice, with default terms set in
+    Settings.
+  - The invoice total in words (Rupees ... Only), switched on in Settings.
+  - The Items page shows and edits unit, HSN / SAC, GST % and the other units an item is sold in.
+  - The PDF prints quantity, unit, rate, discount and GST columns whenever an invoice uses them;
+    older invoices print as before.
+  - Data and backups made by earlier versions are upgraded automatically; saved invoices keep
+    exactly their totals.
+  - Faster entry: Enter in the last field of the last line adds a new line.
+
+
+====================================================================================================
+v2.0 - Rebuilt for a sharper, faster app
+Released 6 November 2026  |  newest build 2.0.7  |  7 changes
+====================================================================================================
+
+  - The whole app is rebuilt from the ground up, so it looks sharper and responds faster.
+  - Vyaprix starts faster, because each part is only loaded when it is first needed.
+  - The invoice preview is built in: zoom, page navigation, print and share.
+  - Several invoices can be joined into one file for printing in a single step.
+  - Eight colour themes, including dark ones.
+  - Every screen of the earlier version is kept: the invoice list, the invoice form, Clients, Items,
+    Settings, About, Keyboard Shortcuts and the welcome screen.
+  - Windows and dialogs never open larger than the screen they are on.
+
+
+====================================================================================================
+v1.5 - the starting point
+Build 1.5.2  |  22 October 2026
+====================================================================================================
+
+  This is the version that Vyaprix v2.0 was rebuilt from. The record in this file starts with that
+  rebuild; changes made before build 1.5.2 are not part of it.
+
+
+====================================================================================================
+FOR THE DEVELOPER
+Not needed by users. Remove this part before publishing the file online, if you like.
+====================================================================================================
+
+Recording the next build
+  1. Add a line for every change at the top of the newest version's section above, newest first,
+     each with its build number. The number counts every change made since v1.5, so after build
+     2.5.100 comes 2.5.101.
+  2. In section 1 of Vyaprix.py set APP_BUILD_VERSION to the same number and APP_RELEASE_DATE to the
+     day the build is handed over (and APP_VERSION when a new version starts). These values are what
+     the About window, the opening screen, the menu and the PDF invoices show.
+  3. Update "Latest build" and "Released on" at the top of this file, the "Versions at a glance" and
+     "Builds handed over" lists, and the heading of the version (its date, newest build and number
+     of changes).
+  4. A new version starts a new section above v2.5 with its own heading, date and title. Its build
+     numbers continue the same count: v2.6 would begin with build 2.6.101.
+
+Where the version information lives in the program
+  APP_NAME, APP_VERSION, APP_BUILD_VERSION, APP_RELEASE_DATE and APP_TAGLINE, in section 1 of
+  Vyaprix.py. The program no longer contains a list of changes, a What's New window or a What's New
+  button.
+
+Bringing the What's New button back once this file is published online
+  Add a What's New button to the About window that opens the web address of the published file, for
+  example with QDesktopServices.openUrl(QUrl(address)). Nothing else in the program needs to change.
+
+  Earlier history: v1.5 / build 1.5.2 was the Tkinter build of 22 October 2026. The notes of v2.0 to
+  v2.4 above were copied unchanged from the program's own list of changes (76 changes up to build
+  2.4.76).
+
+End of file.
